@@ -98,6 +98,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     # try/catch blocks in our code are compiled away and any throw
     # becomes an uncaught exception.
     target_compile_options(${BINARY} PRIVATE -fexceptions)
+    set_property(TARGET ${BINARY} APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_SOURCE_DIR}/web/shell.html")
     target_link_options(${BINARY} PRIVATE
         "--shell-file=${CMAKE_SOURCE_DIR}/web/shell.html"
         "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/misc@misc"
@@ -321,6 +323,8 @@ if(EMSCRIPTEN)
         dawn::webgpu_dawn
     )
     target_include_directories(imgui_webgpu_demo SYSTEM BEFORE PUBLIC ${GLADIUS_WEBGPU_INCLUDE_DIR})
+    set_property(TARGET imgui_webgpu_demo APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_SOURCE_DIR}/web/shell.html")
     set_target_properties(imgui_webgpu_demo
         PROPERTIES
             SUFFIX ".html"

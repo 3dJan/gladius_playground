@@ -1398,6 +1398,14 @@ namespace gladius::ui
                         }
                     }
 
+#ifdef __EMSCRIPTEN__
+                    if (bigMenuItem(
+                          reinterpret_cast<const char *>(ICON_FA_DOWNLOAD "\tDownload 3MF")))
+                    {
+                        save();
+                    }
+#endif
+
                     ImGui::EndMainMenuBar();
                 }
                 ImGui::PopStyleVar();
@@ -1937,11 +1945,20 @@ namespace gladius::ui
                 closeMenu();
                 importImageStack();
             }
+#ifdef __EMSCRIPTEN__
+            if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_DOWNLOAD
+                                                               "\tDownload 3MF")))
+            {
+                closeMenu();
+                save();
+            }
+#else
             if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave As")))
             {
                 closeMenu();
                 saveAs();
             }
+#endif
 
             if (ImGui::MenuItem(
                   reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave Current Function As")))
@@ -2441,27 +2458,41 @@ namespace gladius::ui
         m_mainView.startMainLoop();
     }
 
-    void MainWindow::save()
+    bool MainWindow::save()
     {
         // Allow saving even if compute is disabled; just skip thumbnail generation.
         if (!m_doc)
         {
-            return;
+            return false;
         }
-        if (m_currentAssemblyFileName->empty())
+
+#ifdef __EMSCRIPTEN__
+        return saveBrowser3mf();
+#else
+        if (!m_currentAssemblyFileName || m_currentAssemblyFileName->empty())
         {
-            saveAs();
-            return;
+            return saveAs();
         }
         enqueueNativeSave(m_currentAssemblyFileName.value());
+        return true;
+#endif
     }
 
-    void MainWindow::saveAs(std::filesystem::path defaultPath)
+    bool MainWindow::saveAs(std::filesystem::path defaultPath)
     {
         // Allow saving even if compute is disabled; just skip thumbnail generation.
-        if (!m_doc || m_asyncFileDialog.isActive())
+        if (!m_doc)
         {
-            return;
+            return false;
+        }
+
+#ifdef __EMSCRIPTEN__
+        (void) defaultPath;
+        return saveBrowser3mf();
+#else
+        if (m_asyncFileDialog.isActive())
+        {
+            return false;
         }
         if (defaultPath.empty())
         {
@@ -2469,7 +2500,118 @@ namespace gladius::ui
         }
         m_asyncDialogOp = AsyncDialogOperation::SaveAs;
         m_asyncFileDialog.saveFile({"*.implicit.3mf"}, defaultPath);
+        return true;
+#endif
     }
+
+#ifdef __EMSCRIPTEN__
+    bool MainWindow::saveBrowser3mf()
+    {
+        if (!m_doc)
+        {
+            return false;
+        }
+
+        auto const sourcePath = m_currentAssemblyFileName.value_or(std::filesystem::path{});
+        auto downloadName = sourcePath.empty() ? std::filesystem::path{"gladius-model.3mf"}
+                                               : sourcePath.filename();
+        if (downloadName.empty())
+        {
+            downloadName = "gladius-model.3mf";
+        }
+        if (downloadName.extension().empty())
+        {
+            downloadName += ".3mf";
+        }
+
+        auto const logicalSavePath = sourcePath.empty() ? downloadName : sourcePath;
+        auto const temporaryPath = makeBrowserSaveTempPath();
+
+        auto reportFailure = [this](std::string const & message)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent({message, events::Severity::Error});
+            }
+            EM_ASM({
+                if (window.gladiusSetBrowserFileStatus) {
+                    window.gladiusSetBrowserFileStatus(
+                      '3MF download failed: ' + UTF8ToString($0), true);
+                }
+            }, message.c_str());
+        };
+
+        std::error_code directoryError;
+        std::filesystem::create_directories(temporaryPath.parent_path(), directoryError);
+        if (directoryError)
+        {
+            reportFailure(fmt::format("Could not prepare the browser download directory: {}",
+                                      directoryError.message()));
+            return false;
+        }
+
+        bool success = false;
+        try
+        {
+            auto snapshot = m_doc->createSaveSnapshot();
+            io::Writer3mf writer(m_logger);
+            if (!writer.save(temporaryPath, snapshot, false))
+            {
+                reportFailure("The 3MF writer rejected the save snapshot.");
+            }
+            else
+            {
+                auto const temporaryPathString = temporaryPath.string();
+                auto const sourcePathString = sourcePath.string();
+                auto const downloadNameString = downloadName.string();
+                int const downloadStarted = EM_ASM_INT({
+                    if (typeof window.gladiusDownloadBrowserFile !== 'function') {
+                        return 0;
+                    }
+                    return window.gladiusDownloadBrowserFile(
+                             UTF8ToString($0), UTF8ToString($1), UTF8ToString($2))
+                               ? 1
+                               : 0;
+                },
+                                                        temporaryPathString.c_str(),
+                                                        sourcePathString.c_str(),
+                                                        downloadNameString.c_str());
+
+                if (downloadStarted == 0)
+                {
+                    reportFailure("The browser did not accept the generated 3MF file.");
+                }
+                else if (!m_doc->completeSave(logicalSavePath,
+                                              snapshot.documentIdentity,
+                                              snapshot.version))
+                {
+                    reportFailure("The document changed while the 3MF file was being saved.");
+                }
+                else
+                {
+                    m_fileChanged = false;
+                    m_currentAssemblyFileName = logicalSavePath;
+                    success = true;
+                }
+            }
+        }
+        catch (std::exception const & exception)
+        {
+            reportFailure(fmt::format("Could not save the editable 3MF project: {}",
+                                      exception.what()));
+        }
+
+        std::error_code cleanupError;
+        std::filesystem::remove(temporaryPath, cleanupError);
+        return success;
+    }
+
+    std::filesystem::path MainWindow::makeBrowserSaveTempPath()
+    {
+        return getAppDir() / "browser-downloads" /
+               fmt::format("save-{}.3mf", ++m_browserSaveSequence);
+    }
+#endif
 
     void MainWindow::executeSaveAs(std::filesystem::path const & savePath)
     {
@@ -2830,16 +2972,20 @@ namespace gladius::ui
                 ImGui::SameLine();
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave")))
                 {
-                    save();
-                    m_showSaveBeforeExit = false;
-                    std::exit(EXIT_SUCCESS);
+                    if (save())
+                    {
+                        m_showSaveBeforeExit = false;
+                        std::exit(EXIT_SUCCESS);
+                    }
                 }
                 ImGui::SameLine();
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave As")))
                 {
-                    saveAs();
-                    m_showSaveBeforeExit = false;
-                    std::exit(EXIT_SUCCESS);
+                    if (saveAs())
+                    {
+                        m_showSaveBeforeExit = false;
+                        std::exit(EXIT_SUCCESS);
+                    }
                 }
             }
             else
@@ -2867,9 +3013,11 @@ namespace gladius::ui
                 ImGui::SameLine();
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave As")))
                 {
-                    saveAs();
-                    m_showSaveBeforeExit = false;
-                    std::exit(EXIT_SUCCESS);
+                    if (saveAs())
+                    {
+                        m_showSaveBeforeExit = false;
+                        std::exit(EXIT_SUCCESS);
+                    }
                 }
             }
             ImGui::EndPopup();
@@ -3509,8 +3657,8 @@ namespace gladius::ui
                 ImGui::SameLine();
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave")))
                 {
-                    save();
-                    if (handleOpenAfterAction())
+                    bool const saveSucceeded = save();
+                    if (saveSucceeded && handleOpenAfterAction())
                     {
                         m_showSaveBeforeFileOperation = false;
                         m_pendingFileOperation = PendingFileOperation::None;
@@ -3521,11 +3669,8 @@ namespace gladius::ui
                 ImGui::SameLine();
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave As")))
                 {
-                    // Note: saveAs() is now async, so we can't wait for it
-                    // For now, save synchronously for this popup flow
-                    // This might need refinement later if saveAs truly needs to complete first
-                    saveAs();
-                    if (handleOpenAfterAction())
+                    bool const saveSucceeded = saveAs();
+                    if (saveSucceeded && handleOpenAfterAction())
                     {
                         m_showSaveBeforeFileOperation = false;
                         m_pendingFileOperation = PendingFileOperation::None;
@@ -3582,10 +3727,8 @@ namespace gladius::ui
                 ImGui::SameLine();
                 if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_SAVE "\tSave As")))
                 {
-                    // Note: saveAs() is now async, so we can't wait for it
-                    // For now, save synchronously for this popup flow
-                    saveAs();
-                    if (handleOpenAfterAction())
+                    bool const saveSucceeded = saveAs();
+                    if (saveSucceeded && handleOpenAfterAction())
                     {
                         m_showSaveBeforeFileOperation = false;
                         m_pendingFileOperation = PendingFileOperation::None;

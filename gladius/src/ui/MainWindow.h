@@ -247,9 +247,9 @@ namespace gladius::ui
         void open();
         void merge();
         void resetEditorState();
-        void save();
+        bool save();
         void updateModel();
-        void saveAs(std::filesystem::path defaultPath = {});
+        bool saveAs(std::filesystem::path defaultPath = {});
         void executeSaveAs(std::filesystem::path const & savePath);
         void saveCurrentFunction();
         void importImageStack();
@@ -446,6 +446,14 @@ namespace gladius::ui
                 [[nodiscard]] std::filesystem::path makeNativeSaveTempPath(
                     std::filesystem::path const & filename);
 
+            #ifdef __EMSCRIPTEN__
+                /// @brief Serializes the editable project and downloads it through the browser shell.
+                [[nodiscard]] bool saveBrowser3mf();
+
+                /// @brief Returns a unique temporary path in Emscripten's virtual filesystem.
+                [[nodiscard]] std::filesystem::path makeBrowserSaveTempPath();
+            #endif
+
         // Export state for blocking UI modifications during mesh export
         ExportState m_exportState;
 
@@ -478,6 +486,10 @@ namespace gladius::ui
         std::optional<PendingNativeSave> m_pendingNativeSave;
         uint64_t m_nativeSaveSequence{0};
         bool m_nativeSaveInProgress{false};
+
+    #ifdef __EMSCRIPTEN__
+        uint64_t m_browserSaveSequence{0};
+    #endif
 
         /// @brief Start async compute initialization
         void startAsyncComputeInit();

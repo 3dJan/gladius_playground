@@ -98,6 +98,7 @@
 
       var browserDropSequence = 0;
       var browserImportDirectory = '/gladius/browser-imports';
+      var browserImportNames = Object.create(null);
 
       function getEmscriptenFileSystem() {
         if (typeof FS !== 'undefined') return FS;
@@ -117,6 +118,18 @@
           stem.slice(0, 80) + '.3mf';
       }
 
+      function sanitizeDownloadFilename(candidate, fallback) {
+        var name = String(candidate || '').replace(/\\/g, '/').split('/').pop();
+        name = name.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
+        if (!name || name === '.3mf') {
+          name = String(fallback || 'gladius-model.3mf');
+        }
+        if (!/\.3mf$/i.test(name)) {
+          name += '.3mf';
+        }
+        return name;
+      }
+
       function stageBrowserFile(file, attempt) {
         var fs = getEmscriptenFileSystem();
         if (!fs) {
@@ -131,9 +144,11 @@
 
         var finalPath = browserImportDirectory + '/' + getStagedFilename(file);
         var temporaryPath = finalPath + '.part';
+        browserImportNames[finalPath] = String(file.name || 'dropped-model.3mf');
         try {
           if (typeof fs.mkdirTree === 'function') fs.mkdirTree(browserImportDirectory);
         } catch (error) {
+          delete browserImportNames[finalPath];
           window.gladiusSetBrowserFileStatus('Could not prepare the browser file inbox.', true);
           return;
         }
@@ -145,13 +160,53 @@
             window.gladiusSetBrowserFileStatus('Opening ' + file.name + '…', false);
           } catch (error) {
             try { if (typeof fs.unlink === 'function') fs.unlink(temporaryPath); } catch (_) {}
+            delete browserImportNames[finalPath];
             window.gladiusSetBrowserFileStatus(
               'Could not stage ' + file.name + ' for opening.', true);
           }
         }).catch(function () {
+          delete browserImportNames[finalPath];
           window.gladiusSetBrowserFileStatus('Could not read ' + file.name + '.', true);
         });
       }
+
+      window.gladiusDownloadBrowserFile = function (temporaryPath, sourcePath, fallbackName) {
+        var fs = getEmscriptenFileSystem();
+        if (!fs || typeof fs.readFile !== 'function') {
+          window.gladiusSetBrowserFileStatus(
+            'Gladius is not ready to download files yet. Please try again.', true);
+          return false;
+        }
+
+        try {
+          var bytes = fs.readFile(String(temporaryPath || ''));
+          if (!bytes || bytes.length === 0) {
+            throw new Error('The generated 3MF file is empty.');
+          }
+
+          var originalName = browserImportNames[String(sourcePath || '')];
+          var downloadName = sanitizeDownloadFilename(originalName || fallbackName,
+                                                      fallbackName);
+          var blob = new Blob([bytes], {
+            type: 'application/vnd.ms-package.3dmanufacturing-3mf'
+          });
+          var downloadUrl = URL.createObjectURL(blob);
+          var anchor = document.createElement('a');
+          anchor.href = downloadUrl;
+          anchor.download = downloadName;
+          anchor.style.display = 'none';
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          setTimeout(function () { URL.revokeObjectURL(downloadUrl); }, 0);
+          window.gladiusSetBrowserFileStatus('Downloaded ' + downloadName + '.', false);
+          return true;
+        } catch (error) {
+          window.gladiusSetBrowserFileStatus(
+            'Could not download the edited 3MF file.', true);
+          return false;
+        }
+      };
 
       function clearDropTarget() {
         canvas.classList.remove('gladius-drop-target');
