@@ -107,8 +107,8 @@
         return null;
       }
 
-      function getStagedFilename(file) {
-        var originalName = String(file.name || 'dropped-model');
+      function getStagedFilename(sourceName) {
+        var originalName = String(sourceName || 'dropped-model');
         var safeName = originalName.replace(/\\/g, '/').split('/').pop();
         safeName = safeName.replace(/[^A-Za-z0-9._-]/g, '_');
         var stem = safeName.replace(/\.[^.]*$/, '').replace(/^\.+/, '');
@@ -130,11 +130,13 @@
         return name;
       }
 
-      function stageBrowserFile(file, attempt) {
+      function stageBrowserBytes(buffer, sourceName, attempt) {
         var fs = getEmscriptenFileSystem();
         if (!fs) {
           if (attempt < 100) {
-            setTimeout(function () { stageBrowserFile(file, attempt + 1); }, 50);
+            setTimeout(function () {
+              stageBrowserBytes(buffer, sourceName, attempt + 1);
+            }, 50);
             return;
           }
           window.gladiusSetBrowserFileStatus(
@@ -142,9 +144,10 @@
           return;
         }
 
-        var finalPath = browserImportDirectory + '/' + getStagedFilename(file);
+        var displayName = String(sourceName || 'dropped-model.3mf');
+        var finalPath = browserImportDirectory + '/' + getStagedFilename(displayName);
         var temporaryPath = finalPath + '.part';
-        browserImportNames[finalPath] = String(file.name || 'dropped-model.3mf');
+        browserImportNames[finalPath] = displayName;
         try {
           if (typeof fs.mkdirTree === 'function') fs.mkdirTree(browserImportDirectory);
         } catch (error) {
@@ -153,20 +156,81 @@
           return;
         }
 
-        file.arrayBuffer().then(function (buffer) {
-          try {
-            fs.writeFile(temporaryPath, new Uint8Array(buffer));
-            fs.rename(temporaryPath, finalPath);
-            window.gladiusSetBrowserFileStatus('Opening ' + file.name + '…', false);
-          } catch (error) {
-            try { if (typeof fs.unlink === 'function') fs.unlink(temporaryPath); } catch (_) {}
-            delete browserImportNames[finalPath];
-            window.gladiusSetBrowserFileStatus(
-              'Could not stage ' + file.name + ' for opening.', true);
+        try {
+          var bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+          if (!bytes || bytes.length === 0) {
+            throw new Error('The 3MF file is empty.');
           }
-        }).catch(function () {
+          fs.writeFile(temporaryPath, bytes);
+          fs.rename(temporaryPath, finalPath);
+          window.gladiusSetBrowserFileStatus('Opening ' + displayName + '…', false);
+        } catch (error) {
+          try { if (typeof fs.unlink === 'function') fs.unlink(temporaryPath); } catch (_) {}
           delete browserImportNames[finalPath];
-          window.gladiusSetBrowserFileStatus('Could not read ' + file.name + '.', true);
+          window.gladiusSetBrowserFileStatus(
+            'Could not stage ' + displayName + ' for opening.', true);
+        }
+      }
+
+      function stageBrowserFile(file) {
+        var displayName = String(file.name || 'dropped-model.3mf');
+        file.arrayBuffer().then(function (buffer) {
+          stageBrowserBytes(buffer, displayName, 0);
+        }).catch(function () {
+          window.gladiusSetBrowserFileStatus('Could not read ' + displayName + '.', true);
+        });
+      }
+
+      function getRemoteBrowserFilename(targetUrl) {
+        var pathname = targetUrl.pathname || '';
+        var candidate = pathname.slice(pathname.lastIndexOf('/') + 1);
+        try {
+          candidate = decodeURIComponent(candidate);
+        } catch (_) {
+          // Keep the encoded path segment if it is not valid percent-encoding.
+        }
+        return sanitizeDownloadFilename(candidate, 'remote-model.3mf');
+      }
+
+      function loadBrowserFileFromUrl() {
+        var parameters = new URLSearchParams(window.location.search);
+        var encodedUrl = parameters.get('url');
+        if (encodedUrl === null) return;
+
+        encodedUrl = encodedUrl.trim();
+        if (!encodedUrl) {
+          window.gladiusSetBrowserFileStatus('The 3MF URL is empty.', true);
+          return;
+        }
+
+        var targetUrl;
+        try {
+          targetUrl = new URL(encodedUrl, window.location.href);
+        } catch (_) {
+          window.gladiusSetBrowserFileStatus('The 3MF URL is invalid.', true);
+          return;
+        }
+
+        if ((targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') ||
+            targetUrl.username || targetUrl.password) {
+          window.gladiusSetBrowserFileStatus(
+            'The 3MF URL must use HTTP(S) without embedded credentials.', true);
+          return;
+        }
+
+        var displayName = getRemoteBrowserFilename(targetUrl);
+        window.gladiusSetBrowserFileStatus('Downloading ' + displayName + '…', false);
+        fetch(targetUrl.href, {credentials: 'omit'}).then(function (response) {
+          if (!response.ok) {
+            throw new Error('The server returned HTTP ' + response.status + '.');
+          }
+          return response.arrayBuffer();
+        }).then(function (buffer) {
+          stageBrowserBytes(buffer, displayName, 0);
+        }).catch(function (error) {
+          var reason = error && error.message ? error.message : 'a network or CORS error.';
+          window.gladiusSetBrowserFileStatus(
+            'Could not download ' + displayName + ': ' + reason, true);
         });
       }
 
@@ -247,7 +311,7 @@
           window.gladiusSetBrowserFileStatus('Only .3mf files can be opened here.', true);
           return;
         }
-        stageBrowserFile(file, 0);
+        stageBrowserFile(file);
       });
 
       // Keep mouse releases on the canvas after a drag leaves its bounds. GLFW's
@@ -271,6 +335,8 @@
       canvas.addEventListener('contextmenu', function (event) {
         event.preventDefault();
       });
+
+      loadBrowserFileFromUrl();
     })();
 
     var gladiusWebGPUUnavailable = false;
