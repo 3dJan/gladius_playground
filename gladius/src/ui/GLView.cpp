@@ -1224,6 +1224,10 @@ namespace gladius
         }
 
         processPendingScreenshot();
+
+    #if defined(GLADIUS_UI_BACKEND_OPENGL)
+        glfwSwapBuffers(m_window);
+    #endif
     }
 
     std::chrono::milliseconds getTimeStamp_ms()
