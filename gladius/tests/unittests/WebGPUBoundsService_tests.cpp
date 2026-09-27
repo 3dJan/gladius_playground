@@ -1,7 +1,9 @@
 #if defined(GLADIUS_ENABLE_WEBGPU)
 
+#include "Document.h"
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
 #include "compute/BoundingBoxContracts.h"
+#include "nodes/BuildParameter.h"
 #include "webgpu/WebGPUBoundsService.h"
 #include "webgpu/WebGPUComputeContext.h"
 
@@ -13,8 +15,10 @@
 
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace gladius::tests
 {
@@ -263,6 +267,48 @@ namespace gladius::tests
         EXPECT_EQ(result->errorCode, compute::BoundsErrorCode::DomainClipped);
         EXPECT_TRUE(result->touchesProbeDomain);
         EXPECT_FALSE(result->isUsable());
+    }
+
+    TEST(WebGPUContourFallback, Planter3mfAtZ100_UsesFallbackBounds)
+    {
+        if (std::getenv("GLADIUS_RUN_GPU_TESTS") == nullptr || !areWebGpuTestsEnabled())
+        {
+            GTEST_SKIP() << "Set GLADIUS_RUN_GPU_TESTS=1 and GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        auto const * const planterFile = std::getenv("GLADIUS_PLANTER_3MF");
+        if (planterFile == nullptr || !std::filesystem::is_regular_file(planterFile))
+        {
+            GTEST_SKIP() << "Set GLADIUS_PLANTER_3MF to run this test with planter_plate.3mf";
+        }
+
+        try
+        {
+            webgpu::WebGPUComputeContext context;
+            if (!context.isValid())
+            {
+                GTEST_SKIP() << "WebGPU device unavailable";
+            }
+        }
+        catch (std::exception const &)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable";
+        }
+
+        auto logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+        Document document(logger);
+        ASSERT_NO_THROW(document.load(planterFile));
+
+        nodes::SliceParameter sliceParameter;
+        sliceParameter.zHeight_mm = 100.0f;
+        sliceParameter.useAdaptiveContour = true;
+        sliceParameter.minFeatureSize_mm = 0.2f;
+        // No bounds are supplied: this is the fallback path the SliceView must use
+        // when the authoritative bounds probe cannot resolve the thin model shell.
+        auto const contours = document.generateContourWebGpu(100.0f, sliceParameter);
+
+        EXPECT_FALSE(contours.empty())
+          << "No contour was generated for planter_plate.3mf at z=100 mm";
     }
 
     TEST(WebGPUBoundsService, Cancellation_StopsBetweenProbeTiles)
