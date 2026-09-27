@@ -83,6 +83,18 @@ namespace gladius::compute::tests
         }
     }
 
+    TEST(ComputeBackendSettings, UnavailableOpenCLPreference_FallsBackToWebGPUInWebGPUOnlyBuild)
+    {
+#if defined(GLADIUS_ENABLE_WEBGPU) && !defined(GLADIUS_ENABLE_OPENCL)
+        ConfigManager configManager;
+        setConfiguredComputeBackend(configManager, ComputeBackendKind::OpenCL);
+
+        EXPECT_EQ(getConfiguredComputeBackend(configManager), ComputeBackendKind::WebGPU);
+#else
+        GTEST_SKIP() << "Requires a WebGPU-only build";
+#endif
+    }
+
     TEST(Document, CorelessConstruction_CreatesAnalyticDocumentState)
     {
         auto logger = std::make_shared<events::Logger>(events::OutputMode::Silent);

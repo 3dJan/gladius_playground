@@ -5,20 +5,86 @@
 
 #include "ui/AsyncThumbnailLoader.h"
 #include "ui/ThreemfThumbnailExtractor.h"
+#include "io/3mf/Lib3mfLoader.h"
 
 #include <gtest/gtest.h>
 #include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <future>
+#include <memory>
+#include <mutex>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace gladius::ui::tests
 {
     class AsyncThumbnailLoaderTest : public ::testing::Test
     {
       protected:
+        struct WorkerGate
+        {
+            std::mutex mutex;
+            std::condition_variable condition;
+            std::vector<std::filesystem::path> started;
+            bool releaseFirst = false;
+        };
+
         void SetUp() override
         {
-            // Create a basic logger (can be nullptr for most tests)
             m_logger = nullptr;
+        }
+
+        static ThumbnailLoadResult makeResult(bool success)
+        {
+            ThumbnailLoadResult result;
+            result.success = success;
+            if (success)
+            {
+                result.decodedPixels = {0u, 0u, 0u, 255u};
+                result.width = 1;
+                result.height = 1;
+            }
+            return result;
+        }
+
+        static bool waitForStarted(const std::shared_ptr<WorkerGate> & gate, size_t count)
+        {
+            std::unique_lock lock(gate->mutex);
+            return gate->condition.wait_for(lock,
+                                            std::chrono::seconds(2),
+                                            [&gate, count] { return gate->started.size() >= count; });
+        }
+
+        static void releaseFirst(const std::shared_ptr<WorkerGate> & gate)
+        {
+            {
+                std::lock_guard lock(gate->mutex);
+                gate->releaseFirst = true;
+            }
+            gate->condition.notify_all();
+        }
+
+        static std::vector<ThumbnailLoadCompletion>
+        waitForCompletions(AsyncThumbnailLoader & loader, size_t count)
+        {
+            auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            std::vector<ThumbnailLoadCompletion> completions;
+            while (completions.size() < count && std::chrono::steady_clock::now() < deadline)
+            {
+                auto batch = loader.update();
+                if (batch.empty())
+                {
+                    std::this_thread::yield();
+                    continue;
+                }
+                for (auto & completion : batch)
+                {
+                    completions.push_back(std::move(completion));
+                }
+            }
+            return completions;
         }
 
         events::SharedLogger m_logger;
@@ -27,124 +93,227 @@ namespace gladius::ui::tests
     TEST_F(AsyncThumbnailLoaderTest, RequestLoad_WithNewThumbnail_SetsLoadingState)
     {
         // Arrange
-        AsyncThumbnailLoader loader(m_logger, 4);
+                AsyncThumbnailLoader loader(
+                    m_logger, 1, [](std::filesystem::path const &) { return ThumbnailLoadResult{}; });
         ThreemfThumbnailExtractor::ThumbnailInfo info;
         info.filePath = "/nonexistent/test.3mf";
         info.loadState = ThumbnailLoadState::NotStarted;
 
         // Act
-        loader.requestLoad(info);
+        auto const requestId = loader.requestLoad(info);
 
         // Assert
+        EXPECT_NE(requestId, 0u);
+        EXPECT_EQ(info.loadRequestId, requestId);
         EXPECT_EQ(info.loadState, ThumbnailLoadState::Loading);
     }
 
     TEST_F(AsyncThumbnailLoaderTest, RequestLoad_WithAlreadyLoadingThumbnail_DoesNotDuplicate)
     {
         // Arrange
-        AsyncThumbnailLoader loader(m_logger, 4);
+                AsyncThumbnailLoader loader(
+                    m_logger, 1, [](std::filesystem::path const &) { return ThumbnailLoadResult{}; });
         ThreemfThumbnailExtractor::ThumbnailInfo info;
         info.filePath = "/nonexistent/test.3mf";
         info.loadState = ThumbnailLoadState::Loading;
+        info.loadRequestId = 42;
 
         // Act - requesting load on already-loading thumbnail
-        loader.requestLoad(info);
+        auto const requestId = loader.requestLoad(info);
 
         // Assert - state should remain unchanged (not re-queued)
+        EXPECT_EQ(requestId, 42u);
         EXPECT_EQ(info.loadState, ThumbnailLoadState::Loading);
+        EXPECT_FALSE(loader.hasPendingWork());
     }
 
     TEST_F(AsyncThumbnailLoaderTest, RequestLoad_WithCompletedThumbnail_DoesNotReload)
     {
         // Arrange
-        AsyncThumbnailLoader loader(m_logger, 4);
+        AsyncThumbnailLoader loader(
+          m_logger, 1, [](std::filesystem::path const &) { return ThumbnailLoadResult{}; });
         ThreemfThumbnailExtractor::ThumbnailInfo info;
         info.filePath = "/nonexistent/test.3mf";
         info.loadState = ThumbnailLoadState::Ready;
 
         // Act
-        loader.requestLoad(info);
+        auto const requestId = loader.requestLoad(info);
 
         // Assert - should not re-queue a ready thumbnail
+        EXPECT_EQ(requestId, 0u);
         EXPECT_EQ(info.loadState, ThumbnailLoadState::Ready);
-    }
-
-    TEST_F(AsyncThumbnailLoaderTest, CancelAll_WithPendingLoads_ResetsStates)
-    {
-        // Arrange
-        AsyncThumbnailLoader loader(m_logger, 4);
-        ThreemfThumbnailExtractor::ThumbnailInfo info1;
-        info1.filePath = "/nonexistent/test1.3mf";
-        info1.loadState = ThumbnailLoadState::NotStarted;
-
-        ThreemfThumbnailExtractor::ThumbnailInfo info2;
-        info2.filePath = "/nonexistent/test2.3mf";
-        info2.loadState = ThumbnailLoadState::NotStarted;
-
-        loader.requestLoad(info1);
-        loader.requestLoad(info2);
-
-        // Act
-        loader.cancelAll();
-
-        // Assert - states should be reset to NotStarted
-        EXPECT_EQ(info1.loadState, ThumbnailLoadState::NotStarted);
-        EXPECT_EQ(info2.loadState, ThumbnailLoadState::NotStarted);
-    }
-
-    TEST_F(AsyncThumbnailLoaderTest, CancelAll_AfterCancelAll_HasNoPendingWork)
-    {
-        // Arrange
-        AsyncThumbnailLoader loader(m_logger, 4);
-        ThreemfThumbnailExtractor::ThumbnailInfo info;
-        info.filePath = "/nonexistent/test.3mf";
-        info.loadState = ThumbnailLoadState::NotStarted;
-
-        loader.requestLoad(info);
-        EXPECT_TRUE(loader.hasPendingWork());
-
-        // Act
-        loader.cancelAll();
-
-        // Assert
         EXPECT_FALSE(loader.hasPendingWork());
     }
 
-    TEST_F(AsyncThumbnailLoaderTest, Update_WithNonexistentFile_TransitionsToFailed)
+    TEST_F(AsyncThumbnailLoaderTest, SequentialLoads_PrioritizeRecentsAndContinueAfterFailure)
     {
-        // Arrange
-        AsyncThumbnailLoader loader(m_logger, 4);
-        ThreemfThumbnailExtractor::ThumbnailInfo info;
-        info.filePath = "/nonexistent/this_file_does_not_exist.3mf";
-        info.loadState = ThumbnailLoadState::NotStarted;
-
-        loader.requestLoad(info);
-        EXPECT_EQ(info.loadState, ThumbnailLoadState::Loading);
-
-        // Act - poll until future completes (with short timeout)
-        auto start = std::chrono::steady_clock::now();
-        while (info.loadState == ThumbnailLoadState::Loading)
+        auto gate = std::make_shared<WorkerGate>();
+        auto const firstPath = std::filesystem::path("first.3mf");
+        auto const examplePath = std::filesystem::path("example.3mf");
+        auto const firstRecentPath = std::filesystem::path("recent-one.3mf");
+        auto const secondRecentPath = std::filesystem::path("recent-two.3mf");
+        ThumbnailLoadFunction loadFunction = [gate, firstPath](std::filesystem::path const & path)
         {
-            loader.update();
-
-            // Timeout after 2 seconds
-            auto elapsed = std::chrono::steady_clock::now() - start;
-            if (elapsed > std::chrono::seconds(2))
             {
-                break;
+                std::unique_lock lock(gate->mutex);
+                gate->started.push_back(path);
+                gate->condition.notify_all();
+                if (path == firstPath)
+                {
+                    gate->condition.wait(lock, [&gate] { return gate->releaseFirst; });
+                }
             }
+            return makeResult(path != firstPath);
+        };
+        AsyncThumbnailLoader loader(m_logger, 1, std::move(loadFunction));
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        ThreemfThumbnailExtractor::ThumbnailInfo first;
+        first.filePath = firstPath;
+        ThreemfThumbnailExtractor::ThumbnailInfo example;
+        example.filePath = examplePath;
+        ThreemfThumbnailExtractor::ThumbnailInfo firstRecent;
+        firstRecent.filePath = firstRecentPath;
+        ThreemfThumbnailExtractor::ThumbnailInfo secondRecent;
+        secondRecent.filePath = secondRecentPath;
+
+        auto const firstId = loader.requestLoad(first);
+        loader.requestLoad(example);
+        auto const firstRecentId = loader.requestLoad(firstRecent, ThumbnailLoadPriority::High);
+        auto const secondRecentId = loader.requestLoad(secondRecent, ThumbnailLoadPriority::High);
+
+        bool const firstStarted = waitForStarted(gate, 1);
+        if (!firstStarted)
+        {
+            releaseFirst(gate);
+        }
+        ASSERT_TRUE(firstStarted);
+
+        std::vector<std::filesystem::path> started;
+        {
+            std::lock_guard lock(gate->mutex);
+            started = gate->started;
         }
 
-        // Assert - should have failed since file doesn't exist
-        EXPECT_EQ(info.loadState, ThumbnailLoadState::Failed);
+        releaseFirst(gate);
+        EXPECT_EQ(started, (std::vector<std::filesystem::path>{firstPath}));
+        auto firstCompletion = waitForCompletions(loader, 1);
+        ASSERT_EQ(firstCompletion.size(), 1u);
+        EXPECT_EQ(firstCompletion.front().requestId, firstId);
+        EXPECT_FALSE(firstCompletion.front().result.success);
+
+        ASSERT_TRUE(waitForStarted(gate, 2));
+        {
+            std::lock_guard lock(gate->mutex);
+            EXPECT_EQ(gate->started[1], firstRecentPath);
+        }
+        auto firstRecentCompletion = waitForCompletions(loader, 1);
+        ASSERT_EQ(firstRecentCompletion.size(), 1u);
+        EXPECT_EQ(firstRecentCompletion.front().requestId, firstRecentId);
+        EXPECT_TRUE(firstRecentCompletion.front().result.success);
+
+        ASSERT_TRUE(waitForStarted(gate, 3));
+        {
+            std::lock_guard lock(gate->mutex);
+            EXPECT_EQ(gate->started[2], secondRecentPath);
+        }
+        auto secondRecentCompletion = waitForCompletions(loader, 1);
+        ASSERT_EQ(secondRecentCompletion.size(), 1u);
+        EXPECT_EQ(secondRecentCompletion.front().requestId, secondRecentId);
+
+        ASSERT_TRUE(waitForStarted(gate, 4));
+        {
+            std::lock_guard lock(gate->mutex);
+            EXPECT_EQ(gate->started[3], examplePath);
+        }
+        EXPECT_EQ(waitForCompletions(loader, 1).size(), 1u);
+        EXPECT_FALSE(loader.hasPendingWork());
+    }
+
+    TEST_F(AsyncThumbnailLoaderTest, CancelRequest_WithActiveAndQueuedWork_DiscardsStaleResult)
+    {
+        auto gate = std::make_shared<WorkerGate>();
+        auto const activePath = std::filesystem::path("active.3mf");
+        auto const queuedPath = std::filesystem::path("queued.3mf");
+        ThumbnailLoadFunction loadFunction = [gate, activePath](std::filesystem::path const & path)
+        {
+            {
+                std::unique_lock lock(gate->mutex);
+                gate->started.push_back(path);
+                gate->condition.notify_all();
+                if (path == activePath)
+                {
+                    gate->condition.wait(lock, [&gate] { return gate->releaseFirst; });
+                }
+            }
+            return makeResult(true);
+        };
+        AsyncThumbnailLoader loader(m_logger, 1, std::move(loadFunction));
+
+        ThreemfThumbnailExtractor::ThumbnailInfo active;
+        active.filePath = activePath;
+        ThreemfThumbnailExtractor::ThumbnailInfo queued;
+        queued.filePath = queuedPath;
+        auto const activeId = loader.requestLoad(active);
+        auto const queuedId = loader.requestLoad(queued);
+
+        bool const activeStarted = waitForStarted(gate, 1);
+        if (!activeStarted)
+        {
+            releaseFirst(gate);
+        }
+        ASSERT_TRUE(activeStarted);
+
+        auto cancelFuture = std::async(std::launch::async,
+                                       [&loader, activeId] { loader.cancelRequest(activeId); });
+        auto const cancelStatus = cancelFuture.wait_for(std::chrono::milliseconds(100));
+        releaseFirst(gate);
+        cancelFuture.wait();
+        cancelFuture.get();
+        EXPECT_EQ(cancelStatus, std::future_status::ready);
+
+        auto completions = waitForCompletions(loader, 1);
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions.front().requestId, queuedId);
+        EXPECT_NE(completions.front().requestId, activeId);
+    }
+
+    TEST_F(AsyncThumbnailLoaderTest, CancelAll_WithActiveWorker_ReturnsWithoutWaiting)
+    {
+        auto gate = std::make_shared<WorkerGate>();
+        ThumbnailLoadFunction loadFunction = [gate](std::filesystem::path const &)
+        {
+            std::unique_lock lock(gate->mutex);
+            gate->started.emplace_back("blocked.3mf");
+            gate->condition.notify_all();
+            gate->condition.wait(lock, [&gate] { return gate->releaseFirst; });
+            return makeResult(true);
+        };
+        AsyncThumbnailLoader loader(m_logger, 1, std::move(loadFunction));
+        ThreemfThumbnailExtractor::ThumbnailInfo info;
+        info.filePath = "blocked.3mf";
+        loader.requestLoad(info);
+
+        bool const workerStarted = waitForStarted(gate, 1);
+        if (!workerStarted)
+        {
+            releaseFirst(gate);
+        }
+        ASSERT_TRUE(workerStarted);
+
+        auto cancelFuture = std::async(std::launch::async, [&loader] { loader.cancelAll(); });
+        auto const cancelStatus = cancelFuture.wait_for(std::chrono::milliseconds(100));
+        releaseFirst(gate);
+        cancelFuture.wait();
+        cancelFuture.get();
+        EXPECT_EQ(cancelStatus, std::future_status::ready);
+        EXPECT_FALSE(loader.hasPendingWork());
     }
 
     TEST_F(AsyncThumbnailLoaderTest, HasPendingWork_WithNoRequests_ReturnsFalse)
     {
         // Arrange
-        AsyncThumbnailLoader loader(m_logger, 4);
+        AsyncThumbnailLoader loader(
+          m_logger, 1, [](std::filesystem::path const &) { return ThumbnailLoadResult{}; });
 
         // Act & Assert
         EXPECT_FALSE(loader.hasPendingWork());
@@ -153,7 +322,8 @@ namespace gladius::ui::tests
     TEST_F(AsyncThumbnailLoaderTest, HasPendingWork_WithActiveRequest_ReturnsTrue)
     {
         // Arrange
-        AsyncThumbnailLoader loader(m_logger, 4);
+                AsyncThumbnailLoader loader(
+                    m_logger, 1, [](std::filesystem::path const &) { return ThumbnailLoadResult{}; });
         ThreemfThumbnailExtractor::ThumbnailInfo info;
         info.filePath = "/nonexistent/test.3mf";
         info.loadState = ThumbnailLoadState::NotStarted;
@@ -165,32 +335,67 @@ namespace gladius::ui::tests
         EXPECT_TRUE(loader.hasPendingWork());
     }
 
-    TEST_F(AsyncThumbnailLoaderTest, Constructor_WithMaxConcurrentLoads_RespectsConcurrencyLimit)
+    TEST_F(AsyncThumbnailLoaderTest, Update_WithFailedExtraction_ReturnsValueWithoutTouchingUiState)
     {
-        // Arrange - create loader with max 2 concurrent loads
-        AsyncThumbnailLoader loader(m_logger, 2);
+        AsyncThumbnailLoader loader(
+          m_logger,
+          1,
+          [](std::filesystem::path const &)
+          {
+              ThumbnailLoadResult result;
+              result.errorMessage = "expected failure";
+              return result;
+          });
+        ThreemfThumbnailExtractor::ThumbnailInfo info;
+        info.filePath = "missing.3mf";
+        auto const requestId = loader.requestLoad(info);
 
-        ThreemfThumbnailExtractor::ThumbnailInfo info1;
-        info1.filePath = "/nonexistent/test1.3mf";
-        info1.loadState = ThumbnailLoadState::NotStarted;
+        auto completions = waitForCompletions(loader, 1);
 
-        ThreemfThumbnailExtractor::ThumbnailInfo info2;
-        info2.filePath = "/nonexistent/test2.3mf";
-        info2.loadState = ThumbnailLoadState::NotStarted;
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_EQ(completions.front().requestId, requestId);
+        EXPECT_FALSE(completions.front().result.success);
+        EXPECT_EQ(completions.front().result.errorMessage, "expected failure");
+        EXPECT_EQ(info.loadState, ThumbnailLoadState::Loading);
+    }
 
-        ThreemfThumbnailExtractor::ThumbnailInfo info3;
-        info3.filePath = "/nonexistent/test3.3mf";
-        info3.loadState = ThumbnailLoadState::NotStarted;
+    TEST_F(AsyncThumbnailLoaderTest, ApplyAsyncLoadResult_WithDecodedPixels_TransitionsToPendingTexture)
+    {
+        ThreemfThumbnailExtractor extractor(m_logger);
+        ThreemfThumbnailExtractor::ThumbnailInfo info;
+        info.loadState = ThumbnailLoadState::Loading;
+        info.loadRequestId = 17;
 
-        // Act
-        loader.requestLoad(info1);
-        loader.requestLoad(info2);
-        loader.requestLoad(info3);
+        auto result = makeResult(true);
+        result.fileSize = 128;
+        result.metadata.emplace_back("Title", "Test thumbnail");
 
-        // Assert - all should be in Loading state (either active or queued)
-        EXPECT_EQ(info1.loadState, ThumbnailLoadState::Loading);
-        EXPECT_EQ(info2.loadState, ThumbnailLoadState::Loading);
-        EXPECT_EQ(info3.loadState, ThumbnailLoadState::Loading);
+        extractor.applyAsyncLoadResult(info, std::move(result));
+
+        EXPECT_EQ(info.loadState, ThumbnailLoadState::DecodedPending);
+        EXPECT_EQ(info.loadRequestId, 0u);
+        EXPECT_TRUE(info.thumbnailLoaded);
+        EXPECT_TRUE(info.hasThumbnail);
+        EXPECT_EQ(info.decodedPixels.size(), 4u);
+        EXPECT_EQ(info.fileInfo.fileSize, 128u);
+        EXPECT_EQ(info.fileInfo.getMetadata("Title"), "Test thumbnail");
+    }
+
+    TEST_F(AsyncThumbnailLoaderTest, LoadLib3mfScoped_ConcurrentCallsPreserveCurrentDirectory)
+    {
+        auto const originalDirectory = std::filesystem::current_path();
+        std::vector<std::future<Lib3MF::PWrapper>> wrapperLoads;
+        for (size_t index = 0; index < 4; ++index)
+        {
+            wrapperLoads.push_back(std::async(std::launch::async,
+                                              [] { return gladius::io::loadLib3mfScoped(); }));
+        }
+
+        for (auto & wrapperLoad : wrapperLoads)
+        {
+            EXPECT_NE(wrapperLoad.get(), nullptr);
+        }
+        EXPECT_EQ(std::filesystem::current_path(), originalDirectory);
     }
 
 } // namespace gladius::ui::tests
