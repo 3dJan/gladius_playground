@@ -3,37 +3,63 @@
 #include "../EventLogger.h"
 #include "ThreemfThumbnailExtractor.h"
 
-#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <functional>
 #include <future>
-#include <memory>
+#include <optional>
 #include <vector>
 
 namespace gladius::ui
 {
+  using ThumbnailLoadRequestId = std::uint64_t;
+
+  enum class ThumbnailLoadPriority
+  {
+    Normal,
+    High
+  };
+
+  using ThumbnailLoadFunction =
+    std::function<ThumbnailLoadResult(std::filesystem::path const &)>;
+
+  struct ThumbnailLoadRequest
+  {
+    ThumbnailLoadRequestId requestId = 0;
+    std::filesystem::path filePath;
+  };
+
     /**
      * @brief Represents a single async thumbnail load operation
      */
     struct ThumbnailLoadTask
     {
-        ThreemfThumbnailExtractor::ThumbnailInfo * info = nullptr; ///< Pointer to info being loaded
-        std::future<ThumbnailLoadResult> future;                   ///< Async operation handle
-        std::chrono::steady_clock::time_point startTime;           ///< For timeout tracking
+    ThumbnailLoadRequestId requestId = 0;
+    std::filesystem::path filePath;
+    std::future<ThumbnailLoadResult> future;
+    std::optional<ThumbnailLoadResult> immediateResult;
+    bool cancelled = false;
+  };
+
+  struct ThumbnailLoadCompletion
+  {
+    ThumbnailLoadRequestId requestId = 0;
+    ThumbnailLoadResult result;
     };
 
     /**
      * @brief Component responsible for background thumbnail loading
      *
       * This class manages asynchronous loading of thumbnails from 3MF files.
-      * It uses std::async to offload file I/O and PNG decoding to background threads
-      * on native builds, while texture creation happens on the main thread (OpenGL
-      * requirement). Browser builds do not have pthreads, so they perform at most one
-      * extraction on the main thread when update() is called each frame.
+      * Requests own their paths and workers return values; no worker retains a pointer
+      * to UI-owned thumbnail state. Texture creation remains on the UI thread.
      *
      * Usage:
      * 1. Call requestLoad() for each thumbnail that needs loading
-     * 2. Call update() each frame to poll futures and update states
+      * 2. Call update() each frame to poll futures and apply returned completions
      * 3. Call processPendingTextures() each frame to create GL textures (main thread only)
-     * 4. Call cancelAll() when the welcome screen closes
+      * 4. Call cancelAll() to invalidate outstanding requests; it does not wait for workers
      */
     class AsyncThumbnailLoader
     {
@@ -43,16 +69,18 @@ namespace gladius::ui
          *
          * @param logger Event logger for error reporting
          * @param maxConcurrentLoads Maximum number of simultaneous load operations (default: 4)
+         * @param loadFunction Optional extraction function, primarily useful for tests
          */
-        explicit AsyncThumbnailLoader(events::SharedLogger logger, size_t maxConcurrentLoads = 4);
+        explicit AsyncThumbnailLoader(events::SharedLogger logger,
+                                      size_t maxConcurrentLoads = 4,
+                                      ThumbnailLoadFunction loadFunction = {});
 
         /**
-         * @brief Destroy the Async Thumbnail Loader and cancel pending operations
+         * @brief Destroy the loader and wait for any uninterruptible active extraction
          */
         ~AsyncThumbnailLoader();
 
-        // Non-copyable, non-movable: owns active futures with raw pointers to external ThumbnailInfo.
-        // Moving would invalidate the pointers stored in m_activeTasks and m_pendingQueue.
+        // Non-copyable and non-movable because the loader owns active futures.
         AsyncThumbnailLoader(AsyncThumbnailLoader const &) = delete;
         AsyncThumbnailLoader & operator=(AsyncThumbnailLoader const &) = delete;
         AsyncThumbnailLoader(AsyncThumbnailLoader &&) = delete;
@@ -62,19 +90,24 @@ namespace gladius::ui
          * @brief Queue a thumbnail for loading
          *
          * If the thumbnail is already loading or ready, this is a no-op.
-         * If max concurrent loads is reached, the request is queued.
+         * If max concurrent loads is reached, the owned path is queued.
          *
-         * @param info Thumbnail info to load (will be updated with load state)
+         * @param info Thumbnail info used to create an owned request; only its state and
+         *             request ID are updated on the calling thread
+         * @param priority High-priority requests are dequeued before normal requests
+         * @return The request ID, or the existing ID if the thumbnail is already loading
          */
-        void requestLoad(ThreemfThumbnailExtractor::ThumbnailInfo & info);
+        ThumbnailLoadRequestId requestLoad(
+          ThreemfThumbnailExtractor::ThumbnailInfo & info,
+          ThumbnailLoadPriority priority = ThumbnailLoadPriority::Normal);
 
         /**
-         * @brief Poll loading operations and update thumbnail states
+         * @brief Poll loading operations and return completed value results
          *
-         * Call this each frame. It checks for completed async operations
-         * and transitions thumbnails from Loading to DecodedPending state.
+         * Call this on the UI thread. The caller applies each result to a matching
+         * ThumbnailInfo and creates its GPU texture there.
          */
-        void update();
+        std::vector<ThumbnailLoadCompletion> update();
 
         /**
          * @brief Create GL textures for decoded thumbnails
@@ -85,9 +118,15 @@ namespace gladius::ui
         void processPendingTextures();
 
         /**
-         * @brief Cancel all pending load operations
+         * @brief Invalidate one request without waiting for an active worker
          *
-         * Call this when the welcome screen closes to clean up resources.
+         * Queued work is removed immediately. An active extraction is allowed to finish,
+         * but its result is discarded.
+         */
+        void cancelRequest(ThumbnailLoadRequestId requestId);
+
+        /**
+         * @brief Invalidate all queued and active requests without waiting for workers
          */
         void cancelAll();
 
@@ -100,24 +139,26 @@ namespace gladius::ui
         [[nodiscard]] bool hasPendingWork() const noexcept;
 
       private:
-        events::SharedLogger m_logger;                ///< Logger for error reporting
-        size_t m_maxConcurrentLoads;                  ///< Max parallel loads
-        std::vector<ThumbnailLoadTask> m_activeTasks; ///< Currently active load tasks
-
-        /// Queued requests - IMPORTANT: Pointers must remain valid until cancelAll() is called.
-        /// The WelcomeScreen guarantees this by not modifying m_thumbnailInfos during loading.
-        std::vector<ThreemfThumbnailExtractor::ThumbnailInfo *> m_pendingQueue;
+        events::SharedLogger m_logger;
+        size_t m_maxConcurrentLoads;
+        ThumbnailLoadFunction m_loadFunction;
+        ThumbnailLoadRequestId m_nextRequestId = 1;
+        std::vector<ThumbnailLoadTask> m_activeTasks;
+        std::deque<ThumbnailLoadRequest> m_highPriorityQueue;
+        std::deque<ThumbnailLoadRequest> m_pendingQueue;
 
         /**
          * @brief Start a new async load operation for a thumbnail
          *
-         * @param info Thumbnail info to load
+         * @param request Owned request data
          */
-        void startLoad(ThreemfThumbnailExtractor::ThumbnailInfo & info);
+        void startLoad(ThumbnailLoadRequest request);
 
         /**
          * @brief Process the pending queue and start new loads if capacity available
          */
         void processQueue();
+
+        [[nodiscard]] size_t getConcurrencyLimit() const noexcept;
     };
 }

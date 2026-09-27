@@ -18,17 +18,6 @@ namespace gladius::ui
     ThreemfThumbnailExtractor::ThreemfThumbnailExtractor(events::SharedLogger logger)
         : m_logger(std::move(logger))
     {
-        try
-        {
-            m_wrapper = gladius::io::loadLib3mfScoped();
-        }
-        catch (const std::exception & e)
-        {
-            if (m_logger)
-            {
-                m_logger->addEvent({e.what(), events::Severity::Error});
-            }
-        }
     }
 
     ThreemfThumbnailExtractor::~ThreemfThumbnailExtractor() = default;
@@ -46,14 +35,15 @@ namespace gladius::ui
     {
         std::vector<unsigned char> thumbnailData;
 
-        if (!m_wrapper)
-        {
-            return thumbnailData;
-        }
-
         try
         {
-            auto model = m_wrapper->CreateModel();
+            auto wrapper = gladius::io::loadLib3mfScoped();
+            if (!wrapper)
+            {
+                return thumbnailData;
+            }
+
+            auto model = wrapper->CreateModel();
             auto reader = model->QueryReader("3mf");
 
             reader->SetStrictModeActive(false);
@@ -118,6 +108,40 @@ namespace gladius::ui
                 }
             }
         }
+    }
+
+    void ThreemfThumbnailExtractor::applyAsyncLoadResult(ThumbnailInfo & info,
+                                                         ThumbnailLoadResult result)
+    {
+        info.fileInfo.fileSize = result.fileSize;
+        info.fileInfo.metadata.clear();
+        for (const auto & [key, value] : result.metadata)
+        {
+            info.fileInfo.addMetadata(key, value);
+        }
+
+        info.hasLibraryMetadata = result.hasLibraryMetadata;
+        info.description = std::move(result.description);
+        info.libraryFunctionNames = std::move(result.libraryFunctionNames);
+        info.thumbnailLoaded = true;
+        info.thumbnailData.clear();
+        info.loadRequestId = 0;
+
+        if (result.success && !result.decodedPixels.empty())
+        {
+            info.decodedPixels = std::move(result.decodedPixels);
+            info.thumbnailWidth = result.width;
+            info.thumbnailHeight = result.height;
+            info.hasThumbnail = true;
+            info.loadState = ThumbnailLoadState::DecodedPending;
+            return;
+        }
+
+        info.decodedPixels.clear();
+        info.thumbnailWidth = 0;
+        info.thumbnailHeight = 0;
+        info.hasThumbnail = false;
+        info.loadState = ThumbnailLoadState::Failed;
     }
 
     void ThreemfThumbnailExtractor::createThumbnailTexture(ThumbnailInfo & info)

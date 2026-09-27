@@ -135,9 +135,7 @@ namespace gladius::ui
 
         std::filesystem::path m_directory; ///< Directory to scan
 
-        /// List of thumbnail infos for 3MF files.
-        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
-        /// to ThumbnailInfo objects that must remain valid during async loading.
+        /// List of thumbnail infos for 3MF files; results are matched by request ID.
         std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_files;
 
         bool m_needsRefresh = true;     ///< Whether the directory needs to be rescanned

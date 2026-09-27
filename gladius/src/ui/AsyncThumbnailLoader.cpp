@@ -1,179 +1,202 @@
 #include "AsyncThumbnailLoader.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fmt/format.h>
+#include <utility>
 
 namespace gladius::ui
 {
     AsyncThumbnailLoader::AsyncThumbnailLoader(events::SharedLogger logger,
-                                               size_t maxConcurrentLoads)
+                                               size_t maxConcurrentLoads,
+                                               ThumbnailLoadFunction loadFunction)
         : m_logger(std::move(logger))
-        , m_maxConcurrentLoads(maxConcurrentLoads)
+        , m_maxConcurrentLoads(std::max<size_t>(1, maxConcurrentLoads))
+        , m_loadFunction(std::move(loadFunction))
     {
+        if (!m_loadFunction)
+        {
+            m_loadFunction = [](std::filesystem::path const & filePath)
+            { return ThreemfThumbnailExtractor::extractThumbnailDataOnly(filePath); };
+        }
     }
 
     AsyncThumbnailLoader::~AsyncThumbnailLoader()
     {
         cancelAll();
+        for (auto & task : m_activeTasks)
+        {
+            if (task.future.valid())
+            {
+                task.future.wait();
+            }
+        }
+        m_activeTasks.clear();
     }
 
-    void AsyncThumbnailLoader::requestLoad(ThreemfThumbnailExtractor::ThumbnailInfo & info)
+    ThumbnailLoadRequestId AsyncThumbnailLoader::requestLoad(
+      ThreemfThumbnailExtractor::ThumbnailInfo & info,
+      ThumbnailLoadPriority priority)
     {
         // Only proceed if NotStarted or Failed (retry case)
         if (info.loadState == ThumbnailLoadState::Loading ||
             info.loadState == ThumbnailLoadState::DecodedPending ||
             info.loadState == ThumbnailLoadState::Ready)
         {
-            return; // Already loading, decoded, or completed successfully
+            return info.loadRequestId;
         }
 
-        // Check if already in queue
-        auto it = std::find(m_pendingQueue.begin(), m_pendingQueue.end(), &info);
-        if (it != m_pendingQueue.end())
+        ThumbnailLoadRequestId requestId = m_nextRequestId++;
+        if (requestId == 0)
         {
-            return;
+            requestId = m_nextRequestId++;
         }
 
-        // Check if already active
-        auto activeIt = std::find_if(m_activeTasks.begin(),
-                                     m_activeTasks.end(),
-                                     [&info](const ThumbnailLoadTask & task)
-                                     { return task.info == &info; });
-        if (activeIt != m_activeTasks.end())
-        {
-            return;
-        }
+        info.loadRequestId = requestId;
+        info.loadState = ThumbnailLoadState::Loading;
 
-        // Browser builds do not enable Emscripten pthreads. Use one main-thread
-        // extraction per update instead of asking std::async for a worker thread.
-#ifdef __EMSCRIPTEN__
-        constexpr size_t concurrentLimit = 1u;
-    #else
-        size_t const concurrentLimit = m_maxConcurrentLoads;
-    #endif
-
-        // Start immediately if capacity is available, otherwise queue.
-        if (m_activeTasks.size() < concurrentLimit)
+        ThumbnailLoadRequest request{requestId, info.filePath};
+        if (priority == ThumbnailLoadPriority::High)
         {
-            startLoad(info);
+            m_highPriorityQueue.push_back(std::move(request));
         }
         else
         {
-            m_pendingQueue.push_back(&info);
-            info.loadState = ThumbnailLoadState::Loading; // Mark as loading even if queued
+            m_pendingQueue.push_back(std::move(request));
         }
+
+        processQueue();
+        return requestId;
     }
 
-    void AsyncThumbnailLoader::startLoad(ThreemfThumbnailExtractor::ThumbnailInfo & info)
+    void AsyncThumbnailLoader::startLoad(ThumbnailLoadRequest request)
     {
-        info.loadState = ThumbnailLoadState::Loading;
-
         ThumbnailLoadTask task;
-        task.info = &info;
-        task.startTime = std::chrono::steady_clock::now();
+        task.requestId = request.requestId;
+        task.filePath = std::move(request.filePath);
 #ifndef __EMSCRIPTEN__
-        // Capture path by value for the background operation.
-        std::filesystem::path filePath = info.filePath;
-        task.future = std::async(std::launch::async,
-        [filePath]()
+        auto filePath = task.filePath;
+        auto loadFunction = m_loadFunction;
+        try
         {
-            return ThreemfThumbnailExtractor::extractThumbnailDataOnly(
-             filePath);
-        });
+            task.future = std::async(std::launch::async,
+                                     [filePath = std::move(filePath),
+                                      loadFunction = std::move(loadFunction)]()
+                                     { return loadFunction(filePath); });
+        }
+        catch (std::exception const & e)
+        {
+            ThumbnailLoadResult result;
+            result.errorMessage = e.what();
+            task.immediateResult = std::move(result);
+            if (m_logger)
+            {
+                m_logger->addEvent({fmt::format("Could not start thumbnail load for {}: {}",
+                                                task.filePath.string(),
+                                                e.what()),
+                                    events::Severity::Warning});
+            }
+        }
+        catch (...)
+        {
+            ThumbnailLoadResult result;
+            result.errorMessage = "Could not start thumbnail load";
+            task.immediateResult = std::move(result);
+        }
 #endif
 
         m_activeTasks.push_back(std::move(task));
     }
 
-    void AsyncThumbnailLoader::update()
+    std::vector<ThumbnailLoadCompletion> AsyncThumbnailLoader::update()
     {
-        // Check completed futures
+        std::vector<ThumbnailLoadCompletion> completions;
         auto it = m_activeTasks.begin();
         while (it != m_activeTasks.end())
         {
 #ifdef __EMSCRIPTEN__
-            // Emscripten builds are pthread-free. Execute one extraction from the
-            // active queue on the UI thread instead of constructing a future at all.
-            auto const status = std::future_status::ready;
-#else
-            // Check if future is ready (non-blocking)
-            auto const status = it->future.valid()
-                                  ? it->future.wait_for(std::chrono::milliseconds(0))
-                                  : std::future_status::timeout;
-#endif
-            if (status == std::future_status::ready || status == std::future_status::deferred)
+            if (it->cancelled)
             {
-                try
-                {
-#ifdef __EMSCRIPTEN__
-                    ThumbnailLoadResult result =
-                      ThreemfThumbnailExtractor::extractThumbnailDataOnly(it->info->filePath);
-#else
-                    ThumbnailLoadResult result = it->future.get();
-#endif
-
-                    if (result.success && it->info)
-                    {
-                        // Store decoded pixels in the info struct
-                        it->info->decodedPixels = std::move(result.decodedPixels);
-                        it->info->thumbnailWidth = result.width;
-                        it->info->thumbnailHeight = result.height;
-                        it->info->fileInfo.fileSize = result.fileSize;
-                        for (const auto & [key, value] : result.metadata)
-                        {
-                            it->info->fileInfo.addMetadata(key, value);
-                        }
-                        it->info->hasThumbnail = true;
-                        it->info->thumbnailLoaded = true;
-                        it->info->loadState = ThumbnailLoadState::DecodedPending;
-                        it->info->hasLibraryMetadata = result.hasLibraryMetadata;
-                        it->info->description = std::move(result.description);
-                        it->info->libraryFunctionNames = std::move(result.libraryFunctionNames);
-                    }
-                    else if (it->info)
-                    {
-                        // Mark as failed but still update file size and metadata if available
-                        if (result.fileSize > 0)
-                        {
-                            it->info->fileInfo.fileSize = result.fileSize;
-                        }
-                        for (const auto & [key, value] : result.metadata)
-                        {
-                            it->info->fileInfo.addMetadata(key, value);
-                        }
-                        it->info->hasLibraryMetadata = result.hasLibraryMetadata;
-                        it->info->description = std::move(result.description);
-                        it->info->libraryFunctionNames = std::move(result.libraryFunctionNames);
-                        it->info->loadState = ThumbnailLoadState::Failed;
-                        it->info->hasThumbnail = false;
-                        it->info->thumbnailLoaded = true;
-                    }
-                }
-                catch (const std::exception & e)
-                {
-                    if (it->info)
-                    {
-                        it->info->loadState = ThumbnailLoadState::Failed;
-                        it->info->hasThumbnail = false;
-                        it->info->thumbnailLoaded = true;
-                    }
-                    if (m_logger)
-                    {
-                        m_logger->addEvent({fmt::format("Async thumbnail load failed: {}", e.what()),
-                                            events::Severity::Warning});
-                    }
-                }
-
                 it = m_activeTasks.erase(it);
+                continue;
             }
-            else
+
+            ThumbnailLoadResult result;
+            try
+            {
+                result = m_loadFunction(it->filePath);
+            }
+            catch (std::exception const & e)
+            {
+                result.errorMessage = e.what();
+            }
+            catch (...)
+            {
+                result.errorMessage = "Unknown error during thumbnail load";
+            }
+
+            completions.push_back({it->requestId, std::move(result)});
+            it = m_activeTasks.erase(it);
+#else
+            bool isReady = it->immediateResult.has_value();
+            if (!isReady && !it->future.valid())
+            {
+                isReady = true;
+            }
+            else if (!isReady)
+            {
+                isReady = it->future.wait_for(std::chrono::milliseconds(0)) ==
+                          std::future_status::ready;
+            }
+
+            if (!isReady)
             {
                 ++it;
+                continue;
             }
+
+            ThumbnailLoadResult result;
+            try
+            {
+                if (it->immediateResult)
+                {
+                    result = std::move(*it->immediateResult);
+                }
+                else if (it->future.valid())
+                {
+                    result = it->future.get();
+                }
+                else
+                {
+                    result.errorMessage = "Thumbnail load did not produce a result";
+                }
+            }
+            catch (std::exception const & e)
+            {
+                result.errorMessage = e.what();
+                if (m_logger)
+                {
+                    m_logger->addEvent({fmt::format("Async thumbnail load failed for {}: {}",
+                                                    it->filePath.string(),
+                                                    e.what()),
+                                        events::Severity::Warning});
+                }
+            }
+            catch (...)
+            {
+                result.errorMessage = "Unknown error during thumbnail load";
+            }
+
+            if (!it->cancelled)
+            {
+                completions.push_back({it->requestId, std::move(result)});
+            }
+            it = m_activeTasks.erase(it);
+#endif
         }
 
-        // Start queued loads if capacity available
         processQueue();
+        return completions;
     }
 
     void AsyncThumbnailLoader::processPendingTextures()
@@ -186,49 +209,70 @@ namespace gladius::ui
 
     void AsyncThumbnailLoader::cancelAll()
     {
-        // Reset state for all queued items
-        for (auto * info : m_pendingQueue)
-        {
-            if (info)
-            {
-                info->loadState = ThumbnailLoadState::NotStarted;
-            }
-        }
+        m_highPriorityQueue.clear();
         m_pendingQueue.clear();
 
-        // Reset state for active tasks (futures will be destroyed)
         for (auto & task : m_activeTasks)
         {
-            if (task.info)
+            task.cancelled = true;
+        }
+    }
+
+    void AsyncThumbnailLoader::cancelRequest(ThumbnailLoadRequestId requestId)
+    {
+        if (requestId == 0)
+        {
+            return;
+        }
+
+        auto removeQueuedRequest = [requestId](std::deque<ThumbnailLoadRequest> & queue)
+        {
+            queue.erase(std::remove_if(queue.begin(),
+                                       queue.end(),
+                                       [requestId](ThumbnailLoadRequest const & request)
+                                       { return request.requestId == requestId; }),
+                        queue.end());
+        };
+        removeQueuedRequest(m_highPriorityQueue);
+        removeQueuedRequest(m_pendingQueue);
+
+        for (auto & task : m_activeTasks)
+        {
+            if (task.requestId == requestId)
             {
-                task.info->loadState = ThumbnailLoadState::NotStarted;
+                task.cancelled = true;
             }
         }
-        m_activeTasks.clear();
+
+        processQueue();
     }
 
     bool AsyncThumbnailLoader::hasPendingWork() const noexcept
     {
-        return !m_activeTasks.empty() || !m_pendingQueue.empty();
+        return !m_highPriorityQueue.empty() || !m_pendingQueue.empty() ||
+               std::any_of(m_activeTasks.begin(),
+                           m_activeTasks.end(),
+                           [](ThumbnailLoadTask const & task) { return !task.cancelled; });
     }
 
     void AsyncThumbnailLoader::processQueue()
     {
-    #ifdef __EMSCRIPTEN__
-        constexpr size_t concurrentLimit = 1u;
-    #else
-        size_t const concurrentLimit = m_maxConcurrentLoads;
-    #endif
-        while (m_activeTasks.size() < concurrentLimit && !m_pendingQueue.empty())
+        while (m_activeTasks.size() < getConcurrencyLimit() &&
+               (!m_highPriorityQueue.empty() || !m_pendingQueue.empty()))
         {
-            auto * info = m_pendingQueue.front();
-            m_pendingQueue.erase(m_pendingQueue.begin());
-
-            if (info && info->loadState == ThumbnailLoadState::Loading)
-            {
-                // Actually start the load now
-                startLoad(*info);
-            }
+            auto & queue = m_highPriorityQueue.empty() ? m_pendingQueue : m_highPriorityQueue;
+            ThumbnailLoadRequest request = std::move(queue.front());
+            queue.pop_front();
+            startLoad(std::move(request));
         }
+    }
+
+    size_t AsyncThumbnailLoader::getConcurrencyLimit() const noexcept
+    {
+#ifdef __EMSCRIPTEN__
+        return 1;
+#else
+        return m_maxConcurrentLoads;
+#endif
     }
 }

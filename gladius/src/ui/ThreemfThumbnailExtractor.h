@@ -4,7 +4,6 @@
 #include <algorithm>  // Added for std::find_if
 #include <cstdint>
 #include <filesystem>
-#include <lib3mf_implicit.hpp>
 #include <memory>
 #include <string>
 #include <vector>
@@ -129,6 +128,7 @@ namespace gladius::ui
             std::time_t timestamp = 0;                ///< Last modified timestamp
             ThreemfFileInfo fileInfo;                 ///< Additional file metadata
             ThumbnailLoadState loadState = ThumbnailLoadState::NotStarted; ///< Current loading state
+            std::uint64_t loadRequestId = 0;           ///< Active async request identity
 
             /// @brief Library description from gladius:library-description metadata
             std::string description;
@@ -174,6 +174,14 @@ namespace gladius::ui
          * @param info Thumbnail info to be updated
          */
         void loadThumbnail(ThumbnailInfo & info);
+
+        /**
+         * @brief Apply a completed background extraction result on the UI thread
+         *
+         * @param info Thumbnail info associated with the request
+         * @param result Value result returned by the async loader
+         */
+        void applyAsyncLoadResult(ThumbnailInfo & info, ThumbnailLoadResult result);
 
         /**
          * @brief Create an OpenGL texture from thumbnail data
@@ -234,7 +242,6 @@ namespace gladius::ui
 
       private:
         events::SharedLogger m_logger; ///< Logger for error reporting
-        Lib3MF::PWrapper m_wrapper;    ///< 3MF library wrapper
     #if defined(GLADIUS_UI_BACKEND_WEBGPU)
         std::shared_ptr<webgpu::WebGPUComputeContext> m_webgpuContext;
     #endif

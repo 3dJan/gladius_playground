@@ -196,9 +196,7 @@ namespace gladius::ui
         std::shared_ptr<webgpu::WebGPUComputeContext> m_webgpuContext;
       #endif
 
-        /// List of thumbnail info for recent files.
-        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
-        /// to ThumbnailInfo objects that must remain valid during async loading.
+        /// Thumbnail data for recent files; async results are matched by request ID.
         std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_thumbnailInfos;
 
         /// Flag to indicate if thumbnails need to be regenerated
@@ -225,9 +223,7 @@ namespace gladius::ui
         /// List of example files with their modification timestamps
         std::vector<std::pair<std::filesystem::path, std::time_t>> m_exampleFiles;
 
-        /// List of thumbnail info for example files.
-        /// Uses std::list for pointer stability - AsyncThumbnailLoader stores pointers
-        /// to ThumbnailInfo objects that must remain valid during async loading.
+        /// Thumbnail data for examples; async results are matched by request ID.
         std::list<ThreemfThumbnailExtractor::ThumbnailInfo> m_exampleThumbnailInfos;
 
         /// Flag to indicate if example thumbnails need to be regenerated

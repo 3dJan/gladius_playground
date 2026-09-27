@@ -117,8 +117,20 @@ namespace gladius::ui
         // Poll async loader and create textures for decoded thumbnails
         if (m_asyncLoader)
         {
-            m_asyncLoader->update();
-            m_asyncLoader->processPendingTextures();
+            auto completions = m_asyncLoader->update();
+            for (auto & completion : completions)
+            {
+                auto infoIt = std::find_if(
+                  m_files.begin(),
+                  m_files.end(),
+                  [&completion](auto const & info)
+                  { return info.loadRequestId == completion.requestId; });
+                if (infoIt != m_files.end())
+                {
+                    m_thumbnailExtractor->applyAsyncLoadResult(*infoIt,
+                                                               std::move(completion.result));
+                }
+            }
 
             if (m_thumbnailExtractor)
             {

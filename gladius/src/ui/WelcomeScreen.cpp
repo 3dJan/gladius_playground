@@ -160,14 +160,12 @@ namespace gladius::ui
         // Clear existing thumbnails if we're refreshing
         if (m_needsRefresh)
         {
-            // Cancel any pending async loads
-            if (m_asyncLoader)
-            {
-                m_asyncLoader->cancelAll();
-            }
-
             for (auto & info : m_thumbnailInfos)
             {
+                if (m_asyncLoader)
+                {
+                    m_asyncLoader->cancelRequest(info.loadRequestId);
+                }
                 m_thumbnailExtractor->releaseThumbnail(info);
             }
             m_thumbnailInfos.clear();
@@ -195,7 +193,8 @@ namespace gladius::ui
                 // Queue for async loading (use back() since we just pushed)
                 if (m_asyncLoader)
                 {
-                    m_asyncLoader->requestLoad(m_thumbnailInfos.back());
+                    m_asyncLoader->requestLoad(m_thumbnailInfos.back(),
+                                               ThumbnailLoadPriority::High);
                 }
             }
         }
@@ -209,6 +208,10 @@ namespace gladius::ui
                                                               { return pair.first == info.filePath; });
                                        if (it == m_recentFiles.end())
                                        {
+                                           if (m_asyncLoader)
+                                           {
+                                               m_asyncLoader->cancelRequest(info.loadRequestId);
+                                           }
                                            // Release the thumbnail resources before removing
                                            m_thumbnailExtractor->releaseThumbnail(info);
                                            return true;
@@ -279,12 +282,12 @@ namespace gladius::ui
         // Clear existing thumbnails if we're refreshing
         if (m_examplesNeedRefresh)
         {
-            // Note: We don't call cancelAll() here because it would also cancel
-            // any in-progress recent file loads. Individual example thumbnail loads
-            // will naturally complete or be overwritten by new requests.
-
             for (auto & info : m_exampleThumbnailInfos)
             {
+                if (m_asyncLoader)
+                {
+                    m_asyncLoader->cancelRequest(info.loadRequestId);
+                }
                 m_thumbnailExtractor->releaseThumbnail(info);
             }
             m_exampleThumbnailInfos.clear();
@@ -326,6 +329,10 @@ namespace gladius::ui
                                                                      { return pair.first == info.filePath; });
                                               if (it == m_exampleFiles.end())
                                               {
+                                                   if (m_asyncLoader)
+                                                   {
+                                                       m_asyncLoader->cancelRequest(info.loadRequestId);
+                                                   }
                                                   // Release the thumbnail resources before removing
                                                   m_thumbnailExtractor->releaseThumbnail(info);
                                                   return true;
@@ -356,7 +363,7 @@ namespace gladius::ui
 #endif
 
             // Initialize the async thumbnail loader
-            m_asyncLoader = std::make_unique<AsyncThumbnailLoader>(m_logger);
+            m_asyncLoader = std::make_unique<AsyncThumbnailLoader>(m_logger, 1);
 
             // Force a refresh of thumbnails if we have any recent files
             if (!m_recentFiles.empty())
@@ -433,10 +440,37 @@ namespace gladius::ui
         // Update async thumbnail loading - process completed background loads
         if (m_asyncLoader)
         {
-            m_asyncLoader->update();
+            auto completions = m_asyncLoader->update();
+            for (auto & completion : completions)
+            {
+                if (!m_thumbnailExtractor)
+                {
+                    continue;
+                }
 
-            // Process any pending textures (must be done on main thread)
-            m_asyncLoader->processPendingTextures();
+                auto recentIt = std::find_if(
+                  m_thumbnailInfos.begin(),
+                  m_thumbnailInfos.end(),
+                  [&completion](auto const & info)
+                  { return info.loadRequestId == completion.requestId; });
+                if (recentIt != m_thumbnailInfos.end())
+                {
+                    m_thumbnailExtractor->applyAsyncLoadResult(*recentIt,
+                                                               std::move(completion.result));
+                    continue;
+                }
+
+                auto exampleIt = std::find_if(
+                  m_exampleThumbnailInfos.begin(),
+                  m_exampleThumbnailInfos.end(),
+                  [&completion](auto const & info)
+                  { return info.loadRequestId == completion.requestId; });
+                if (exampleIt != m_exampleThumbnailInfos.end())
+                {
+                    m_thumbnailExtractor->applyAsyncLoadResult(*exampleIt,
+                                                               std::move(completion.result));
+                }
+            }
 
             // Create GL textures for thumbnails in DecodedPending state
             if (m_thumbnailExtractor)
@@ -505,7 +539,7 @@ namespace gladius::ui
                 if (m_newModelCallback)
                 {
                     m_newModelCallback();
-                    m_isVisible = false;
+                    hide();
                 }
             }
 
@@ -516,7 +550,7 @@ namespace gladius::ui
                 {
                     m_openFileCallback(
                       std::filesystem::path()); // Empty path signals to show file dialog
-                    m_isVisible = false;
+                                        hide();
                 }
             }
 
@@ -584,6 +618,11 @@ namespace gladius::ui
             ImGui::EndChild();
         }
         ImGui::End();
+
+        if (!m_isVisible)
+        {
+            hide();
+        }
 
         return m_isVisible;
     }
@@ -675,7 +714,7 @@ namespace gladius::ui
                     if (m_restoreBackupCallback)
                     {
                         m_restoreBackupCallback(backup.filePath);
-                        m_isVisible = false;
+                        hide();
                     }
                 }
 
@@ -774,16 +813,48 @@ namespace gladius::ui
     void WelcomeScreen::show()
     {
         m_isVisible = true;
+
+        if (!m_asyncLoader)
+        {
+            return;
+        }
+
+        for (auto & info : m_thumbnailInfos)
+        {
+            if (info.loadState == ThumbnailLoadState::NotStarted)
+            {
+                m_asyncLoader->requestLoad(info, ThumbnailLoadPriority::High);
+            }
+        }
+        for (auto & info : m_exampleThumbnailInfos)
+        {
+            if (info.loadState == ThumbnailLoadState::NotStarted)
+            {
+                m_asyncLoader->requestLoad(info);
+            }
+        }
     }
 
     void WelcomeScreen::hide()
     {
-        // Cancel any pending async thumbnail loads
         if (m_asyncLoader)
         {
             m_asyncLoader->cancelAll();
         }
 
+        auto resetLoadingState = [](auto & infos)
+        {
+            for (auto & info : infos)
+            {
+                if (info.loadState == ThumbnailLoadState::Loading)
+                {
+                    info.loadState = ThumbnailLoadState::NotStarted;
+                    info.loadRequestId = 0;
+                }
+            }
+        };
+        resetLoadingState(m_thumbnailInfos);
+        resetLoadingState(m_exampleThumbnailInfos);
         m_isVisible = false;
     }
 
@@ -864,19 +935,9 @@ namespace gladius::ui
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5, 5));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 10));
 
-        // Process one file at a time to ensure thumbnails load incrementally
-        bool oneThumbnailLoaded = false;
-
         int itemIdx = 0;
         for (auto & info : thumbnailInfos)
         {
-            // Load thumbnail if not already loaded and we haven't loaded one this frame
-            if (!info.thumbnailLoaded && m_thumbnailExtractor && !oneThumbnailLoaded)
-            {
-                m_thumbnailExtractor->loadThumbnail(info);
-                oneThumbnailLoaded = true;
-            }
-
             // Create a unique ID for the item
             ImGui::PushID(itemIdx);
 
@@ -1202,7 +1263,7 @@ namespace gladius::ui
         // Success: Store path and hide screen atomically
         m_pendingFileOpen = path;
         m_clickProcessed = true;
-        m_isVisible = false;
+        hide();
         return true;
     }
 }
