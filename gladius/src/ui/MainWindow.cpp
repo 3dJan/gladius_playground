@@ -287,6 +287,83 @@ namespace gladius::ui
     {
         ImGui::Begin("Settings");
 
+        if (ImGui::CollapsingHeader("Compute Backend", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            if (!m_configManager)
+            {
+                ImGui::TextDisabled("Compute backend settings are unavailable.");
+            }
+            else
+            {
+                auto const backendName = [](compute::ComputeBackendKind backend) -> char const *
+                {
+                    switch (backend)
+                    {
+                    case compute::ComputeBackendKind::OpenCL:
+                        return "OpenCL";
+                    case compute::ComputeBackendKind::WebGPU:
+                        return "WebGPU";
+                    }
+                    return "Unknown";
+                };
+
+                auto configuredBackend =
+                  compute::getConfiguredComputeBackend(*m_configManager);
+                bool const openCLBuilt =
+                  compute::isComputeBackendBuilt(compute::ComputeBackendKind::OpenCL);
+                bool const webGPUBuilt =
+                  compute::isComputeBackendBuilt(compute::ComputeBackendKind::WebGPU);
+
+                if (openCLBuilt && webGPUBuilt)
+                {
+                    if (ImGui::BeginCombo("Backend", backendName(configuredBackend)))
+                    {
+                        auto addBackendOption = [&](compute::ComputeBackendKind backend)
+                        {
+                            if (!compute::isComputeBackendBuilt(backend))
+                            {
+                                return;
+                            }
+
+                            bool const isSelected = backend == configuredBackend;
+                            if (ImGui::Selectable(backendName(backend), isSelected))
+                            {
+                                compute::setConfiguredComputeBackend(*m_configManager, backend);
+                                m_configManager->save();
+                                configuredBackend = backend;
+                            }
+                            if (isSelected)
+                            {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        };
+
+                        addBackendOption(compute::ComputeBackendKind::OpenCL);
+                        addBackendOption(compute::ComputeBackendKind::WebGPU);
+                        ImGui::EndCombo();
+                    }
+                }
+                else if (openCLBuilt || webGPUBuilt)
+                {
+                    ImGui::Text("Backend: %s", backendName(configuredBackend));
+                    ImGui::TextDisabled("Only one compute backend is available in this build.");
+                }
+                else
+                {
+                    ImGui::TextDisabled("No compute backend is available in this build.");
+                }
+
+                auto const backendInUse =
+                  (m_computeAvailable && m_runtime)
+                    ? std::optional<compute::ComputeBackendKind>{m_runtime->getBackendKind()}
+                    : m_computeBackendAtStartup;
+                if (backendInUse.has_value() && configuredBackend != *backendInUse)
+                {
+                    ImGui::TextWrapped("Restart Gladius to apply this change.");
+                }
+            }
+        }
+
         if (ImGui::CollapsingHeader("Rendering"))
         {
             if (!m_computeAvailable)
@@ -606,6 +683,13 @@ namespace gladius::ui
                 configuredBackend = fallbackBackend;
             }
         }
+
+    #if defined(GLADIUS_ENABLE_OPENCL)
+        m_computeBackendAtStartup =
+          configuredBackend.value_or(compute::ComputeBackendKind::OpenCL);
+    #else
+        m_computeBackendAtStartup = compute::ComputeBackendKind::WebGPU;
+    #endif
 
         if (configuredBackend == compute::ComputeBackendKind::WebGPU
 #if !defined(GLADIUS_ENABLE_OPENCL)

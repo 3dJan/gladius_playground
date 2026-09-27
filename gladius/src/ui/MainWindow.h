@@ -9,6 +9,7 @@
 
 #include "../ConfigManager.h"
 #include "../Document.h"
+#include "../compute/ComputeBackend.h"
 #include "AboutDialog.h"
 #ifdef __EMSCRIPTEN__
 #include "BrowserFileDropInbox.h"
@@ -304,6 +305,8 @@ namespace gladius::ui
         std::shared_ptr<void> m_core;
     #endif
         std::unique_ptr<compute::IBackendRuntime> m_runtime;
+        /// Backend attempted during startup, used for restart guidance before a runtime is active.
+        std::optional<compute::ComputeBackendKind> m_computeBackendAtStartup;
         bool m_fileChanged{false};
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
