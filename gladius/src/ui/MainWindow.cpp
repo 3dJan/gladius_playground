@@ -587,8 +587,27 @@ namespace gladius::ui
             return; // Already started or completed
         }
 
-        if (auto const configuredBackend = getExplicitlyConfiguredBackend();
-            configuredBackend == compute::ComputeBackendKind::WebGPU
+        auto configuredBackend = getExplicitlyConfiguredBackend();
+        if (configuredBackend.has_value() && m_configManager != nullptr &&
+            !compute::isComputeBackendBuilt(*configuredBackend))
+        {
+            auto const fallbackBackend = compute::getConfiguredComputeBackend(*m_configManager);
+            if (fallbackBackend != *configuredBackend)
+            {
+                if (m_logger)
+                {
+                    m_logger->addEvent(
+                      {fmt::format("Configured compute backend '{}' is unavailable in this build; "
+                                   "falling back to '{}'",
+                                   compute::toString(*configuredBackend),
+                                   compute::toString(fallbackBackend)),
+                       events::Severity::Warning});
+                }
+                configuredBackend = fallbackBackend;
+            }
+        }
+
+        if (configuredBackend == compute::ComputeBackendKind::WebGPU
 #if !defined(GLADIUS_ENABLE_OPENCL)
             || !configuredBackend.has_value()
 #endif
@@ -648,8 +667,7 @@ namespace gladius::ui
             return;
         }
 
-        if (auto const configuredBackend = getExplicitlyConfiguredBackend();
-            configuredBackend.has_value() && !compute::isComputeBackendBuilt(*configuredBackend))
+        if (configuredBackend.has_value() && !compute::isComputeBackendBuilt(*configuredBackend))
         {
             m_computeInitState = ComputeInitState::Finalized;
             setComputeUnavailable(

@@ -396,6 +396,7 @@ namespace gladius
                                           font_size_in_pixels * font_scaling_factor))
         {
             std::cerr << "Warning: Could not load Roboto-Medium.ttf, using default font\n";
+            io.Fonts->AddFontDefault();
         }
 
         // merge in icons from Font Awesome
@@ -413,6 +414,15 @@ namespace gladius
             std::cerr
               << "Warning: Could not load fa-solid-900.ttf, icons may not display correctly\n";
         }
+
+#if defined(GLADIUS_UI_BACKEND_WEBGPU)
+        // The WebGPU renderer can become available after the first ImGui frame.
+        // Build the CPU atlas now so ImGui::NewFrame can safely select a font.
+        if (!io.Fonts->Build())
+        {
+            std::cerr << "Warning: Could not build the ImGui font atlas\n";
+        }
+#endif
 
         io.FontGlobalScale /= font_scaling_factor;
 
