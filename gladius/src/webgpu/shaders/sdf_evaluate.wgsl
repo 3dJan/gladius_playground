@@ -1,7 +1,7 @@
 struct EvaluationUniforms {
     iso_value: f32,
     point_count: u32,
-    reserved0: u32,
+    workgroups_x: u32,
     reserved1: u32,
 };
 
@@ -29,7 +29,7 @@ var<storage, read> parameters: Parameters;
 
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let index = global_id.x;
+    let index = global_id.x + global_id.y * evaluation.workgroups_x * 64u;
     if (index >= evaluation.point_count) {
         return;
     }

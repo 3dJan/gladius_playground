@@ -6,6 +6,7 @@
 
 #include "../Document.h"
 #include "../IconFontCppHeaders/IconsFontAwesome5.h"
+#include "SliceContourPolicy.h"
 #include "GLView.h"
 #include "Widgets.h"
 
@@ -181,9 +182,13 @@ namespace gladius::ui
             auto const now = std::chrono::steady_clock::now();
             auto const elapsed = now - m_lastWebGpuGeneration;
             constexpr auto throttleInterval = std::chrono::milliseconds(100);
-            if (paramsChanged && m_modelBounds.has_value() &&
-                !m_webGpuContourFuture.valid() &&
-                (m_webGpuCacheValid || elapsed > throttleInterval))
+            auto const requestDecision = decideWebGpuContourRequest(
+              WebGpuContourRequestInput{.parametersChanged = paramsChanged,
+                                        .generationInFlight = m_webGpuContourFuture.valid(),
+                                        .cacheValid = m_webGpuCacheValid,
+                                        .throttleElapsed = elapsed > throttleInterval,
+                                        .modelBoundsAvailable = m_modelBounds.has_value()});
+            if (requestDecision.shouldGenerate)
             {
                 nodes::SliceParameter sliceParameter;
                 sliceParameter.zHeight_mm = m_sliceZ_mm;
@@ -194,20 +199,21 @@ namespace gladius::ui
                 m_webGpuPendingMinFeatureSize_mm = m_minFeatureSize_mm;
                 m_webGpuPendingAdaptiveContour = m_useAdaptiveContour;
                 m_webGpuPendingStructuralEditEpoch = structuralEditEpoch;
-                                m_webGpuPendingBoundsGeneration = m_modelBoundsGeneration;
+                m_webGpuPendingBoundsGeneration = m_modelBoundsGeneration;
                 m_webGpuCacheValid = false;
                 m_lastWebGpuGeneration = now;
 
                 Document * const document = m_document;
-                float const sliceZ = m_sliceZ_mm;
-                                auto const modelBounds = m_modelBounds;
-                m_webGpuContourFuture = std::async(
-                  std::launch::async,
+                auto const sliceZ = m_sliceZ_mm;
+                auto modelBounds = m_modelBounds;
+                if (requestDecision.useBuildVolumeFallback)
+                {
+                    modelBounds.reset();
+                }
+                                m_webGpuContourFuture = std::async(
+                                    std::launch::async,
                                     [document, sliceZ, sliceParameter, modelBounds]()
-                                    {
-                                            return document->generateContourWebGpu(
-                                                sliceZ, sliceParameter, modelBounds);
-                                    });
+                                    { return document->generateContourWebGpu(sliceZ, sliceParameter, modelBounds); });
             }
         }
 

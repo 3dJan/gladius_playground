@@ -1,4 +1,5 @@
 #include "webgpu/WebGPUSdfEvaluator.h"
+#include "webgpu/WebGPUSdfDispatch.h"
 
 #include <webgpu/webgpu_cpp.h>
 
@@ -15,13 +16,11 @@ namespace gladius::webgpu
 {
     namespace
     {
-        constexpr std::uint32_t WORKGROUP_SIZE = 64u;
-
         struct alignas(16) EvaluationUniforms
         {
             float isoValue{};
             std::uint32_t pointCount{};
-            std::uint32_t reserved0{};
+            std::uint32_t workgroupsX{};
             std::uint32_t reserved1{};
         };
 
@@ -377,6 +376,8 @@ namespace gladius::webgpu
         {
             throw std::invalid_argument("WebGPU SDF evaluation point count is too large");
         }
+        auto const pointCount = static_cast<std::uint32_t>(request.positions.size());
+        auto const dispatchPlan = makeSdfEvaluationDispatchPlan(pointCount);
 
         std::vector<EvaluationPosition> positions;
         positions.reserve(request.positions.size());
@@ -394,8 +395,8 @@ namespace gladius::webgpu
                        request.imagePayloadTable);
         buffers.write(m_context->getQueue(),
                       EvaluationUniforms{request.isoValue,
-                                         static_cast<std::uint32_t>(positions.size()),
-                                         0u,
+                                         pointCount,
+                                         dispatchPlan.workgroupsX,
                                          0u},
                       positions,
                       request.parameterValues);
@@ -601,13 +602,11 @@ namespace gladius::webgpu
         bindGroupDescriptor.entries = allEntries.data();
         auto const bindGroup = m_context->getDevice().CreateBindGroup(&bindGroupDescriptor);
 
-        auto const workgroupCount = (static_cast<std::uint32_t>(positions.size()) + WORKGROUP_SIZE - 1u) /
-                                     WORKGROUP_SIZE;
         auto const encoder = m_context->getDevice().CreateCommandEncoder();
         auto const computePass = encoder.BeginComputePass();
         computePass.SetPipeline(pipeline);
         computePass.SetBindGroup(0u, bindGroup);
-        computePass.DispatchWorkgroups(workgroupCount);
+        computePass.DispatchWorkgroups(dispatchPlan.workgroupsX, dispatchPlan.workgroupsY, 1u);
         computePass.End();
         encoder.CopyBufferToBuffer(buffers.output(),
                                    0u,
