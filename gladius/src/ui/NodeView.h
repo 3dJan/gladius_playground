@@ -183,6 +183,7 @@ namespace gladius::ui
         void footer(nodes::NodeBase & node);
         void inputControls(nodes::NodeBase & node, nodes::ParameterMap::reference parameter);
         void showLinkAssignmentMenu(nodes::ParameterMap::reference parameter);
+        void showOutputLinkAssignmentMenu(nodes::Port const & port);
         void showInputAndOutputs(nodes::NodeBase & node);
         void outputPins(nodes::NodeBase & node);
         void viewInputNode(nodes::NodeBase & node);
@@ -286,6 +287,7 @@ namespace gladius::ui
         bool m_showContextMenu{false};
 
         bool m_showLinkAssignmentMenu{false};
+        bool m_showOutputLinkAssignmentMenu{false};
         bool m_popStyle{false};
 
         bool m_resoureIdNodesVisible{false};

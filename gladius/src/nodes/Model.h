@@ -169,15 +169,19 @@ namespace gladius::nodes
         }
 
         /**
-         * \brief Test if a link would be valid (compatible types, no circular dependency
-         * \param source
-         * \param target
-         * \return
-         * \note Might update the graph (that is why the method is not const)
+         * \brief Test if a link satisfies the target's type rules and does not create a cycle.
+         * \param source Source output port.
+         * \param target Target input parameter.
+         * \return true when the prospective connection is valid.
+         * \note Might update the graph (that is why the method is not const).
          */
         [[nodiscard]] bool isLinkValid(Port & source, VariantParameter & target);
 
         [[nodiscard]] bool isLinkValid(PortId const sourceId, ParameterId const targetId);
+
+        /// @brief Check whether a type can be connected to an input without mutating node types.
+        [[nodiscard]] bool canLinkTypeToInput(ParameterId targetId,
+                              std::type_index sourceType) const;
 
         auto addLink(PortId const start, ParameterId const end, bool skipCheck = false) -> bool;
 
@@ -204,7 +208,7 @@ namespace gladius::nodes
         auto getPortRegistry() -> PortRegistry &;
 
         [[nodiscard]] std::unordered_set<int64_t> collectCompatibleLinkCandidates(int64_t sourceEndpointId,
-                                              bool sourceIsOutput);
+                                                                                  bool sourceIsOutput);
 
         void addArgument(ParameterName name, VariantParameter parameter);
         void removeArgument(ParameterName const & name);
@@ -273,6 +277,9 @@ namespace gladius::nodes
         std::string getSourceName(PortId portId);
 
         Port * getPort(PortId portId);
+        Port const * getPort(PortId portId) const;
+        VariantParameter * getParameter(ParameterId parameterId);
+        VariantParameter const * getParameter(ParameterId parameterId) const;
 
         void invalidateGraph();
 
@@ -304,6 +311,7 @@ namespace gladius::nodes
       private:
         void updateOrder();
         auto buildGraph() -> graph::AdjacencyListDirectedGraph &;
+        void rebuildSocketRegistries();
 
         NodeRegistry m_nodes;
         PortRegistry m_outPorts;
@@ -332,6 +340,7 @@ namespace gladius::nodes
         bool m_nodesHaveBeenLayouted = false;
 
         bool m_isValid = true;
+        bool m_typesAreValid = true;
         std::unordered_map<ParameterId, NumericWidgetLayoutMode> m_numericWidgetLayoutModes;
         std::unordered_map<ParameterId, VectorDisplayMode> m_vectorDisplayModes;
     };

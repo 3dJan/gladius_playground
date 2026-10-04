@@ -2,6 +2,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -86,6 +87,14 @@ namespace gladius::nodes
     class NodeBase
     {
       public:
+            struct TypeState
+            {
+                ParameterMap parameters;
+                Outputs outputs;
+                RuleType ruleType{RuleType::Default};
+                std::optional<TypeRule> activeRule;
+            };
+
         NodeBase(NodeName baseName, NodeId internalId, Category category)
             : m_name(std::move(baseName))
             , m_id(internalId)
@@ -221,6 +230,20 @@ namespace gladius::nodes
 
         bool updateTypes(nodes::Model & model);
 
+        /// @brief Checks a prospective input type without applying a type rule.
+        [[nodiscard]] bool canAcceptInputType(ParameterName const & inputName,
+                                              std::type_index inputType,
+                                              Model const * model = nullptr) const;
+
+        /// @brief Checks whether the current connected inputs satisfy one declared type rule.
+        [[nodiscard]] bool hasCompatibleTypeRule(Model const & model) const;
+
+        /// @brief Captures mutable socket/type state for a transactional graph edit.
+        [[nodiscard]] TypeState captureTypeState() const;
+
+        /// @brief Restores captured socket/type state while preserving map element addresses.
+        void restoreTypeState(TypeState const & state);
+
         virtual void applyTypeRule(const TypeRule & rule)
         {
             // Loop through each expected input in the rule
@@ -308,6 +331,7 @@ namespace gladius::nodes
             }
 
             m_ruleType = rule.type;
+            m_activeTypeRule = rule;
             updateNodeIds();
         }
 
@@ -333,6 +357,7 @@ namespace gladius::nodes
         float2 m_screenPos{};
         TypeRules m_typeRules;
         RuleType m_ruleType{RuleType::Default};
+        std::optional<TypeRule> m_activeTypeRule;
 
       private:
         [[nodiscard]] virtual NodeBase * cloneImpl() const

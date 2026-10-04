@@ -255,6 +255,7 @@ namespace gladius::nodes
                 partNode->parameter()[extendedName] =
                   VariantParameter(initialValue, parameter.getContentType());
                 partNode->parameter()[extendedName].setArgumentAssoziation(partParameterName);
+                                partNode->parameter()[extendedName].setParentId(partNode->getId());
                 registerInput(partNode->parameter()[extendedName]);
             }
 
@@ -362,6 +363,7 @@ namespace gladius::nodes
         }
         parameter.setSortIndex(static_cast<int>(m_beginNode->parameter().size()));
         m_beginNode->parameter()[name] = parameter;
+        m_beginNode->parameter()[name].setParentId(m_beginNode->getId());
         m_beginNode->addOutputPort(name, parameter.getTypeIndex());
         m_beginNode->getOutputs()[name].setSortIndex(parameter.getSortIndex());
         registerInput(m_beginNode->parameter()[name]);
@@ -376,6 +378,7 @@ namespace gladius::nodes
         }
 
         m_endNode->parameter()[name] = parameter;
+        m_endNode->parameter()[name].setParentId(m_endNode->getId());
         registerInput(m_endNode->parameter()[name]);
     }
 
@@ -581,71 +584,65 @@ namespace gladius::nodes
 
         if (sourceIsOutput)
         {
-            auto const sourcePortIter = m_outPorts.find(static_cast<PortId>(sourceEndpointId));
-            if (sourcePortIter == m_outPorts.end() || sourcePortIter->second == nullptr)
+            auto * sourcePort = getPort(static_cast<PortId>(sourceEndpointId));
+            if (sourcePort == nullptr)
             {
                 return candidates;
             }
 
-            for (auto const & [parameterId, parameter] : m_inputParameter)
+            for (auto & [nodeId, node] : m_nodes)
             {
-                auto * targetParameter = dynamic_cast<VariantParameter *>(parameter);
-                if (targetParameter == nullptr)
+                (void) nodeId;
+                for (auto & [parameterName, targetParameter] : node->parameter())
                 {
-                    continue;
-                }
+                    (void) parameterName;
+                    if (!targetParameter.isVisible() || targetParameter.isInternal())
+                    {
+                        continue;
+                    }
 
-                if (targetParameter->getParentId() == sourcePortIter->second->getParentId())
-                {
-                    continue;
-                }
+                    if (targetParameter.getParentId() == sourcePort->getParentId())
+                    {
+                        continue;
+                    }
 
-                if (targetParameter->getTypeIndex() != sourcePortIter->second->getTypeIndex())
-                {
-                    continue;
-                }
-
-                if (isLinkValid(sourcePortIter->second->getId(), targetParameter->getId()))
-                {
-                    candidates.insert(parameterId);
+                    if (isLinkValid(*sourcePort, targetParameter))
+                    {
+                        candidates.insert(targetParameter.getId());
+                    }
                 }
             }
 
             return candidates;
         }
 
-        auto const sourceParameterIter = m_inputParameter.find(static_cast<ParameterId>(sourceEndpointId));
-        if (sourceParameterIter == m_inputParameter.end())
+        auto * sourceParameter = getParameter(static_cast<ParameterId>(sourceEndpointId));
+        if (sourceParameter == nullptr || !sourceParameter->isVisible() ||
+            sourceParameter->isInternal())
         {
             return candidates;
         }
 
-        auto * sourceParameter = dynamic_cast<VariantParameter *>(sourceParameterIter->second);
-        if (sourceParameter == nullptr)
+        for (auto & [nodeId, node] : m_nodes)
         {
-            return candidates;
-        }
-
-        for (auto const & [portId, port] : m_outPorts)
-        {
-            if (port == nullptr)
+            (void) nodeId;
+            for (auto & [portName, port] : node->getOutputs())
             {
-                continue;
-            }
+                (void) portName;
+                if (!port.isVisible())
+                {
+                    continue;
+                }
 
-            if (port->getParentId() == sourceParameter->getParentId())
-            {
-                continue;
-            }
+                if (port.getParentId() == sourceParameter->getParentId())
+                {
+                    continue;
+                }
 
-            if (port->getTypeIndex() != sourceParameter->getTypeIndex())
-            {
-                continue;
-            }
-
-            if (isLinkValid(port->getId(), sourceParameter->getId()))
-            {
-                candidates.insert(portId);
+                if (isLinkValid(port, *sourceParameter))
+                {
+                    candidates.insert(port.getId());
+                }
             }
         }
 
@@ -749,18 +746,18 @@ namespace gladius::nodes
 
     bool Model::removeLink(const PortId startId, const ParameterId endId)
     {
-        const auto sourcePort = m_outPorts.find(startId);
-        if (sourcePort == std::end(m_outPorts))
-        {
-            return false;
-        }
-        const auto targetParameter = m_inputParameter.find(endId);
-        if (targetParameter == std::end(m_inputParameter))
+        if (getPort(startId) == nullptr)
         {
             return false;
         }
 
-        targetParameter->second->getSource().reset();
+        auto * targetParameter = getParameter(endId);
+        if (targetParameter == nullptr)
+        {
+            return false;
+        }
+
+        targetParameter->getSource().reset();
         m_graphRequiresUpdate = true;
         m_typesRequireUpdate = true;
         return true;
@@ -777,6 +774,12 @@ namespace gladius::nodes
             return false;
         }
 
+        if (getPort(source.getId()) != &source || getParameter(target.getId()) != &target ||
+            !canLinkTypeToInput(target.getId(), source.getTypeIndex()))
+        {
+            return false;
+        }
+
         updateGraphAndOrderIfNeeded();
         auto const isSourceSuccessor =
           isDependingOn(getGraph(), source.getParentId(), target.getParentId());
@@ -786,32 +789,16 @@ namespace gladius::nodes
 
     bool Model::isLinkValid(PortId const sourceId, ParameterId const targetId)
     {
-        const auto sourcePort = m_outPorts.find(sourceId);
-        if (sourcePort == std::end(m_outPorts))
-        {
-            return false;
-        }
-        const auto targetParameter = m_inputParameter.find(targetId);
-        if (targetParameter == std::end(m_inputParameter))
-        {
-            return false;
-        }
-
-        auto const variantTarget = dynamic_cast<VariantParameter *>(targetParameter->second);
-
-        if ((variantTarget != nullptr) && (!isLinkValid(*sourcePort->second, *variantTarget)))
-        {
-            return false;
-        }
-
-        return true;
+        auto * sourcePort = getPort(sourceId);
+        auto * targetParameter = getParameter(targetId);
+        return sourcePort != nullptr && targetParameter != nullptr &&
+               isLinkValid(*sourcePort, *targetParameter);
     }
 
     bool Model::addLink(const PortId startId, const ParameterId endId, bool skipCheck)
     {
-        const auto sourcePort = m_outPorts.find(startId);
-
-        if (sourcePort == std::end(m_outPorts))
+        auto * sourcePort = getPort(startId);
+        if (sourcePort == nullptr)
         {
             if (m_logger)
             {
@@ -820,8 +807,8 @@ namespace gladius::nodes
             }
             return false;
         }
-        const auto targetParameter = m_inputParameter.find(endId);
-        if (targetParameter == std::end(m_inputParameter))
+        auto * targetParameter = getParameter(endId);
+        if (targetParameter == nullptr)
         {
             if (m_logger)
             {
@@ -831,27 +818,51 @@ namespace gladius::nodes
             return false;
         }
 
-        auto const variantTarget = dynamic_cast<VariantParameter *>(targetParameter->second);
-
-        if ((variantTarget == nullptr))
-        {
-            return false;
-        }
+        auto const originalGraphRequiresUpdate = m_graphRequiresUpdate;
+        auto const originalTypesRequireUpdate = m_typesRequireUpdate;
+        auto const originalTypesAreValid = m_typesAreValid;
+        auto const originalModelIsValid = m_isValid;
+        auto const originalLastParameterId = m_lastParameterId;
+        std::vector<std::pair<NodeId, NodeBase::TypeState>> originalNodeStates;
 
         if (!skipCheck)
         {
-            if (!isLinkValid(*sourcePort->second, *variantTarget))
+            if (!isLinkValid(*sourcePort, *targetParameter))
             {
                 return false;
             }
+
+            originalNodeStates.reserve(m_nodes.size());
+            for (auto const & [nodeId, node] : m_nodes)
+            {
+                originalNodeStates.emplace_back(nodeId, node->captureTypeState());
+            }
         }
 
-        targetParameter->second->setInputFromPort(*sourcePort->second);
+        targetParameter->setInputFromPort(*sourcePort);
         invalidateGraph();
 
         if (!skipCheck)
         {
-            return updateTypes();
+            if (!updateTypes())
+            {
+                for (auto const & [nodeId, state] : originalNodeStates)
+                {
+                    auto const nodeIter = m_nodes.find(nodeId);
+                    if (nodeIter != m_nodes.end())
+                    {
+                        nodeIter->second->restoreTypeState(state);
+                    }
+                }
+
+                rebuildSocketRegistries();
+                m_graphRequiresUpdate = originalGraphRequiresUpdate;
+                m_typesRequireUpdate = originalTypesRequireUpdate;
+                m_typesAreValid = originalTypesAreValid;
+                m_isValid = originalModelIsValid;
+                m_lastParameterId = originalLastParameterId;
+                return false;
+            }
         }
 
         return true;
@@ -894,8 +905,8 @@ namespace gladius::nodes
                     {
                         if (in.second.getSource())
                         {
-                            const auto srcPort = m_outPorts[in.second.getSource().value().portId];
-                            if ((srcPort != nullptr) && srcPort->getParentId() == id)
+                            auto const * srcPort = getPort(in.second.getSource().value().portId);
+                            if (srcPort != nullptr && srcPort->getParentId() == id)
                             {
                                 in.second.getSource().reset();
                             }
@@ -921,11 +932,25 @@ namespace gladius::nodes
                                        nodeToRemove->second->getId()),
                            events::Severity::Warning});
                     }
+                    if (paramIter != std::end(m_inputParameter) && paramIter->second == &param)
+                    {
+                        m_inputParameter.erase(paramIter);
+                    }
                     continue; // Skip this parameter instead of throwing
                 }
-                if (paramIter != std::end(m_inputParameter))
+                if (paramIter != std::end(m_inputParameter) && paramIter->second == &param)
                 {
                     m_inputParameter.erase(paramIter);
+                }
+            }
+
+            for (auto & [portName, port] : nodeToRemove->second->getOutputs())
+            {
+                (void) portName;
+                auto const portIter = m_outPorts.find(port.getId());
+                if (portIter != m_outPorts.end() && portIter->second == &port)
+                {
+                    m_outPorts.erase(portIter);
                 }
             }
 
@@ -942,6 +967,24 @@ namespace gladius::nodes
         const auto nodeToRemove = m_nodes.find(idOfNodeWithoutLinks);
         if (nodeToRemove != std::end(m_nodes))
         {
+            for (auto & [parameterName, parameter] : nodeToRemove->second->parameter())
+            {
+                (void) parameterName;
+                auto const parameterIter = m_inputParameter.find(parameter.getId());
+                if (parameterIter != m_inputParameter.end() && parameterIter->second == &parameter)
+                {
+                    m_inputParameter.erase(parameterIter);
+                }
+            }
+            for (auto & [portName, port] : nodeToRemove->second->getOutputs())
+            {
+                (void) portName;
+                auto const portIter = m_outPorts.find(port.getId());
+                if (portIter != m_outPorts.end() && portIter->second == &port)
+                {
+                    m_outPorts.erase(portIter);
+                }
+            }
             m_nodes.erase(nodeToRemove);
         }
         m_graphRequiresUpdate = true;
@@ -1003,10 +1046,10 @@ namespace gladius::nodes
             {
                 if (parameter.second.getSource().has_value())
                 {
-                    auto srcIter = m_outPorts.find(parameter.second.getSource().value().portId);
-                    if (srcIter != std::end(m_outPorts))
+                    auto const * sourcePort = getPort(parameter.second.getSource().value().portId);
+                    if (sourcePort != nullptr)
                     {
-                        const auto srcId = srcIter->second->getParentId();
+                        const auto srcId = sourcePort->getParentId();
                         m_graph.addDependency(id, srcId);
                     }
                     else
@@ -1037,6 +1080,7 @@ namespace gladius::nodes
     {
         for (auto & inputPort : node.parameter())
         {
+            inputPort.second.setParentId(node.getId());
             registerInput(inputPort.second);
         }
     }
@@ -1050,7 +1094,7 @@ namespace gladius::nodes
     {
         if (!m_typesRequireUpdate)
         {
-            return m_isValid;
+            return m_typesAreValid;
         }
 
         bool isValid = true;
@@ -1072,7 +1116,8 @@ namespace gladius::nodes
             isValid = isValid && nodeIsValid;
         }
         m_typesRequireUpdate = false;
-        return isValid;
+        m_typesAreValid = isValid;
+        return m_typesAreValid;
     }
 
     bool Model::isValid()
@@ -1165,13 +1210,13 @@ namespace gladius::nodes
 
     std::string Model::getSourceName(PortId portId)
     {
-        auto portIter = m_outPorts.find(portId);
-        if (portIter == std::end(m_outPorts))
+        auto const * port = getPort(portId);
+        if (port == nullptr)
         {
             return {};
         }
 
-        const auto sourceNode = getNode(portIter->second->getParentId());
+        const auto sourceNode = getNode(port->getParentId());
         if (!sourceNode.has_value())
         {
             return {};
@@ -1180,18 +1225,90 @@ namespace gladius::nodes
         auto sourceName =
           (sourceNode.value() == getBeginNode()) ? "inputs" : sourceNode.value()->getUniqueName();
         sourceName += ".";
-        sourceName += portIter->second->getShortName();
+        sourceName += port->getShortName();
         return sourceName;
     }
 
     Port * Model::getPort(PortId portId)
     {
-        auto portIter = m_outPorts.find(portId);
-        if (portIter == std::end(m_outPorts))
+        return const_cast<Port *>(static_cast<Model const &>(*this).getPort(portId));
+    }
+
+    Port const * Model::getPort(PortId portId) const
+    {
+        for (auto const & [nodeId, node] : m_nodes)
         {
-            return nullptr;
+            (void) nodeId;
+            for (auto const & [portName, port] : node->outputs())
+            {
+                (void) portName;
+                if (port.getId() == portId)
+                {
+                    return &port;
+                }
+            }
         }
-        return portIter->second;
+        return nullptr;
+    }
+
+    VariantParameter * Model::getParameter(ParameterId parameterId)
+    {
+        return const_cast<VariantParameter *>(
+          static_cast<Model const &>(*this).getParameter(parameterId));
+    }
+
+    VariantParameter const * Model::getParameter(ParameterId parameterId) const
+    {
+        for (auto const & [nodeId, node] : m_nodes)
+        {
+            (void) nodeId;
+            for (auto const & [parameterName, parameter] : node->constParameter())
+            {
+                (void) parameterName;
+                if (parameter.getId() == parameterId)
+                {
+                    return &parameter;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    bool Model::canLinkTypeToInput(ParameterId targetId, std::type_index sourceType) const
+    {
+        auto const * targetParameter = getParameter(targetId);
+        if (targetParameter == nullptr)
+        {
+            return false;
+        }
+
+        auto const targetNode = getNode(targetParameter->getParentId());
+        if (!targetNode.has_value() || targetNode.value() == nullptr)
+        {
+            return false;
+        }
+
+        for (auto const & [inputName, parameter] : targetNode.value()->constParameter())
+        {
+            if (parameter.getId() == targetId)
+            {
+                return targetNode.value()->canAcceptInputType(inputName, sourceType, this);
+            }
+        }
+        return false;
+    }
+
+    void Model::rebuildSocketRegistries()
+    {
+        m_outPorts.clear();
+        m_inputParameter.clear();
+        for (auto & [nodeId, node] : m_nodes)
+        {
+            (void) nodeId;
+            node->updateNodeIds();
+            registerOutputs(*node);
+            registerInputs(*node);
+        }
     }
 
     void Model::invalidateGraph()
@@ -1352,6 +1469,7 @@ namespace gladius::nodes
         m_outputOrder.clear();
         m_graphRequiresUpdate = true;
         m_typesRequireUpdate = true;
+        m_typesAreValid = true;
 
         // Reset state flags
         m_allInputReferencesAreValid = false;

@@ -65,9 +65,45 @@ namespace gladius::nodes
     {
         ZoneScopedN("ValidateModel");
         model.updateGraphAndOrderIfNeeded();
-        model.updateTypes();
+        auto const typeRulesAreValid = model.updateTypes();
 
         model.updateValidityState();
+
+        if (!typeRulesAreValid)
+        {
+            auto const modelDisplayName = model.getDisplayName().value_or("unknown");
+            auto const modelId = model.getResourceId();
+            auto const modelInfo = fmt::format("{} (ID: {})", modelDisplayName, modelId);
+
+            for (auto & [nodeId, node] : model)
+            {
+                if (node->hasCompatibleTypeRule(model))
+                {
+                    continue;
+                }
+
+                auto const message = fmt::format(
+                  "Node '{}' has no type rule matching its connected inputs.",
+                  node->getDisplayName());
+                issueList.add(ValidationIssue{.message = message,
+                                              .model = modelInfo,
+                                              .node = node->getDisplayName(),
+                                              .port = "",
+                                              .parameter = "",
+                                              .type = IssueType::TypeMismatch,
+                                              .severity = IssueSeverity::Error,
+                                              .fixSuggestion =
+                                                getFixSuggestion(IssueType::TypeMismatch),
+                                              .modelId = modelId,
+                                              .nodeId = nodeId});
+                m_errors.push_back(ValidationError{message,
+                                                   modelInfo,
+                                                   node->getDisplayName(),
+                                                   "",
+                                                   ""});
+                model.setIsValid(false);
+            }
+        }
 
         // Check for cyclic dependencies - this is a model-level issue
         if (graph::isCyclic(model.getGraph()))

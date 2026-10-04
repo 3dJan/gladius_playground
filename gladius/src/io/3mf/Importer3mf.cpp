@@ -869,7 +869,8 @@ namespace gladius::io
                 if (sourcePort)
                 {
                     // Silently ignore link failures - validation will catch these after load
-                    (void) model.addLink(sourcePort->getId(), parameter->getId());
+                                        (void) model.addLink(
+                                            sourcePort->getId(), parameter->getId(), /*skipCheck=*/true);
                 }
                 // Skip silently if source port not found - validation will catch these after load
             }

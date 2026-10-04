@@ -199,9 +199,13 @@ namespace gladius::ui
                 ImGui::PushStyleColor(ImGuiCol_Text,
                                       LinkColors::applyPinVisualState(
                                         typeToColor(typeIndex), beginOutState));
-                ImGui::TextUnformatted(
-                  reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
-                                registerCurrentItemAsPinHitbox(false);
+                if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
+                                  ImVec2(ImGui::GetFontSize() * 1.6f,
+                                         ImGui::GetFontSize() * 1.6f)))
+                {
+                    showOutputLinkAssignmentMenu(output);
+                }
+                registerCurrentItemAsPinHitbox(false);
                 showPinDragTooltip(outputName, typeIndex, beginOutState);
                 ImGui::PopStyleColor();
                 ed::EndPin();
@@ -2393,11 +2397,11 @@ namespace gladius::ui
         // Copy the required data so the callback does not hold dangling references across frames
         nodes::ParameterId const targetParamId = parameter.second.getId();
         nodes::NodeId const targetParentId = parameter.second.getParentId();
-        std::type_index const targetType = parameter.second.getTypeIndex();
         std::string const targetNameCopy = parameter.first; // by-value copy
+        auto const modelAtOpen = m_modelEditor->currentModel();
 
         m_modelEditor->showPopupMenu(
-          [this, targetParamId, targetParentId, targetType, targetNameCopy]()
+          [this, targetParamId, targetParentId, targetNameCopy, modelAtOpen]()
           {
               if (m_showLinkAssignmentMenu)
               {
@@ -2405,19 +2409,110 @@ namespace gladius::ui
                   m_showLinkAssignmentMenu = false;
               }
               const auto model = m_modelEditor->currentModel();
-              if (!model)
+              if (!model || model != modelAtOpen)
+              {
+                  m_showLinkAssignmentMenu = false;
+                  m_modelEditor->closePopupMenu();
+                  return;
+              }
+
+              auto const selection = inputMenu(*model, targetParamId);
+              if (!selection.has_value())
               {
                   return;
               }
 
-              const auto newSource = inputMenu(
-                *model, targetParamId, targetParentId, targetType, targetNameCopy);
-              if (newSource.has_value())
+              m_modelEditor->createUndoRestorePoint("Connect nodes");
+              nodes::PortId sourcePortId = selection->sourcePortId;
+              std::optional<nodes::NodeId> createdNodeId;
+
+              if (selection->newConstantType.has_value())
               {
-                  model->addLink(newSource.value(), targetParamId, false);
-                  m_modelEditor->markModelAsModified();
-                  m_modelEditor->closePopupMenu();
+                  auto position = ed::ScreenToCanvas(ImGui::GetMousePos());
+                  position.x -= 300.f;
+                  auto const parentNode = model->getNode(targetParentId);
+                  if (parentNode.has_value() && parentNode.value() != nullptr)
+                  {
+                      position = ed::GetNodePosition(targetParentId);
+                      position.x -= 300.f;
+                  }
+
+                  if (*selection->newConstantType == nodes::ParameterTypeIndex::Float)
+                  {
+                      auto * newNode = model->create<nodes::ConstantScalar>();
+                      newNode->setDisplayName(targetNameCopy);
+                      sourcePortId = newNode->getValueOutputPort().getId();
+                      createdNodeId = newNode->getId();
+                  }
+                  else if (*selection->newConstantType == nodes::ParameterTypeIndex::Float3)
+                  {
+                      auto * newNode = model->create<nodes::ConstantVector>();
+                      newNode->setDisplayName(targetNameCopy);
+                      sourcePortId = newNode->getVectorOutputPort().getId();
+                      createdNodeId = newNode->getId();
+                  }
+                  else if (*selection->newConstantType == nodes::ParameterTypeIndex::Matrix4)
+                  {
+                      auto * newNode = model->create<nodes::ConstantMatrix>();
+                      newNode->setDisplayName(targetNameCopy);
+                      sourcePortId = newNode->getMatrixOutputPort().getId();
+                      createdNodeId = newNode->getId();
+                  }
+
+                  if (createdNodeId.has_value())
+                  {
+                      ed::SetNodePosition(*createdNodeId, position);
+                  }
               }
+
+              if (sourcePortId != 0 && model->addLink(sourcePortId, targetParamId, false))
+              {
+                  m_modelEditor->markModelAsModified();
+              }
+              else if (createdNodeId.has_value())
+              {
+                  model->remove(*createdNodeId);
+              }
+
+              m_modelEditor->closePopupMenu();
+          });
+    }
+
+    void NodeView::showOutputLinkAssignmentMenu(nodes::Port const & port)
+    {
+        m_showOutputLinkAssignmentMenu = true;
+        nodes::PortId const sourcePortId = port.getId();
+        auto const modelAtOpen = m_modelEditor->currentModel();
+
+        m_modelEditor->showPopupMenu(
+          [this, sourcePortId, modelAtOpen]()
+          {
+              if (m_showOutputLinkAssignmentMenu)
+              {
+                  ImGui::OpenPopup("Destinations");
+                  m_showOutputLinkAssignmentMenu = false;
+              }
+
+              auto const model = m_modelEditor->currentModel();
+              if (!model || model != modelAtOpen)
+              {
+                  m_showOutputLinkAssignmentMenu = false;
+                  m_modelEditor->closePopupMenu();
+                  return;
+              }
+
+              auto const targetParameterId = outputMenu(*model, sourcePortId);
+              if (!targetParameterId.has_value())
+              {
+                  return;
+              }
+
+              m_modelEditor->createUndoRestorePoint("Connect nodes");
+              if (model->addLink(sourcePortId, *targetParameterId, false))
+              {
+                  m_modelEditor->markModelAsModified();
+              }
+              m_modelEditor->closePopupMenu();
           });
     }
 
@@ -2618,11 +2713,13 @@ namespace gladius::ui
                     ImGui::TableNextColumn(); // OutPin
 
                     BeginPin(ed::PinId(outPort.getId()), ed::PinKind::Output);
-                    ImGui::SetWindowFontScale(1.5f);
-                    ImGui::TextUnformatted(
-                      reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
-                    ImGui::SetWindowFontScale(1.0f);
-                                        registerCurrentItemAsPinHitbox(false);
+                    if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
+                                      ImVec2(ImGui::GetFontSize() * 1.6f,
+                                             ImGui::GetFontSize() * 1.6f)))
+                    {
+                        showOutputLinkAssignmentMenu(outPort);
+                    }
+                    registerCurrentItemAsPinHitbox(false);
                     showPinDragTooltip(outName, outPort.getTypeIndex(), outPinState);
                     ed::EndPin();
 
@@ -2723,9 +2820,12 @@ namespace gladius::ui
 
                     const ed::PinId pinId = output.second.getId();
                     BeginPin(pinId, ed::PinKind::Output);
-                    ImGui::SetWindowFontScale(1.5f); // Scale up the font by 1.5
-                    ImGui::TextUnformatted(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT));
-                    ImGui::SetWindowFontScale(1.0f); // Reset the font scale to default
+                    if (ImGui::Button(reinterpret_cast<const char *>(ICON_FA_CARET_RIGHT),
+                                      ImVec2(ImGui::GetFontSize() * 1.6f,
+                                             ImGui::GetFontSize() * 1.6f)))
+                    {
+                        showOutputLinkAssignmentMenu(output.second);
+                    }
                     registerCurrentItemAsPinHitbox(false);
                     showPinDragTooltip(output.first, output.second.getTypeIndex(), outState);
 

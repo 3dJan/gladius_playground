@@ -1,14 +1,21 @@
 #pragma once
 
-#include <Model.h>
+#include "../nodes/Model.h"
+#include <optional>
 #include <typeindex>
 
 namespace gladius::ui
 {
-    using OptionalPortId = std::optional<nodes::PortId>;
-    auto inputMenu(nodes::Model & nodes,
-                   nodes::ParameterId targetId,
-                   nodes::NodeId targetParentId,
-                   std::type_index targetType,
-                   std::string const & targetName) -> OptionalPortId;
+    struct InputMenuSelection
+    {
+        nodes::PortId sourcePortId{};
+        std::optional<std::type_index> newConstantType;
+    };
+
+    using OptionalInputMenuSelection = std::optional<InputMenuSelection>;
+    using OptionalParameterId = std::optional<nodes::ParameterId>;
+
+    auto inputMenu(nodes::Model & model, nodes::ParameterId targetId) -> OptionalInputMenuSelection;
+
+    auto outputMenu(nodes::Model & model, nodes::PortId sourcePortId) -> OptionalParameterId;
 } // namespace gladius::ui

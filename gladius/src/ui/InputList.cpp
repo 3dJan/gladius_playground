@@ -1,135 +1,137 @@
 #include "InputList.h"
 #include "LinkColors.h"
 #include "Style.h"
-#include "graph/GraphAlgorithms.h"
-#include <imguinodeeditor.h>
 
-namespace ed = ax::NodeEditor;
+#include <algorithm>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace gladius::ui
 {
-    OptionalPortId inputMenu(nodes::Model & nodes,
-                             nodes::ParameterId targetId,
-                             nodes::NodeId targetParentId,
-                             std::type_index targetType,
-                             std::string const & targetName)
+    namespace
     {
-        const auto & ports = nodes.getPortRegistry();
+        struct PortOption
+        {
+            nodes::PortId id{};
+            std::string label;
+            nodes::Category category{nodes::Category::Internal};
+        };
 
-        const auto targetIter = nodes.getParameterRegistry().find(targetId);
-        if (targetIter == std::end(nodes.getParameterRegistry()))
+        struct ParameterOption
+        {
+            nodes::ParameterId id{};
+            std::string label;
+            nodes::Category category{nodes::Category::Internal};
+        };
+
+        bool touchButton(char const * label)
+        {
+            float const padding = std::max(8.f, ImGui::GetFontSize() * 0.45f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(padding, padding));
+            bool const clicked = ImGui::Button(label);
+            ImGui::PopStyleVar();
+            return clicked;
+        }
+
+        bool pushNodeButtonStyle(nodes::Category category)
+        {
+            auto const styleIter = NodeColors.find(category);
+            if (styleIter == std::end(NodeColors))
+            {
+                return false;
+            }
+
+            auto const & style = styleIter->second;
+            ImGui::PushStyleColor(ImGuiCol_Button, static_cast<ImU32>(style.color));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, static_cast<ImU32>(style.activeColor));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, static_cast<ImU32>(style.hoveredColor));
+            return true;
+        }
+    } // namespace
+
+    OptionalInputMenuSelection inputMenu(nodes::Model & model, nodes::ParameterId targetId)
+    {
+        if (model.getParameter(targetId) == nullptr)
         {
             return {};
         }
 
-        const auto isSuccessor = [&](nodes::NodeId nodeId)
-        { return isDependingOn(nodes.getGraph(), nodeId, targetIter->second->getParentId()); };
-
-        auto const currentMousePos = ImGui::GetMousePos();
-        auto posOnCanvas = ed::ScreenToCanvas(currentMousePos);
-        posOnCanvas.x -= 400;
-
-        // get the positition of the parent node of the target parameter
-        auto const parentNode = nodes.getNode(targetParentId);
-        if (parentNode.has_value())
-        {
-            auto const screenPos = ed::GetNodePosition(parentNode.value()->getId());
-            posOnCanvas.x = screenPos.x - 300;
-            posOnCanvas.y = screenPos.y;
-        }
         if (ImGui::BeginPopup("Ports"))
         {
-            // Button for creating a new node of (Constant, Vector, Matrix, Resource) depending on
-            // the type of the target parameter and use the new node as input
-            if (targetType == nodes::ParameterTypeIndex::Float)
+            // Offer only constants that satisfy the target node's prospective type rule.
+            if (model.canLinkTypeToInput(targetId, nodes::ParameterTypeIndex::Float))
             {
-                ImGui::PushStyleColor(ImGuiCol_Button,
-                                      LinkColors::DarkColorFloat); // Set button color to blue
-                if (ImGui::Button("New Scalar Node"))
+                ImGui::PushStyleColor(ImGuiCol_Button, LinkColors::DarkColorFloat);
+                if (touchButton("New Scalar Node"))
                 {
-                    nodes::ConstantScalar * newNode = nodes.create<nodes::ConstantScalar>();
-                    newNode->setDisplayName(targetName);
-
-                    ed::SetNodePosition(newNode->getId(), posOnCanvas);
-
                     ImGui::CloseCurrentPopup();
                     ImGui::PopStyleColor();
                     ImGui::EndPopup();
-                    return {newNode->getValueOutputPort().getId()};
+                    return InputMenuSelection{0, nodes::ParameterTypeIndex::Float};
                 }
                 ImGui::PopStyleColor();
             }
 
-            if (targetType == nodes::ParameterTypeIndex::Float3)
+            if (model.canLinkTypeToInput(targetId, nodes::ParameterTypeIndex::Float3))
             {
-                ImGui::PushStyleColor(ImGuiCol_Button,
-                                      LinkColors::DarkColorFloat3); // Set button color to green
-                if (ImGui::Button("New Vector Node"))
+                ImGui::PushStyleColor(ImGuiCol_Button, LinkColors::DarkColorFloat3);
+                if (touchButton("New Vector Node"))
                 {
-                    nodes::ConstantVector * newNode = nodes.create<nodes::ConstantVector>();
-                    newNode->setDisplayName(targetName);
-                    ed::SetNodePosition(newNode->getId(), posOnCanvas);
+                    ImGui::CloseCurrentPopup();
                     ImGui::PopStyleColor();
-                    ImGui::CloseCurrentPopup();
                     ImGui::EndPopup();
-                    return {newNode->getVectorOutputPort().getId()};
+                    return InputMenuSelection{0, nodes::ParameterTypeIndex::Float3};
                 }
                 ImGui::PopStyleColor();
             }
 
-            if (targetType == nodes::ParameterTypeIndex::Matrix4)
+            if (model.canLinkTypeToInput(targetId, nodes::ParameterTypeIndex::Matrix4))
             {
-                ImGui::PushStyleColor(ImGuiCol_Button,
-                                      LinkColors::DarkColorMatrix); // Set button color to red
-                if (ImGui::Button("New Matrix Node"))
+                ImGui::PushStyleColor(ImGuiCol_Button, LinkColors::DarkColorMatrix);
+                if (touchButton("New Matrix Node"))
                 {
-                    nodes::ConstantMatrix * newNode = nodes.create<nodes::ConstantMatrix>();
-                    newNode->setDisplayName(targetName);
-                    ed::SetNodePosition(newNode->getId(), posOnCanvas);
-
                     ImGui::CloseCurrentPopup();
+                    ImGui::PopStyleColor();
                     ImGui::EndPopup();
-                    return {newNode->getMatrixOutputPort().getId()};
+                    return InputMenuSelection{0, nodes::ParameterTypeIndex::Matrix4};
                 }
                 ImGui::PopStyleColor();
             }
 
-            for (const auto & port : ports)
+            auto const candidates = model.collectCompatibleLinkCandidates(targetId, false);
+            std::vector<PortOption> options;
+            options.reserve(candidates.size());
+            for (auto const portId : candidates)
             {
-                auto sourceNode = nodes.getNode(port.second->getParentId());
-                if (!sourceNode.has_value())
-                {
-                    std::cerr << "could not finde node the parent node with id"
-                              << port.second->getParentId() << "\n";
-                    continue;
-                }
-
-                if (isSuccessor(sourceNode.value()->getId()))
+                auto const * port = model.getPort(portId);
+                if (port == nullptr)
                 {
                     continue;
                 }
 
-                auto popStyle = false;
-                const auto styleIter = NodeColors.find(sourceNode.value()->getCategory());
-                if (styleIter != std::end(NodeColors))
+                auto const sourceNode = model.getNode(port->getParentId());
+                if (!sourceNode.has_value() || sourceNode.value() == nullptr)
                 {
-                    const auto style = styleIter->second;
-
-                    ImGui::PushStyleColor(ImGuiCol_Button, static_cast<ImU32>(style.color));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                                          static_cast<ImU32>(style.activeColor));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                                          static_cast<ImU32>(style.hoveredColor));
-                    popStyle = true;
+                    continue;
                 }
 
-                const auto displayName = sourceNode.value()->getDisplayName();
-                const auto shortName = port.second->getShortName();
-                auto inputName = displayName;
-                inputName += "::";
-                inputName += shortName;
-                const auto clicked = ImGui::Button(inputName.c_str());
+                auto label = std::string{sourceNode.value()->getDisplayName()};
+                label += "::";
+                label += port->getShortName();
+                options.push_back(PortOption{static_cast<nodes::PortId>(portId),
+                                             std::move(label),
+                                             sourceNode.value()->getCategory()});
+            }
+            std::sort(options.begin(),
+                      options.end(),
+                      [](PortOption const & lhs, PortOption const & rhs)
+                      { return lhs.label < rhs.label; });
 
+            for (auto const & option : options)
+            {
+                bool const popStyle = pushNodeButtonStyle(option.category);
+                bool const clicked = touchButton(option.label.c_str());
                 if (popStyle)
                 {
                     ImGui::PopStyleColor(3);
@@ -139,12 +141,85 @@ namespace gladius::ui
                 {
                     ImGui::CloseCurrentPopup();
                     ImGui::EndPopup();
-                    return {port.second->getId()};
+                    return InputMenuSelection{option.id, std::nullopt};
                 }
+            }
+
+            if (options.empty())
+            {
+                ImGui::TextUnformatted("No compatible existing sources");
             }
             ImGui::EndPopup();
         }
 
+        return {};
+    }
+
+    OptionalParameterId outputMenu(nodes::Model & model, nodes::PortId sourcePortId)
+    {
+        if (model.getPort(sourcePortId) == nullptr || !ImGui::BeginPopup("Destinations"))
+        {
+            return {};
+        }
+
+        auto const candidates = model.collectCompatibleLinkCandidates(sourcePortId, true);
+        std::vector<ParameterOption> options;
+        options.reserve(candidates.size());
+        for (auto const parameterId : candidates)
+        {
+            auto const * parameter = model.getParameter(parameterId);
+            if (parameter == nullptr)
+            {
+                continue;
+            }
+
+            auto const targetNode = model.getNode(parameter->getParentId());
+            if (!targetNode.has_value() || targetNode.value() == nullptr)
+            {
+                continue;
+            }
+
+            for (auto const & [name, candidate] : targetNode.value()->constParameter())
+            {
+                if (candidate.getId() == parameterId)
+                {
+                    auto label = std::string{targetNode.value()->getDisplayName()};
+                    label += "::";
+                    label += name;
+                    options.push_back(ParameterOption{static_cast<nodes::ParameterId>(parameterId),
+                                                       std::move(label),
+                                                       targetNode.value()->getCategory()});
+                    break;
+                }
+            }
+        }
+        std::sort(options.begin(),
+                  options.end(),
+                  [](ParameterOption const & lhs, ParameterOption const & rhs)
+                  { return lhs.label < rhs.label; });
+
+        for (auto const & option : options)
+        {
+            bool const popStyle = pushNodeButtonStyle(option.category);
+            bool const clicked = touchButton(option.label.c_str());
+            if (popStyle)
+            {
+                ImGui::PopStyleColor(3);
+            }
+
+            if (clicked)
+            {
+                ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+                return option.id;
+            }
+        }
+
+        if (options.empty())
+        {
+            ImGui::TextUnformatted("No compatible inputs");
+        }
+        ImGui::EndPopup();
         return {};
     }
 } // namespace gladius::ui

@@ -913,20 +913,14 @@ namespace gladius::ui
                             }
                             else
                             {
-                                auto const & parameterRegistry =
-                                  m_currentModel->getConstParameterRegistry();
-                                if (auto const parameterIter = parameterRegistry.find(dragId);
-                                    parameterIter != parameterRegistry.end())
+                                if (auto * param = m_currentModel->getParameter(
+                                      static_cast<nodes::ParameterId>(dragId));
+                                    param != nullptr)
                                 {
-                                    auto * param = dynamic_cast<nodes::VariantParameter *>(
-                                      parameterIter->second);
-                                    if (param != nullptr)
-                                    {
-                                        m_linkDragState.beginDrag(dragId,
-                                                                  param->getTypeIndex(),
-                                                                  false);
-                                        m_linkDragState.computeCompatibility(*m_currentModel);
-                                    }
+                                    m_linkDragState.beginDrag(dragId,
+                                                              param->getTypeIndex(),
+                                                              false);
+                                    m_linkDragState.computeCompatibility(*m_currentModel);
                                 }
                             }
                         }
@@ -1093,12 +1087,8 @@ namespace gladius::ui
         }
 
         static nodes::NodeTypes nodeTypes;
-        auto srcPortIter = m_currentModel->getPortRegistry().find(srcPortId);
-        bool showOnlyLinkableNodes = true;
-        if (srcPortIter == std::end(m_currentModel->getPortRegistry()))
-        {
-            showOnlyLinkableNodes = false;
-        }
+        auto const * sourcePort = m_currentModel->getPort(srcPortId);
+        bool const showOnlyLinkableNodes = sourcePort != nullptr;
 
         if (ImGui::BeginPopup("Create Node"))
         {
@@ -1185,8 +1175,8 @@ namespace gladius::ui
                     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImU32(style.hoveredColor));
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
                 }
-                auto requiredFieldName =
-                  (showOnlyLinkableNodes) ? srcPortIter->second->getShortName() : std::string{};
+                auto const requiredFieldName =
+                  (showOnlyLinkableNodes) ? sourcePort->getShortName() : std::string{};
 
                 staticFor(
                   nodeTypes,
@@ -1197,29 +1187,48 @@ namespace gladius::ui
 
                       pushNodeColor(node);
                       // Check if node matches filter
-                      std::string nodeName = node.name();
-                      bool matchesFilter = matchesNodeFilter(nodeName);
+                      std::string const nodeName = node.name();
+                      bool const matchesFilter = matchesNodeFilter(nodeName);
+                      bool const hasCompatibleType =
+                        !showOnlyLinkableNodes ||
+                        node.canAcceptInputType(requiredFieldName, sourcePort->getTypeIndex());
 
                       if (matchesFilter && node.getCategory() == category &&
-                          (hasRequiredField || !showOnlyLinkableNodes))
+                          (hasRequiredField || !showOnlyLinkableNodes) && hasCompatibleType)
                       {
-                          if (ImGui::Button(nodeName.c_str()))
+                          float const touchPadding =
+                            std::max(8.f, ImGui::GetFontSize() * 0.45f);
+                          ImGui::PushStyleVar(
+                            ImGuiStyleVar_FramePadding, ImVec2(touchPadding, touchPadding));
+                          bool const selected = ImGui::Button(nodeName.c_str());
+                          ImGui::PopStyleVar();
+                          if (selected)
                           {
                               createUndoRestorePoint("Create node");
                               auto createdNode = m_currentModel->create(node);
                               auto posOnCanvas = ed::ScreenToCanvas(mousePos);
                               ed::SetNodePosition(createdNode->getId(), posOnCanvas);
+
+                              bool linkCreated = true;
                               if (showOnlyLinkableNodes)
                               {
-                                  m_currentModel->addLink(
-                                    srcPortId, createdNode->parameter()[requiredFieldName].getId());
+                                  linkCreated = m_currentModel->addLink(
+                                    srcPortId,
+                                    createdNode->parameter()[requiredFieldName].getId());
                               }
 
-                              // Request focus on the newly created node for keyboard-driven
-                              // workflow
-                              requestNodeFocus(createdNode->getId());
+                              if (linkCreated)
+                              {
+                                  // Request focus on the newly created node for keyboard-driven
+                                  // workflow
+                                  requestNodeFocus(createdNode->getId());
 
-                              markModelAsModified();
+                                  markModelAsModified();
+                              }
+                              else
+                              {
+                                  m_currentModel->remove(createdNode->getId());
+                              }
                               closePopupMenu();
                           }
                       }
