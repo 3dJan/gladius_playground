@@ -8,6 +8,8 @@
 #include "nodes/Validator.h"
 #include "nodes/IssueList.h"
 
+#include <algorithm>
+
 using namespace gladius::nodes;
 
 namespace gladius::tests
@@ -145,6 +147,45 @@ namespace gladius::tests
         EXPECT_EQ(issues.front().type, IssueType::FunctionNotFound);
         EXPECT_EQ(issues.front().severity, IssueSeverity::Error);
         EXPECT_NE(issues.front().message.find("Function reference not found"), std::string::npos);
+    }
+
+    TEST_F(Validator_Test, Validate_AdditionWithMixedScalarVectorSources_ReportsTypeRuleMismatch)
+    {
+        Assembly assembly;
+        constexpr ResourceId modelId = 11;
+        assembly.addModelIfNotExisting(modelId);
+        auto model = assembly.findModel(modelId);
+        ASSERT_TRUE(model);
+        model->createBeginEnd();
+
+        auto * addition = model->create<Addition>();
+        auto * scalar = model->create<ConstantScalar>();
+        auto * vector = model->create<ConstantVector>();
+        ASSERT_NE(addition, nullptr);
+        ASSERT_NE(scalar, nullptr);
+        ASSERT_NE(vector, nullptr);
+
+        auto * scalarPort = model->getPort(scalar->getOutputs().at(FieldNames::Value).getId());
+        auto * vectorPort = model->getPort(vector->getOutputs().at(FieldNames::Vector).getId());
+        ASSERT_NE(scalarPort, nullptr);
+        ASSERT_NE(vectorPort, nullptr);
+        addition->parameter().at(FieldNames::A).setInputFromPort(*scalarPort);
+        addition->parameter().at(FieldNames::B).setInputFromPort(*vectorPort);
+        model->invalidateGraph();
+
+        Validator validator;
+        EXPECT_FALSE(validator.validate(assembly, *m_issueList));
+
+        auto const issues = m_issueList->getAll();
+        auto const hasTypeRuleIssue = std::any_of(
+          issues.begin(),
+          issues.end(),
+          [](ValidationIssue const & issue)
+          {
+              return issue.type == IssueType::TypeMismatch &&
+                     issue.message.find("no type rule matching") != std::string::npos;
+          });
+        EXPECT_TRUE(hasTypeRuleIssue);
     }
 
 } // namespace gladius::tests

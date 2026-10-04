@@ -62,7 +62,7 @@ namespace gladius_tests
 
         // Connect Addition.Result -> End.Shape
         connect(addNode->getOutputs().at(nodes::FieldNames::Result).getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -84,7 +84,7 @@ namespace gladius_tests
 
         // Connect Begin.Pos -> End.Shape (skip Addition)
         connect(beginNode->getOutputs().at(nodes::FieldNames::Pos).getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -113,7 +113,7 @@ namespace gladius_tests
 
         // Connect Addition.Result -> End.Shape
         connect(addNode->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -148,7 +148,7 @@ namespace gladius_tests
 
         // Connect Addition.Result -> End.Shape
         connect(addNode->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -184,7 +184,7 @@ namespace gladius_tests
 
         // Connect add1 to End (add2 and sub are dead code)
         connect(add1->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -212,7 +212,7 @@ namespace gladius_tests
         connect(beginNode->getOutputs().at(nodes::FieldNames::Pos).getId(),
                 addNode->getInputA().getId());
         connect(addNode->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -239,7 +239,7 @@ namespace gladius_tests
                 addNode->parameter().at(nodes::FieldNames::B).getId());
 
         connect(addNode->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -264,7 +264,7 @@ namespace gladius_tests
 
         // Connect Begin directly to End, leaving Addition.Result unused
         connect(beginNode->getOutputs().at(nodes::FieldNames::Pos).getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -287,7 +287,7 @@ namespace gladius_tests
         connect(beginNode->getOutputs().at(nodes::FieldNames::Pos).getId(),
                 addNode->getInputA().getId());
         connect(addNode->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -317,7 +317,7 @@ namespace gladius_tests
 
         // Only connect add1 to End (add2 is dead code)
         connect(add1->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -347,7 +347,7 @@ namespace gladius_tests
         connect(beginNode->getOutputs().at(nodes::FieldNames::Pos).getId(),
                 addNode->getInputA().getId());
         connect(addNode->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -394,7 +394,7 @@ namespace gladius_tests
 
         // Connect multiplication to End
         connect(mul->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();
@@ -440,7 +440,7 @@ namespace gladius_tests
 
         // Only connect add1 to End
         connect(add1->getResultOutputPort().getId(),
-                endNode->parameter().at(nodes::FieldNames::Shape).getId());
+                endNode->parameter().at(nodes::FieldNames::Color).getId());
 
         analyzer->setModel(model.get());
         analyzer->analyze();

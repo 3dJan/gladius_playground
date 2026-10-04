@@ -163,6 +163,149 @@ namespace gladius_tests
         EXPECT_FALSE(graph.isDirectlyDependingOn(nodeId, beginNodeId));
     }
 
+    TEST_F(Model, InputTypeCompatibility_Addition_UsesSameTypeRules)
+    {
+        nodes::Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * addition = model.create<nodes::Addition>();
+        auto const inputAId = addition->parameter().at(nodes::FieldNames::A).getId();
+
+        EXPECT_TRUE(model.canLinkTypeToInput(inputAId, nodes::ParameterTypeIndex::Float));
+        EXPECT_TRUE(model.canLinkTypeToInput(inputAId, nodes::ParameterTypeIndex::Float3));
+        EXPECT_TRUE(model.canLinkTypeToInput(inputAId, nodes::ParameterTypeIndex::Matrix4));
+
+        auto * scalar = model.create<nodes::ConstantScalar>();
+        ASSERT_TRUE(model.addLink(scalar->getOutputs().at(nodes::FieldNames::Value).getId(),
+                                  inputAId));
+
+        auto const inputBId = addition->parameter().at(nodes::FieldNames::B).getId();
+        EXPECT_TRUE(model.canLinkTypeToInput(inputBId, nodes::ParameterTypeIndex::Float));
+        EXPECT_FALSE(model.canLinkTypeToInput(inputBId, nodes::ParameterTypeIndex::Float3));
+        EXPECT_FALSE(model.canLinkTypeToInput(inputBId, nodes::ParameterTypeIndex::Matrix4));
+    }
+
+        TEST_F(Model, InputTypeCompatibility_EndInputs_UsesDeclaredSocketTypes)
+        {
+                nodes::Model model;
+                model.createBeginEndWithDefaultInAndOuts();
+                auto const shapeId =
+                    model.getEndNode()->parameter().at(nodes::FieldNames::Shape).getId();
+                auto const colorId =
+                    model.getEndNode()->parameter().at(nodes::FieldNames::Color).getId();
+
+                EXPECT_TRUE(model.canLinkTypeToInput(shapeId, nodes::ParameterTypeIndex::Float));
+                EXPECT_FALSE(model.canLinkTypeToInput(shapeId, nodes::ParameterTypeIndex::Float3));
+                EXPECT_TRUE(model.canLinkTypeToInput(colorId, nodes::ParameterTypeIndex::Float3));
+                EXPECT_FALSE(model.canLinkTypeToInput(colorId, nodes::ParameterTypeIndex::Float));
+        }
+
+        TEST_F(Model, AddFunctionOutput_RegistersOwnerForTypeCompatibility)
+        {
+                nodes::Model model;
+                model.createBeginEnd();
+                auto * scalar = model.create<nodes::ConstantScalar>();
+                model.addFunctionOutput("result", nodes::VariantParameter(float{0.f}));
+
+                auto * endNode = model.getEndNode();
+                auto const resultId = endNode->parameter().at("result").getId();
+                EXPECT_EQ(endNode->parameter().at("result").getParentId(), endNode->getId());
+                EXPECT_TRUE(model.canLinkTypeToInput(resultId, nodes::ParameterTypeIndex::Float));
+                EXPECT_FALSE(model.canLinkTypeToInput(resultId, nodes::ParameterTypeIndex::Float3));
+                EXPECT_TRUE(model.addLink(
+                    scalar->getOutputs().at(nodes::FieldNames::Value).getId(), resultId));
+        }
+
+    TEST_F(Model, InputTypeCompatibility_Multiplication_PreservesExplicitMixedRules)
+    {
+        nodes::Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * multiplication = model.create<nodes::Multiplication>();
+        auto const inputAId = multiplication->parameter().at(nodes::FieldNames::A).getId();
+        auto const inputBId = multiplication->parameter().at(nodes::FieldNames::B).getId();
+
+        auto * scalar = model.create<nodes::ConstantScalar>();
+        auto * vector = model.create<nodes::ConstantVector>();
+        auto const scalarPortId = scalar->getOutputs().at(nodes::FieldNames::Value).getId();
+        auto const vectorPortId = vector->getOutputs().at(nodes::FieldNames::Vector).getId();
+
+        ASSERT_TRUE(model.addLink(scalarPortId, inputAId));
+        EXPECT_TRUE(model.canLinkTypeToInput(inputBId, nodes::ParameterTypeIndex::Float3));
+        EXPECT_TRUE(model.canLinkTypeToInput(inputBId, nodes::ParameterTypeIndex::Float));
+        EXPECT_FALSE(model.canLinkTypeToInput(inputBId, nodes::ParameterTypeIndex::Matrix4));
+        EXPECT_TRUE(model.addLink(vectorPortId, inputBId));
+        EXPECT_EQ(multiplication->getOutputs().at(nodes::FieldNames::Result).getTypeIndex(),
+                  nodes::ParameterTypeIndex::Float3);
+    }
+
+    TEST_F(Model, CollectCompatibleLinkCandidates_Addition_RespectsConnectedPeerType)
+    {
+        nodes::Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * addition = model.create<nodes::Addition>();
+        auto * scalar = model.create<nodes::ConstantScalar>();
+        auto * vector = model.create<nodes::ConstantVector>();
+        auto const inputAId = addition->parameter().at(nodes::FieldNames::A).getId();
+        auto const inputBId = addition->parameter().at(nodes::FieldNames::B).getId();
+        auto const scalarPortId = scalar->getOutputs().at(nodes::FieldNames::Value).getId();
+        auto const vectorPortId = vector->getOutputs().at(nodes::FieldNames::Vector).getId();
+
+        ASSERT_TRUE(model.addLink(scalarPortId, inputAId));
+
+        auto const scalarCandidates = model.collectCompatibleLinkCandidates(inputBId, false);
+        auto const vectorCandidates = model.collectCompatibleLinkCandidates(vectorPortId, true);
+
+        EXPECT_NE(scalarCandidates.find(scalarPortId), scalarCandidates.end());
+        EXPECT_EQ(vectorCandidates.find(inputBId), vectorCandidates.end());
+    }
+
+    TEST_F(Model, AddLink_DownstreamRuleFailure_RestoresLinkTypesAndInputValue)
+    {
+        nodes::Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * scalar = model.create<nodes::ConstantScalar>();
+        auto * addition = model.create<nodes::Addition>();
+        auto * arcTan2 = model.create<nodes::ArcTan2>();
+
+        auto const scalarPortId = scalar->getOutputs().at(nodes::FieldNames::Value).getId();
+        auto const vectorPortId =
+          model.getBeginNode()->getOutputs().at(nodes::FieldNames::Pos).getId();
+        auto const additionInputAId = addition->parameter().at(nodes::FieldNames::A).getId();
+        auto const additionInputBId = addition->parameter().at(nodes::FieldNames::B).getId();
+        auto const additionResultId = addition->getOutputs().at(nodes::FieldNames::Result).getId();
+        auto const arcTanInputAId = arcTan2->parameter().at(nodes::FieldNames::A).getId();
+        auto const arcTanInputBId = arcTan2->parameter().at(nodes::FieldNames::B).getId();
+
+        std::get<float>(addition->parameter().at(nodes::FieldNames::B).Value()) = 7.f;
+        ASSERT_TRUE(model.addLink(scalarPortId, additionInputAId));
+        ASSERT_TRUE(model.addLink(additionResultId, arcTanInputAId));
+        ASSERT_TRUE(model.addLink(scalarPortId, arcTanInputBId));
+
+        EXPECT_FALSE(model.addLink(vectorPortId, additionInputAId));
+
+        auto const restoredSource =
+          addition->parameter().at(nodes::FieldNames::A).getConstSource();
+        ASSERT_TRUE(restoredSource.has_value());
+        EXPECT_EQ(restoredSource->portId, scalarPortId);
+        EXPECT_FALSE(addition->parameter().at(nodes::FieldNames::B).getConstSource().has_value());
+        EXPECT_EQ(addition->parameter().at(nodes::FieldNames::B).getTypeIndex(),
+                  nodes::ParameterTypeIndex::Float);
+        EXPECT_FLOAT_EQ(std::get<float>(addition->parameter().at(nodes::FieldNames::B).Value()),
+                        7.f);
+        EXPECT_EQ(addition->getOutputs().at(nodes::FieldNames::Result).getTypeIndex(),
+                  nodes::ParameterTypeIndex::Float);
+        EXPECT_TRUE(model.updateTypes());
+    }
+
+    TEST_F(Model, InputTypeMapEquality_UsesNamesInsteadOfIterationOrder)
+    {
+        nodes::InputTypeMap lhs{{nodes::FieldNames::A, nodes::ParameterTypeIndex::Float},
+                                {nodes::FieldNames::B, nodes::ParameterTypeIndex::Float3}};
+        nodes::InputTypeMap rhs{{nodes::FieldNames::B, nodes::ParameterTypeIndex::Float3},
+                                {nodes::FieldNames::A, nodes::ParameterTypeIndex::Float}};
+
+        EXPECT_TRUE(lhs == rhs);
+    }
+
     // Copy constructor
     TEST_F(Model, CopyConstructor_ModelWithAddition_ModelContainsAddition)
     {
@@ -348,7 +491,7 @@ namespace gladius_tests
         auto subtractResultPortId = subtract->getOutputs().at(nodes::FieldNames::Result).getId();
         auto vectorXParamId = composeVector->parameter().at("x").getId();
         auto vectorResultPortId = composeVector->getOutputs().at(nodes::FieldNames::Result).getId();
-        auto shapeParamId = model.getEndNode()->parameter().at(nodes::FieldNames::Shape).getId();
+        auto colorParamId = model.getEndNode()->parameter().at(nodes::FieldNames::Color).getId();
         
         // Begin -> Subtract
         model.addLink(begin2PortId, subtractAParamId);
@@ -359,8 +502,8 @@ namespace gladius_tests
         composeVector->parameter()["y"] = nodes::VariantParameter(0.0f);
         composeVector->parameter()["z"] = nodes::VariantParameter(0.0f);
         
-        // ComposeVector -> End
-        model.addLink(vectorResultPortId, shapeParamId);
+        // ComposeVector -> End color output
+        model.addLink(vectorResultPortId, colorParamId);
         
         // Set up connections for the disconnected path
         divide->parameter()[nodes::FieldNames::A] = nodes::VariantParameter(10.0f);

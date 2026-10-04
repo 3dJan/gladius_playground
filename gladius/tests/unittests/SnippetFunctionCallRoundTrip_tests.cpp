@@ -121,7 +121,7 @@ namespace gladius::tests
                     {
                         if (param.isArgument())
                         {
-                            model->addLink(posOutput->getId(), param.getId());
+                          ASSERT_TRUE(model->addLink(posOutput->getId(), param.getId()));
                             break;
                         }
                     }
@@ -135,12 +135,16 @@ namespace gladius::tests
                 auto * shapeParam = endNode->getParameter(nodes::FieldNames::Shape);
                 if (shapeParam)
                 {
-                    auto & fcOutputs = fc->getOutputs();
-                    for (auto & [name, port] : fcOutputs)
+                  auto const outputIter = fc->getOutputs().find(defaultOutput().name);
+                  if (outputIter != fc->getOutputs().end())
                     {
-                        model->addLink(port.getId(), shapeParam->getId());
-                        break;
+                    ASSERT_TRUE(
+                      model->addLink(outputIter->second.getId(), shapeParam->getId()));
                     }
+                  else
+                  {
+                    FAIL() << "FunctionCall does not expose its result output";
+                  }
                 }
             }
 
