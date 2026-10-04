@@ -13,7 +13,16 @@ namespace gladius::ui
     enum class CreateNodeChoiceKind
     {
         NodePrototype,
-        Function
+        Function,
+        LibraryFunction
+    };
+
+    enum class CreateNodeChoiceSemantic
+    {
+        None,
+        Union,
+        Intersection,
+        Difference
     };
 
     struct CreateNodeChoiceId
@@ -22,6 +31,9 @@ namespace gladius::ui
         std::string nodeTypeName;
         nodes::ResourceId functionId{0};
         std::string inputName;
+        CreateNodeChoiceSemantic semantic{CreateNodeChoiceSemantic::None};
+        std::string libraryAsset;
+        std::string functionName;
 
         bool operator==(CreateNodeChoiceId const &) const = default;
     };
@@ -40,6 +52,9 @@ namespace gladius::ui
       nodes::Port const & sourcePort,
       nodes::Assembly const & assembly,
       nodes::NodeTypes & nodeTypes);
+
+    /// Identifies the shipped scalar Difference function by its interface and negate-Max graph.
+    [[nodiscard]] bool isSdfDifferenceLibraryFunction(nodes::Model & functionModel);
 
     /// UI-only most-recently-used choices, separated by concrete source output type.
     class CreateNodeChoiceHistory

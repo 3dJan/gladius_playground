@@ -19,6 +19,98 @@ namespace gladius::ui
         }
     } // namespace
 
+    bool isSdfDifferenceLibraryFunction(nodes::Model & functionModel)
+    {
+        auto const displayName = functionModel.getDisplayName();
+        if (!displayName.has_value() || *displayName != "subtraction" ||
+            functionModel.getBeginNode() == nullptr || functionModel.getEndNode() == nullptr)
+        {
+            return false;
+        }
+
+        auto const & inputs = functionModel.getInputs();
+        auto const & outputs = functionModel.getOutputs();
+        auto const shapeA = inputs.find("shapeA");
+        auto const shapeB = inputs.find("shapeB");
+        auto const shape = outputs.find("shape");
+        if (inputs.size() != 2 || outputs.size() != 1 || shapeA == inputs.end() ||
+            shapeA->second.getTypeIndex() != nodes::ParameterTypeIndex::Float ||
+            shapeB == inputs.end() ||
+            shapeB->second.getTypeIndex() != nodes::ParameterTypeIndex::Float ||
+            shape == outputs.end() ||
+            shape->second.getTypeIndex() != nodes::ParameterTypeIndex::Float ||
+            functionModel.getSize() != 5)
+        {
+            return false;
+        }
+
+        nodes::ConstantScalar * negativeOne = nullptr;
+        nodes::Multiplication * negateShapeB = nullptr;
+        nodes::Max * difference = nullptr;
+        for (auto & nodeEntry : functionModel)
+        {
+            auto * node = nodeEntry.second.get();
+            if (auto * constant = dynamic_cast<nodes::ConstantScalar *>(node))
+            {
+                if (negativeOne != nullptr)
+                {
+                    return false;
+                }
+                negativeOne = constant;
+            }
+            else if (auto * multiplication = dynamic_cast<nodes::Multiplication *>(node))
+            {
+                if (negateShapeB != nullptr)
+                {
+                    return false;
+                }
+                negateShapeB = multiplication;
+            }
+            else if (auto * maximum = dynamic_cast<nodes::Max *>(node))
+            {
+                if (difference != nullptr)
+                {
+                    return false;
+                }
+                difference = maximum;
+            }
+            else if (node != functionModel.getBeginNode() && node != functionModel.getEndNode())
+            {
+                return false;
+            }
+        }
+
+        if (negativeOne == nullptr || negativeOne->getValue() != -1.0f ||
+            negateShapeB == nullptr || difference == nullptr)
+        {
+            return false;
+        }
+
+        auto const isConnectedToPort = [](nodes::VariantParameter const & input,
+                                          nodes::Port const & expectedPort)
+        {
+            auto const & source = input.getConstSource();
+            return source.has_value() && source->portId == expectedPort.getId() &&
+                   source->nodeId == expectedPort.getParentId();
+        };
+
+        auto const * negativeOnePort = &negativeOne->getValueOutputPort();
+        auto const * negatedShapeBPort = &negateShapeB->getResultOutputPort();
+        auto const negatesShapeB =
+          (isConnectedToPort(negateShapeB->getInputA(), *negativeOnePort) &&
+           isConnectedToPort(negateShapeB->getInputB(), shapeB->second)) ||
+          (isConnectedToPort(negateShapeB->getInputB(), *negativeOnePort) &&
+           isConnectedToPort(negateShapeB->getInputA(), shapeB->second));
+        auto const computesDifference =
+          (isConnectedToPort(difference->getInputA(), shapeA->second) &&
+           isConnectedToPort(difference->getInputB(), *negatedShapeBPort)) ||
+          (isConnectedToPort(difference->getInputB(), shapeA->second) &&
+           isConnectedToPort(difference->getInputA(), *negatedShapeBPort));
+
+        return negatesShapeB && computesDifference &&
+               isConnectedToPort(shape->second, difference->getResultOutputPort());
+    }
+
     std::vector<CreateNodeChoice> collectCompatibleCreateNodeChoices(
       nodes::Model const & currentModel,
       nodes::Port const & sourcePort,
@@ -55,6 +147,53 @@ namespace gladius::ui
               }
           });
 
+        if (sourceType == nodes::ParameterTypeIndex::Float)
+        {
+            auto addBooleanAlias = [&choices, &nodeTypes, &sourceType](
+                                    std::string const & nodeTypeName,
+                                    CreateNodeChoiceSemantic semantic,
+                                    std::string const & label)
+            {
+                nodes::staticFor(
+                  nodeTypes,
+                  [&choices, &sourceType, &nodeTypeName, semantic, &label](auto, auto & node)
+                  {
+                      if (node.name() != nodeTypeName || !node.canAcceptInputType("A", sourceType))
+                      {
+                          return;
+                      }
+
+                      CreateNodeChoiceId id;
+                      id.kind = CreateNodeChoiceKind::NodePrototype;
+                      id.nodeTypeName = nodeTypeName;
+                      id.inputName = "A";
+                      id.semantic = semantic;
+                      choices.push_back({std::move(id),
+                                         &node,
+                                         nodes::Category::BoolOperation,
+                                         label});
+                  });
+            };
+
+            addBooleanAlias("Min", CreateNodeChoiceSemantic::Union, "Union");
+            addBooleanAlias("Max", CreateNodeChoiceSemantic::Intersection, "Intersection");
+
+            for (auto const & inputName : {std::string{"shapeA"}, std::string{"shapeB"}})
+            {
+                CreateNodeChoiceId id;
+                id.kind = CreateNodeChoiceKind::LibraryFunction;
+                id.inputName = inputName;
+                id.semantic = CreateNodeChoiceSemantic::Difference;
+                id.libraryAsset = "csg/subtraction.3mf";
+                id.functionName = "subtraction";
+                auto const label = inputName == "shapeA"
+                                     ? "Difference (selected - other)"
+                                     : "Difference (other - selected)";
+                choices.push_back(
+                  {std::move(id), nullptr, nodes::Category::BoolOperation, label});
+            }
+        }
+
         std::map<std::string, std::size_t> functionNameCounts;
         for (auto const & [functionId, functionModel] : assembly.getFunctions())
         {
@@ -63,7 +202,10 @@ namespace gladius::ui
             {
                 continue;
             }
-
+            if (isSdfDifferenceLibraryFunction(*functionModel))
+            {
+                continue;
+            }
             auto * beginNode = functionModel->getBeginNode();
             if (beginNode == nullptr || functionModel->getEndNode() == nullptr)
             {
@@ -92,6 +234,10 @@ namespace gladius::ui
         {
             if (!functionModel || functionModel.get() == &currentModel ||
                 functionId == currentModel.getResourceId())
+            {
+                continue;
+            }
+            if (isSdfDifferenceLibraryFunction(*functionModel))
             {
                 continue;
             }
@@ -130,14 +276,19 @@ namespace gladius::ui
                          choices.end(),
                          [](CreateNodeChoice const & lhs, CreateNodeChoice const & rhs)
                          {
-                             if (lhs.id.kind != rhs.id.kind)
+                             bool const lhsIsFunction = lhs.id.kind == CreateNodeChoiceKind::Function;
+                             bool const rhsIsFunction = rhs.id.kind == CreateNodeChoiceKind::Function;
+                             if (lhsIsFunction != rhsIsFunction)
                              {
-                                 return lhs.id.kind == CreateNodeChoiceKind::NodePrototype;
+                                 return !lhsIsFunction;
                              }
-                             if (lhs.id.kind == CreateNodeChoiceKind::NodePrototype &&
-                                 lhs.category != rhs.category)
+                             if (!lhsIsFunction && lhs.category != rhs.category)
                              {
                                  return lhs.category < rhs.category;
+                             }
+                             if (lhs.id.kind != rhs.id.kind)
+                             {
+                                 return lhs.id.kind < rhs.id.kind;
                              }
                              return lhs.label < rhs.label;
                          });

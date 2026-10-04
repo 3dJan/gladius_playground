@@ -14,6 +14,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -26,6 +27,7 @@
 #include "BeamLatticeView.h"
 #include "ComponentsObjectView.h"
 #include "Document.h"
+#include "FileSystemUtils.h"
 #include "MeshResource.h"
 #include "ModelEditor.h"
 #include "NodeLayoutEngine.h"
@@ -1347,13 +1349,39 @@ namespace gladius::ui
             }
 
             auto * styleNode = choice.prototype != nullptr ? choice.prototype : functionCallPrototype();
-            auto const choiceItemId = choice.id.kind == CreateNodeChoiceKind::Function
-                                        ? std::to_string(choice.id.functionId)
-                                        : choice.id.nodeTypeName;
+            auto choiceItemId = choice.id.kind == CreateNodeChoiceKind::Function
+                                  ? std::to_string(choice.id.functionId)
+                                  : choice.id.kind == CreateNodeChoiceKind::LibraryFunction
+                                      ? choice.id.libraryAsset + "::" + choice.id.functionName
+                                      : choice.id.nodeTypeName;
+            if (choice.id.semantic != CreateNodeChoiceSemantic::None)
+            {
+                choiceItemId += "::" +
+                                std::to_string(static_cast<int>(choice.id.semantic));
+            }
             ImGui::PushID(section);
             ImGui::PushID(choiceItemId.c_str());
             ImGui::PushID(choice.id.inputName.c_str());
-            if (styleNode != nullptr)
+
+            bool categoryStylePushed = false;
+            if (choice.id.semantic != CreateNodeChoiceSemantic::None ||
+                choice.id.kind == CreateNodeChoiceKind::LibraryFunction)
+            {
+                auto const categoryStyle = NodeColors.find(choice.category);
+                if (categoryStyle != std::end(NodeColors))
+                {
+                    auto const style = categoryStyle->second;
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImU32(style.color));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImU32(style.activeColor));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImU32(style.hoveredColor));
+                    ImGui::PushStyleColor(ImGuiCol_Header, ImU32(style.color));
+                    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImU32(style.activeColor));
+                    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImU32(style.hoveredColor));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    categoryStylePushed = true;
+                }
+            }
+            else if (styleNode != nullptr)
             {
                 pushNodeColor(*styleNode);
             }
@@ -1362,7 +1390,13 @@ namespace gladius::ui
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(touchPadding, touchPadding));
             bool const selected = ImGui::Button(choice.label.c_str());
             ImGui::PopStyleVar();
-            if (styleNode != nullptr)
+            if (categoryStylePushed)
+            {
+                ImGui::PopStyleColor(7);
+            }
+            else if (styleNode != nullptr &&
+                     choice.id.semantic == CreateNodeChoiceSemantic::None &&
+                     choice.id.kind != CreateNodeChoiceKind::LibraryFunction)
             {
                 popNodeColor(*styleNode);
             }
@@ -1420,7 +1454,7 @@ namespace gladius::ui
                 bool const hasCategoryChoices = std::any_of(
                   choices.begin(), choices.end(), [&matchesFilter, category](CreateNodeChoice const & choice)
                   {
-                      return choice.id.kind == CreateNodeChoiceKind::NodePrototype &&
+                      return choice.id.kind != CreateNodeChoiceKind::Function &&
                              choice.category == category && matchesFilter(choice);
                   });
                 if (!hasCategoryChoices || !ImGui::BeginMenu(categoryName.c_str()))
@@ -1431,7 +1465,7 @@ namespace gladius::ui
                 bool handled = false;
                 for (auto const & choice : choices)
                 {
-                    if (choice.id.kind == CreateNodeChoiceKind::NodePrototype &&
+                    if (choice.id.kind != CreateNodeChoiceKind::Function &&
                         choice.category == category && renderChoice(choice, "node-choice"))
                     {
                         handled = true;
@@ -1477,7 +1511,7 @@ namespace gladius::ui
             bool const hasCategoryChoices = std::any_of(
               choices.begin(), choices.end(), [&matchesFilter, category](CreateNodeChoice const & choice)
               {
-                  return choice.id.kind == CreateNodeChoiceKind::NodePrototype &&
+                                    return choice.id.kind != CreateNodeChoiceKind::Function &&
                          choice.category == category && matchesFilter(choice);
               });
             if (!hasCategoryChoices)
@@ -1492,7 +1526,7 @@ namespace gladius::ui
             ImGui::TextUnformatted(categoryName.c_str());
             for (auto const & choice : choices)
             {
-                if (choice.id.kind == CreateNodeChoiceKind::NodePrototype &&
+                if (choice.id.kind != CreateNodeChoiceKind::Function &&
                     choice.category == category && renderChoice(choice, "node-choice"))
                 {
                     return true;
@@ -1520,6 +1554,187 @@ namespace gladius::ui
         return false;
     }
 
+    bool ModelEditor::createDifferenceFromChoice(nodes::Model & model,
+                                                 nodes::PortId sourcePortId,
+                                                 CreateNodeChoice const & choice,
+                                                 ImVec2 canvasPosition)
+    {
+        if (!m_doc || !m_currentModel || m_currentModel.get() != &model || !m_assembly ||
+            choice.id.semantic != CreateNodeChoiceSemantic::Difference ||
+            choice.id.libraryAsset != "csg/subtraction.3mf" ||
+            choice.id.functionName != "subtraction" ||
+            (choice.id.inputName != "shapeA" && choice.id.inputName != "shapeB"))
+        {
+            return false;
+        }
+
+        auto const * sourcePort = model.getPort(sourcePortId);
+        if (sourcePort == nullptr ||
+            sourcePort->getTypeIndex() != nodes::ParameterTypeIndex::Float)
+        {
+            return false;
+        }
+
+        auto const sourceType = sourcePort->getTypeIndex();
+        auto const sourceModelId = model.getResourceId();
+        auto const assemblyBeforeCreate = *m_assembly;
+        std::set<nodes::ResourceId> originalFunctionIds;
+        for (auto const & functionEntry : m_assembly->getFunctions())
+        {
+            originalFunctionIds.insert(functionEntry.first);
+        }
+
+        auto removeNewlyImportedFunctions = [this, &originalFunctionIds, sourceModelId]
+        {
+            refreshAssembly();
+            if (!m_assembly)
+            {
+                return;
+            }
+
+            std::vector<nodes::ResourceId> importedFunctionIds;
+            for (auto const & functionEntry : m_assembly->getFunctions())
+            {
+                if (originalFunctionIds.count(functionEntry.first) == 0)
+                {
+                    importedFunctionIds.push_back(functionEntry.first);
+                }
+            }
+            for (auto const functionId : importedFunctionIds)
+            {
+                m_assembly->deleteModel(functionId);
+            }
+            m_currentModel = m_assembly->findModel(sourceModelId);
+        };
+
+        nodes::FunctionMatch differenceMatch;
+        for (auto const & [functionId, functionModel] : m_assembly->getFunctions())
+        {
+            if (functionId != 0 && functionModel &&
+                isSdfDifferenceLibraryFunction(*functionModel))
+            {
+                differenceMatch.id = functionId;
+                differenceMatch.model = functionModel;
+                break;
+            }
+        }
+
+        if (!differenceMatch.model)
+        {
+            auto libraryPath = getUserLibraryDir() / choice.id.libraryAsset;
+            std::error_code pathError;
+            bool hasLibraryAsset = std::filesystem::is_regular_file(libraryPath, pathError);
+            if (!hasLibraryAsset)
+            {
+                pathError.clear();
+                auto const shippedPath = getShippedLibraryDir() / choice.id.libraryAsset;
+                hasLibraryAsset = std::filesystem::is_regular_file(shippedPath, pathError);
+                if (hasLibraryAsset)
+                {
+                    libraryPath = shippedPath;
+                }
+            }
+
+            if (!hasLibraryAsset)
+            {
+                if (auto logger = m_doc->getSharedLogger())
+                {
+                    logger->addEvent(
+                      {fmt::format("SDF Difference library asset not found: {}", libraryPath.string()),
+                       events::Severity::Error});
+                }
+                return false;
+            }
+
+            try
+            {
+                differenceMatch = m_doc->mergeAndResolve(libraryPath, choice.id.functionName);
+            }
+            catch (std::exception const & error)
+            {
+                removeNewlyImportedFunctions();
+                if (auto logger = m_doc->getSharedLogger())
+                {
+                    logger->addEvent(
+                      {fmt::format("SDF Difference import failed: {}", error.what()),
+                       events::Severity::Error});
+                }
+                return false;
+            }
+
+            refreshAssembly();
+            if (m_assembly && differenceMatch.id != 0)
+            {
+                differenceMatch.model = m_assembly->findModel(differenceMatch.id);
+            }
+            if (differenceMatch.id == 0 || !differenceMatch.model ||
+                !isSdfDifferenceLibraryFunction(*differenceMatch.model))
+            {
+                removeNewlyImportedFunctions();
+                if (auto logger = m_doc->getSharedLogger())
+                {
+                    logger->addEvent(
+                      {"SDF Difference import did not provide the expected subtraction function",
+                       events::Severity::Error});
+                }
+                return false;
+            }
+        }
+
+        if (!m_assembly)
+        {
+            removeNewlyImportedFunctions();
+            return false;
+        }
+
+        auto currentModel = m_assembly->findModel(sourceModelId);
+        if (!currentModel)
+        {
+            removeNewlyImportedFunctions();
+            return false;
+        }
+        auto const * currentSourcePort = currentModel->getPort(sourcePortId);
+        if (currentSourcePort == nullptr ||
+            currentSourcePort->getTypeIndex() != nodes::ParameterTypeIndex::Float)
+        {
+            removeNewlyImportedFunctions();
+            return false;
+        }
+        m_currentModel = currentModel;
+
+        auto * createdNode = currentModel->createFunctionCallNode(differenceMatch.id,
+                                                                  *differenceMatch.model);
+        if (createdNode == nullptr)
+        {
+            removeNewlyImportedFunctions();
+            return false;
+        }
+
+        auto const targetIter = createdNode->parameter().find(choice.id.inputName);
+        if (targetIter == createdNode->parameter().end() ||
+            targetIter->second.getTypeIndex() != sourceType)
+        {
+            currentModel->remove(createdNode->getId());
+            removeNewlyImportedFunctions();
+            return false;
+        }
+
+        ed::SetNodePosition(createdNode->getId(), canvasPosition);
+        if (!currentModel->addLink(sourcePortId, targetIter->second.getId(), false))
+        {
+            currentModel->remove(createdNode->getId());
+            removeNewlyImportedFunctions();
+            return false;
+        }
+
+        createUndoRestorePoint("Create Difference", assemblyBeforeCreate);
+        m_createNodeChoiceHistory.record(sourceType, choice.id);
+        requestNodeFocus(createdNode->getId());
+        markModelAsModified();
+        closePopupMenu();
+        return true;
+    }
+
     bool ModelEditor::createNodeFromChoice(nodes::Model & model,
                                            nodes::PortId sourcePortId,
                                            CreateNodeChoice const & choice,
@@ -1536,6 +1751,11 @@ namespace gladius::ui
             return false;
         }
         std::type_index const sourceType = sourcePort->getTypeIndex();
+
+        if (choice.id.kind == CreateNodeChoiceKind::LibraryFunction)
+        {
+            return createDifferenceFromChoice(model, sourcePortId, choice, canvasPosition);
+        }
 
         nodes::NodeBase * prototype = choice.prototype;
         nodes::SharedModel functionModel;

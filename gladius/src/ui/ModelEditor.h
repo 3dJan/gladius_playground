@@ -209,6 +209,10 @@ namespace gladius::ui
                                                                     nodes::PortId sourcePortId,
                                                                     CreateNodeChoice const & choice,
                                                                     ImVec2 canvasPosition);
+        bool createDifferenceFromChoice(nodes::Model & model,
+                                        nodes::PortId sourcePortId,
+                                        CreateNodeChoice const & choice,
+                                        ImVec2 canvasPosition);
         void createUndoRestorePoint(std::string const & description,
                                                                         nodes::Assembly const & assembly);
 
