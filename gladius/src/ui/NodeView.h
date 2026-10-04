@@ -91,6 +91,12 @@ namespace gladius::ui
          */
         void renderNodeGroups();
 
+        /// @brief Clear the transient connection preview before processing the current popup.
+        void clearConnectionPreview();
+
+        /// @brief Render the focused candidate connection inside the active node-editor context.
+        void renderConnectionPreview();
+
         /**
          * @brief Find a node by ID in the current model
          * @param nodeId The ID of the node to find
@@ -184,6 +190,8 @@ namespace gladius::ui
         void inputControls(nodes::NodeBase & node, nodes::ParameterMap::reference parameter);
         void showLinkAssignmentMenu(nodes::ParameterMap::reference parameter);
         void showOutputLinkAssignmentMenu(nodes::Port const & port);
+        void setConnectionPreview(nodes::PortId sourcePortId,
+                nodes::ParameterId targetParameterId);
         void showInputAndOutputs(nodes::NodeBase & node);
         void outputPins(nodes::NodeBase & node);
         void viewInputNode(nodes::NodeBase & node);
@@ -275,6 +283,13 @@ namespace gladius::ui
          */
         ImVec4 generateGroupColor(const std::string & tag) const;
 
+        struct ConnectionPreview
+        {
+            nodes::PortId sourcePortId{};
+            nodes::ParameterId targetParameterId{};
+        };
+
+        std::optional<ConnectionPreview> m_connectionPreview;
         int m_currentLinkId = 0;
         bool m_parameterChanged{false};
         bool m_modelChanged{false};

@@ -15,10 +15,15 @@ namespace gladius::ui
 
     using OptionalInputMenuSelection = std::optional<InputMenuSelection>;
     using OptionalParameterId = std::optional<nodes::ParameterId>;
+        using ConnectionPreviewCallback =
+            std::function<void(nodes::PortId sourcePortId, nodes::ParameterId targetParameterId)>;
 
-    auto inputMenu(nodes::Model & model, nodes::ParameterId targetId) -> OptionalInputMenuSelection;
+        auto inputMenu(nodes::Model & model,
+                                     nodes::ParameterId targetId,
+                                     ConnectionPreviewCallback previewCandidate = {}) -> OptionalInputMenuSelection;
 
     auto outputMenu(nodes::Model & model,
                     nodes::PortId sourcePortId,
-                    std::function<bool()> renderCreateNodeMenu = {}) -> OptionalParameterId;
+                                        std::function<bool()> renderCreateNodeMenu = {},
+                                        ConnectionPreviewCallback previewCandidate = {}) -> OptionalParameterId;
 } // namespace gladius::ui

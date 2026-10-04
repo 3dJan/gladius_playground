@@ -2228,6 +2228,7 @@ namespace gladius::ui
                     m_validationOverlay.render(m_doc->getIssueList());
                 }
 
+                m_nodeViewVisitor.clearConnectionPreview();
                 auto popupMenuFunction = m_popupMenuFunction;
                 popupMenuFunction();
 
@@ -2349,6 +2350,7 @@ namespace gladius::ui
                     {
                         ZoneScopedN("VisitNodes");
                         m_currentModel->visitNodes(m_nodeViewVisitor);
+                        m_nodeViewVisitor.renderConnectionPreview();
 
                         // Update node groups after nodes are rendered and positioned
                         m_nodeViewVisitor.updateNodeGroups();

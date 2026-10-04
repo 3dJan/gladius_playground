@@ -454,6 +454,48 @@ namespace gladius::ui
         }
         m_modelChanged = false;
         m_currentLinkId = 0;
+        clearConnectionPreview();
+    }
+
+    void NodeView::clearConnectionPreview()
+    {
+        m_connectionPreview.reset();
+    }
+
+    void NodeView::setConnectionPreview(nodes::PortId sourcePortId,
+                                        nodes::ParameterId targetParameterId)
+    {
+        if (sourcePortId == 0 || targetParameterId == 0)
+        {
+            clearConnectionPreview();
+            return;
+        }
+
+        m_connectionPreview = ConnectionPreview{sourcePortId, targetParameterId};
+    }
+
+    void NodeView::renderConnectionPreview()
+    {
+        if (!m_currentModel || !m_connectionPreview.has_value())
+        {
+            return;
+        }
+
+        auto const * sourcePort = m_currentModel->getPort(m_connectionPreview->sourcePortId);
+        auto const * targetParameter =
+          m_currentModel->getParameter(m_connectionPreview->targetParameterId);
+        if (sourcePort == nullptr || targetParameter == nullptr)
+        {
+            clearConnectionPreview();
+            return;
+        }
+
+        ImVec4 const previewColor = LinkColors::highlighted(typeToColor(sourcePort->getTypeIndex()));
+        ed::Link(++m_currentLinkId,
+                 sourcePort->getId(),
+                 targetParameter->getId(),
+                 previewColor,
+                 2.5f);
     }
 
     void NodeView::setAssembly(nodes::SharedAssembly assembly)
@@ -479,6 +521,7 @@ namespace gladius::ui
     void NodeView::reset()
     {
         m_currentLinkId = 0;
+        clearConnectionPreview();
         m_parameterChanged = false;
         m_modelChanged = false;
         m_nodeGroupsDirty = true;
@@ -2416,11 +2459,16 @@ namespace gladius::ui
                   return;
               }
 
-              auto const selection = inputMenu(*model, targetParamId);
+                            auto const selection = inputMenu(
+                                *model,
+                                targetParamId,
+                                [this](nodes::PortId sourcePortId, nodes::ParameterId targetParameterId)
+                                { setConnectionPreview(sourcePortId, targetParameterId); });
               if (!selection.has_value())
               {
                   return;
               }
+                            clearConnectionPreview();
 
               m_modelEditor->createUndoRestorePoint("Connect nodes");
               nodes::PortId sourcePortId = selection->sourcePortId;
@@ -2506,11 +2554,15 @@ namespace gladius::ui
                                 *model,
                                 sourcePortId,
                                 [this, model, sourcePortId]()
-                                { return m_modelEditor->renderCreateNodeSubmenu(model, sourcePortId); });
+                                { return m_modelEditor->renderCreateNodeSubmenu(model, sourcePortId); },
+                                [this](nodes::PortId previewSourcePortId,
+                                             nodes::ParameterId previewTargetParameterId)
+                                { setConnectionPreview(previewSourcePortId, previewTargetParameterId); });
               if (!targetParameterId.has_value())
               {
                   return;
               }
+                            clearConnectionPreview();
 
               m_modelEditor->createUndoRestorePoint("Connect nodes");
               if (model->addLink(sourcePortId, *targetParameterId, false))
@@ -2916,6 +2968,17 @@ namespace gladius::ui
 
     PinVisualState NodeView::pinVisualState(nodes::PortId pinId, bool isInput) const
     {
+        if (m_connectionPreview.has_value())
+        {
+            bool const isPreviewEndpoint =
+              (isInput && m_connectionPreview->targetParameterId == pinId) ||
+              (!isInput && m_connectionPreview->sourcePortId == pinId);
+            if (isPreviewEndpoint)
+            {
+                return PinVisualState::Highlighted;
+            }
+        }
+
         if (!m_modelEditor)
         {
             return PinVisualState::Normal;

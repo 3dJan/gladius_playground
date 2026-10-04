@@ -50,7 +50,9 @@ namespace gladius::ui
         }
     } // namespace
 
-    OptionalInputMenuSelection inputMenu(nodes::Model & model, nodes::ParameterId targetId)
+    OptionalInputMenuSelection inputMenu(nodes::Model & model,
+                                         nodes::ParameterId targetId,
+                                         ConnectionPreviewCallback previewCandidate)
     {
         if (model.getParameter(targetId) == nullptr)
         {
@@ -128,10 +130,14 @@ namespace gladius::ui
                       [](PortOption const & lhs, PortOption const & rhs)
                       { return lhs.label < rhs.label; });
 
+            std::optional<nodes::PortId> hoveredCandidate;
+            std::optional<nodes::PortId> focusedCandidate;
             for (auto const & option : options)
             {
                 bool const popStyle = pushNodeButtonStyle(option.category);
                 bool const clicked = touchButton(option.label.c_str());
+                bool const isHovered = ImGui::IsItemHovered();
+                bool const isFocused = ImGui::IsItemFocused();
                 if (popStyle)
                 {
                     ImGui::PopStyleColor(3);
@@ -142,6 +148,27 @@ namespace gladius::ui
                     ImGui::CloseCurrentPopup();
                     ImGui::EndPopup();
                     return InputMenuSelection{option.id, std::nullopt};
+                }
+
+                if (isHovered)
+                {
+                    hoveredCandidate = option.id;
+                }
+                else if (isFocused)
+                {
+                    focusedCandidate = option.id;
+                }
+            }
+
+            if (previewCandidate)
+            {
+                if (hoveredCandidate.has_value())
+                {
+                    previewCandidate(*hoveredCandidate, targetId);
+                }
+                else if (focusedCandidate.has_value())
+                {
+                    previewCandidate(*focusedCandidate, targetId);
                 }
             }
 
@@ -157,7 +184,8 @@ namespace gladius::ui
 
     OptionalParameterId outputMenu(nodes::Model & model,
                                    nodes::PortId sourcePortId,
-                                   std::function<bool()> renderCreateNodeMenu)
+                                   std::function<bool()> renderCreateNodeMenu,
+                                   ConnectionPreviewCallback previewCandidate)
     {
         if (model.getPort(sourcePortId) == nullptr || !ImGui::BeginPopup("Destinations"))
         {
@@ -214,10 +242,14 @@ namespace gladius::ui
                   [](ParameterOption const & lhs, ParameterOption const & rhs)
                   { return lhs.label < rhs.label; });
 
+        std::optional<nodes::ParameterId> hoveredCandidate;
+        std::optional<nodes::ParameterId> focusedCandidate;
         for (auto const & option : options)
         {
             bool const popStyle = pushNodeButtonStyle(option.category);
             bool const clicked = touchButton(option.label.c_str());
+            bool const isHovered = ImGui::IsItemHovered();
+            bool const isFocused = ImGui::IsItemFocused();
             if (popStyle)
             {
                 ImGui::PopStyleColor(3);
@@ -228,6 +260,27 @@ namespace gladius::ui
                 ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
                 return option.id;
+            }
+
+            if (isHovered)
+            {
+                hoveredCandidate = option.id;
+            }
+            else if (isFocused)
+            {
+                focusedCandidate = option.id;
+            }
+        }
+
+        if (previewCandidate)
+        {
+            if (hoveredCandidate.has_value())
+            {
+                previewCandidate(sourcePortId, *hoveredCandidate);
+            }
+            else if (focusedCandidate.has_value())
+            {
+                previewCandidate(sourcePortId, *focusedCandidate);
             }
         }
 
