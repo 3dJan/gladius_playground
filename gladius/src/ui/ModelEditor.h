@@ -4,6 +4,7 @@
 #include "../nodes/History.h"
 #include "BeamLatticeView.h"
 #include "CodeView.h"
+#include "CreateNodeChoices.h"
 #include "ExportState.h"
 #include "ExpressionDialog.h"
 #include "FunctionFromImage3DView.h"
@@ -199,6 +200,17 @@ namespace gladius::ui
       private:
         // Extraction helper
         void extractSelectedNodesToFunction(const std::string & functionName);
+        bool renderCompatibleCreateNodeChoices(nodes::Model & model,
+                                                                                             nodes::PortId sourcePortId,
+                                                                                             ImVec2 canvasPosition,
+                                                                                             std::string const & filter,
+                                                                                             bool useCategorySubmenus);
+        bool createNodeFromChoice(nodes::Model & model,
+                                                                    nodes::PortId sourcePortId,
+                                                                    CreateNodeChoice const & choice,
+                                                                    ImVec2 canvasPosition);
+        void createUndoRestorePoint(std::string const & description,
+                                                                        nodes::Assembly const & assembly);
 
       public:
         // Gamepad dispatcher helpers (public for GamepadActionDispatcher)
@@ -245,6 +257,9 @@ namespace gladius::ui
         void newModelDialog();
         void onQueryNewNode();
         void createNodePopup(nodes::PortId srcPortId, ImVec2 mousePos);
+                [[nodiscard]] bool renderCreateNodeSubmenu(
+                    nodes::SharedModel const & expectedModel, nodes::PortId sourcePortId);
+        void resetCreateNodeSubmenuFilter();
 
         void invalidateEverything();
         void setAssembly(nodes::SharedAssembly assembly);
@@ -282,6 +297,7 @@ namespace gladius::ui
 
         // Helper method to check if a string matches the current filter
         bool matchesNodeFilter(const std::string & text) const;
+        bool matchesNodeFilter(const std::string & text, const std::string & filter) const;
 
         void pushNodeColor(nodes::NodeBase & node);
         void popNodeColor(nodes::NodeBase & node);
@@ -402,6 +418,8 @@ namespace gladius::ui
 
         // Node filtering
         std::string m_nodeFilterText;
+        std::string m_createNodeSubmenuFilterText;
+        CreateNodeChoiceHistory m_createNodeChoiceHistory;
 
         // Library browser
         LibraryBrowser m_libraryBrowser;

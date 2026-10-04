@@ -155,12 +155,28 @@ namespace gladius::ui
         return {};
     }
 
-    OptionalParameterId outputMenu(nodes::Model & model, nodes::PortId sourcePortId)
+    OptionalParameterId outputMenu(nodes::Model & model,
+                                   nodes::PortId sourcePortId,
+                                   std::function<bool()> renderCreateNodeMenu)
     {
         if (model.getPort(sourcePortId) == nullptr || !ImGui::BeginPopup("Destinations"))
         {
             return {};
         }
+
+        if (renderCreateNodeMenu && ImGui::BeginMenu("Create Node"))
+        {
+            bool const createNodeHandled = renderCreateNodeMenu();
+            ImGui::EndMenu();
+            if (createNodeHandled)
+            {
+                ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+                return {};
+            }
+        }
+
+        ImGui::Separator();
 
         auto const candidates = model.collectCompatibleLinkCandidates(sourcePortId, true);
         std::vector<ParameterOption> options;

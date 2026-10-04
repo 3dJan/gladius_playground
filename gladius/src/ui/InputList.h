@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../nodes/Model.h"
+#include <functional>
 #include <optional>
 #include <typeindex>
 
@@ -17,5 +18,7 @@ namespace gladius::ui
 
     auto inputMenu(nodes::Model & model, nodes::ParameterId targetId) -> OptionalInputMenuSelection;
 
-    auto outputMenu(nodes::Model & model, nodes::PortId sourcePortId) -> OptionalParameterId;
+    auto outputMenu(nodes::Model & model,
+                    nodes::PortId sourcePortId,
+                    std::function<bool()> renderCreateNodeMenu = {}) -> OptionalParameterId;
 } // namespace gladius::ui

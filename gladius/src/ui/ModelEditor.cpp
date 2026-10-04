@@ -71,6 +71,26 @@ namespace gladius::ui
         /// Filter input width in popups
         constexpr float kFilterInputWidth = 200.0f;
 
+        nodes::NodeTypes & nodeTypePrototypes()
+        {
+            static nodes::NodeTypes prototypes;
+            return prototypes;
+        }
+
+        nodes::NodeBase * functionCallPrototype()
+        {
+            nodes::NodeBase * functionPrototype = nullptr;
+            nodes::staticFor(nodeTypePrototypes(),
+                             [&functionPrototype](auto, auto & node)
+                             {
+                                 if (dynamic_cast<nodes::FunctionCall *>(&node) != nullptr)
+                                 {
+                                     functionPrototype = &node;
+                                 }
+                             });
+            return functionPrototype;
+        }
+
         [[nodiscard]] ImVec4 colorWithAlpha(ImVec4 color, float alpha)
         {
             color.w = alpha;
@@ -997,7 +1017,18 @@ namespace gladius::ui
             auto const currentMousePos = ImGui::GetMousePos();
             ed::Resume();
 
-            showPopupMenu([&, currentMousePos]() { createNodePopup(-1, currentMousePos); });
+            auto const modelAtOpen = m_currentModel;
+            showPopupMenu(
+              [this, modelAtOpen, currentMousePos]()
+              {
+                  if (!modelAtOpen || m_currentModel != modelAtOpen)
+                  {
+                      m_showCreateNodePopUp = false;
+                      closePopupMenu();
+                      return;
+                  }
+                  createNodePopup(-1, currentMousePos);
+              });
             m_showCreateNodePopUp = true;
             ImGui::OpenPopup("Create Node");
         }
@@ -1063,8 +1094,18 @@ namespace gladius::ui
             {
                 auto const portId = static_cast<nodes::PortId>(pinId.Get());
                 auto const currentMousePos = ImGui::GetMousePos();
-                showPopupMenu([&, portId, currentMousePos]()
-                              { createNodePopup(portId, currentMousePos); });
+                auto const modelAtOpen = m_currentModel;
+                showPopupMenu(
+                  [this, modelAtOpen, portId, currentMousePos]()
+                  {
+                      if (!modelAtOpen || m_currentModel != modelAtOpen)
+                      {
+                          m_showCreateNodePopUp = false;
+                          closePopupMenu();
+                          return;
+                      }
+                      createNodePopup(portId, currentMousePos);
+                  });
                 m_showCreateNodePopUp = true;
                 ImGui::OpenPopup("Create Node");
             }
@@ -1086,7 +1127,7 @@ namespace gladius::ui
             throw std::runtime_error("ModelEditor: No model selected");
         }
 
-        static nodes::NodeTypes nodeTypes;
+        auto & nodeTypes = nodeTypePrototypes();
         auto const * sourcePort = m_currentModel->getPort(srcPortId);
         bool const showOnlyLinkableNodes = sourcePort != nullptr;
 
@@ -1150,98 +1191,436 @@ namespace gladius::ui
             ImGui::PopItemWidth();
             ImGui::Separator();
 
-            // Filter function and mesh resources using the filter text
-            functionToolBox(mousePos);
-            meshResourceToolBox(mousePos);
-            beamLatticeResourceToolBox(mousePos);
-
-            for (auto & [cat, catName] : nodes::CategoryNames)
+            // Keep the unconnected generic actions separate from source-compatible choices.
+            if (!showOnlyLinkableNodes)
             {
-                if (cat == nodes::Category::Internal)
+                functionToolBox(mousePos);
+                meshResourceToolBox(mousePos);
+                beamLatticeResourceToolBox(mousePos);
+            }
+
+            if (showOnlyLinkableNodes)
+            {
+                if (renderCompatibleCreateNodeChoices(*m_currentModel,
+                                                      srcPortId,
+                                                      ed::ScreenToCanvas(mousePos),
+                                                      m_nodeFilterText,
+                                                      false))
                 {
-                    continue;
+                    ImGui::CloseCurrentPopup();
+                    closePopupMenu();
                 }
-                auto const category = cat;
-                auto const styleIter = NodeColors.find(category);
-                if (styleIter != std::end(NodeColors))
+            }
+            else
+            {
+                for (auto & [cat, catName] : nodes::CategoryNames)
                 {
-                    auto const style = styleIter->second;
+                    if (cat == nodes::Category::Internal)
+                    {
+                        continue;
+                    }
+                    auto const category = cat;
+                    auto const styleIter = NodeColors.find(category);
+                    if (styleIter != std::end(NodeColors))
+                    {
+                        auto const style = styleIter->second;
 
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImU32(style.color));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImU32(style.activeColor));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImU32(style.hoveredColor));
-                    ImGui::PushStyleColor(ImGuiCol_Header, ImU32(style.color));
-                    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImU32(style.activeColor));
-                    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImU32(style.hoveredColor));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-                }
-                auto const requiredFieldName =
-                  (showOnlyLinkableNodes) ? sourcePort->getShortName() : std::string{};
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImU32(style.color));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImU32(style.activeColor));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImU32(style.hoveredColor));
+                        ImGui::PushStyleColor(ImGuiCol_Header, ImU32(style.color));
+                        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImU32(style.activeColor));
+                        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImU32(style.hoveredColor));
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+                    }
 
-                staticFor(
-                  nodeTypes,
-                  [&](auto, auto & node)
-                  {
-                      auto targetParameterIter = node.parameter().find(requiredFieldName);
-                      bool hasRequiredField = targetParameterIter != std::end(node.parameter());
-
-                      pushNodeColor(node);
-                      // Check if node matches filter
-                      std::string const nodeName = node.name();
-                      bool const matchesFilter = matchesNodeFilter(nodeName);
-                      bool const hasCompatibleType =
-                        !showOnlyLinkableNodes ||
-                        node.canAcceptInputType(requiredFieldName, sourcePort->getTypeIndex());
-
-                      if (matchesFilter && node.getCategory() == category &&
-                          (hasRequiredField || !showOnlyLinkableNodes) && hasCompatibleType)
+                    staticFor(
+                      nodeTypes,
+                      [&](auto, auto & node)
                       {
-                          float const touchPadding =
-                            std::max(8.f, ImGui::GetFontSize() * 0.45f);
-                          ImGui::PushStyleVar(
-                            ImGuiStyleVar_FramePadding, ImVec2(touchPadding, touchPadding));
-                          bool const selected = ImGui::Button(nodeName.c_str());
-                          ImGui::PopStyleVar();
-                          if (selected)
+                          pushNodeColor(node);
+                          // Check if node matches filter
+                          std::string nodeName = node.name();
+                          bool matchesFilter = matchesNodeFilter(nodeName);
+
+                          if (matchesFilter && node.getCategory() == category)
                           {
-                              createUndoRestorePoint("Create node");
-                              auto createdNode = m_currentModel->create(node);
-                              auto posOnCanvas = ed::ScreenToCanvas(mousePos);
-                              ed::SetNodePosition(createdNode->getId(), posOnCanvas);
-
-                              bool linkCreated = true;
-                              if (showOnlyLinkableNodes)
+                              float const touchPadding =
+                                std::max(8.f, ImGui::GetFontSize() * 0.45f);
+                              ImGui::PushStyleVar(
+                                ImGuiStyleVar_FramePadding, ImVec2(touchPadding, touchPadding));
+                              bool const selected = ImGui::Button(nodeName.c_str());
+                              ImGui::PopStyleVar();
+                              if (selected)
                               {
-                                  linkCreated = m_currentModel->addLink(
-                                    srcPortId,
-                                    createdNode->parameter()[requiredFieldName].getId());
-                              }
+                                  createUndoRestorePoint("Create node");
+                                  auto createdNode = m_currentModel->create(node);
+                                  auto posOnCanvas = ed::ScreenToCanvas(mousePos);
+                                  ed::SetNodePosition(createdNode->getId(), posOnCanvas);
 
-                              if (linkCreated)
-                              {
-                                  // Request focus on the newly created node for keyboard-driven
-                                  // workflow
                                   requestNodeFocus(createdNode->getId());
-
                                   markModelAsModified();
+                                  closePopupMenu();
                               }
-                              else
-                              {
-                                  m_currentModel->remove(createdNode->getId());
-                              }
-                              closePopupMenu();
                           }
-                      }
-                      popNodeColor(node);
-                  });
+                          popNodeColor(node);
+                      });
 
-                if (styleIter != std::end(NodeColors))
-                {
-                    ImGui::PopStyleColor(7);
+                    if (styleIter != std::end(NodeColors))
+                    {
+                        ImGui::PopStyleColor(7);
+                    }
                 }
             }
             ImGui::EndPopup();
         }
+    }
+
+    bool ModelEditor::renderCreateNodeSubmenu(nodes::SharedModel const & expectedModel,
+                                              nodes::PortId sourcePortId)
+    {
+        if (!expectedModel || expectedModel != m_currentModel || !m_assembly)
+        {
+            return false;
+        }
+
+        auto const * sourcePort = expectedModel->getPort(sourcePortId);
+        if (sourcePort == nullptr || !expectedModel->getNode(sourcePort->getParentId()).has_value())
+        {
+            return false;
+        }
+
+        ImGui::TextUnformatted(ICON_FA_SEARCH);
+        ImGui::SameLine();
+        ImGui::PushItemWidth(kFilterInputWidth * m_uiScale);
+        if (ImGui::IsWindowAppearing())
+        {
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::InputText("##OutputCreateNodeFilter",
+                         &m_createNodeSubmenuFilterText,
+                         ImGuiInputTextFlags_AutoSelectAll);
+        ImGui::PopItemWidth();
+        ImGui::Separator();
+
+        auto position = ed::GetNodePosition(sourcePort->getParentId());
+        position.x += kNodePlacementOffsetX;
+        return renderCompatibleCreateNodeChoices(
+          *expectedModel, sourcePortId, position, m_createNodeSubmenuFilterText, true);
+    }
+
+    void ModelEditor::resetCreateNodeSubmenuFilter()
+    {
+        m_createNodeSubmenuFilterText.clear();
+    }
+
+    bool ModelEditor::renderCompatibleCreateNodeChoices(nodes::Model & model,
+                                                        nodes::PortId sourcePortId,
+                                                        ImVec2 canvasPosition,
+                                                        std::string const & filter,
+                                                        bool useCategorySubmenus)
+    {
+        auto const * sourcePort = model.getPort(sourcePortId);
+        if (sourcePort == nullptr || !m_assembly)
+        {
+            return false;
+        }
+
+        auto const choices = collectCompatibleCreateNodeChoices(
+          model, *sourcePort, *m_assembly, nodeTypePrototypes());
+        auto const matchesFilter = [this, &filter](CreateNodeChoice const & choice)
+        { return matchesNodeFilter(choice.label, filter); };
+        auto const visibleChoiceCount = std::count_if(choices.begin(), choices.end(), matchesFilter);
+        if (visibleChoiceCount == 0)
+        {
+            ImGui::TextUnformatted("No compatible nodes or functions");
+            return false;
+        }
+
+        auto renderChoice = [this, &model, sourcePortId, canvasPosition, &matchesFilter](
+                              CreateNodeChoice const & choice,
+                              char const * section)
+        {
+            if (!matchesFilter(choice))
+            {
+                return false;
+            }
+
+            auto * styleNode = choice.prototype != nullptr ? choice.prototype : functionCallPrototype();
+            auto const choiceItemId = choice.id.kind == CreateNodeChoiceKind::Function
+                                        ? std::to_string(choice.id.functionId)
+                                        : choice.id.nodeTypeName;
+            ImGui::PushID(section);
+            ImGui::PushID(choiceItemId.c_str());
+            ImGui::PushID(choice.id.inputName.c_str());
+            if (styleNode != nullptr)
+            {
+                pushNodeColor(*styleNode);
+            }
+
+            float const touchPadding = std::max(8.f, ImGui::GetFontSize() * 0.45f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(touchPadding, touchPadding));
+            bool const selected = ImGui::Button(choice.label.c_str());
+            ImGui::PopStyleVar();
+            if (styleNode != nullptr)
+            {
+                popNodeColor(*styleNode);
+            }
+            ImGui::PopID();
+            ImGui::PopID();
+            ImGui::PopID();
+
+            return selected && createNodeFromChoice(model, sourcePortId, choice, canvasPosition);
+        };
+
+        auto const recentIds = m_createNodeChoiceHistory.getRecent(sourcePort->getTypeIndex());
+        bool const hasVisibleRecent = std::any_of(
+          recentIds.begin(),
+          recentIds.end(),
+          [&choices, &matchesFilter](CreateNodeChoiceId const & id)
+          {
+              return std::any_of(choices.begin(),
+                                 choices.end(),
+                                 [&id, &matchesFilter](CreateNodeChoice const & choice)
+                                 { return choice.id == id && matchesFilter(choice); });
+          });
+
+        if (hasVisibleRecent)
+        {
+            ImGui::TextUnformatted("Recently used");
+            ImGui::PushID("recent-create-node-choices");
+            for (auto const & id : recentIds)
+            {
+                auto const choiceIter = std::find_if(
+                  choices.begin(), choices.end(), [&id](CreateNodeChoice const & choice)
+                  { return choice.id == id; });
+                if (choiceIter != choices.end() && renderChoice(*choiceIter, "recent"))
+                {
+                    ImGui::PopID();
+                    return true;
+                }
+            }
+            ImGui::PopID();
+            ImGui::Separator();
+        }
+
+        bool const hasVisibleFunction = std::any_of(
+          choices.begin(), choices.end(), [&matchesFilter](CreateNodeChoice const & choice)
+          { return choice.id.kind == CreateNodeChoiceKind::Function && matchesFilter(choice); });
+
+        if (useCategorySubmenus)
+        {
+            for (auto const & [category, categoryName] : nodes::CategoryNames)
+            {
+                if (category == nodes::Category::Internal)
+                {
+                    continue;
+                }
+
+                bool const hasCategoryChoices = std::any_of(
+                  choices.begin(), choices.end(), [&matchesFilter, category](CreateNodeChoice const & choice)
+                  {
+                      return choice.id.kind == CreateNodeChoiceKind::NodePrototype &&
+                             choice.category == category && matchesFilter(choice);
+                  });
+                if (!hasCategoryChoices || !ImGui::BeginMenu(categoryName.c_str()))
+                {
+                    continue;
+                }
+
+                bool handled = false;
+                for (auto const & choice : choices)
+                {
+                    if (choice.id.kind == CreateNodeChoiceKind::NodePrototype &&
+                        choice.category == category && renderChoice(choice, "node-choice"))
+                    {
+                        handled = true;
+                        break;
+                    }
+                }
+                ImGui::EndMenu();
+                if (handled)
+                {
+                    return true;
+                }
+            }
+
+            if (hasVisibleFunction && ImGui::BeginMenu("Functions"))
+            {
+                bool handled = false;
+                for (auto const & choice : choices)
+                {
+                    if (choice.id.kind == CreateNodeChoiceKind::Function &&
+                        renderChoice(choice, "function-choice"))
+                    {
+                        handled = true;
+                        break;
+                    }
+                }
+                ImGui::EndMenu();
+                if (handled)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool drewSection = hasVisibleRecent;
+        for (auto const & [category, categoryName] : nodes::CategoryNames)
+        {
+            if (category == nodes::Category::Internal)
+            {
+                continue;
+            }
+
+            bool const hasCategoryChoices = std::any_of(
+              choices.begin(), choices.end(), [&matchesFilter, category](CreateNodeChoice const & choice)
+              {
+                  return choice.id.kind == CreateNodeChoiceKind::NodePrototype &&
+                         choice.category == category && matchesFilter(choice);
+              });
+            if (!hasCategoryChoices)
+            {
+                continue;
+            }
+
+            if (drewSection)
+            {
+                ImGui::Separator();
+            }
+            ImGui::TextUnformatted(categoryName.c_str());
+            for (auto const & choice : choices)
+            {
+                if (choice.id.kind == CreateNodeChoiceKind::NodePrototype &&
+                    choice.category == category && renderChoice(choice, "node-choice"))
+                {
+                    return true;
+                }
+            }
+            drewSection = true;
+        }
+
+        if (hasVisibleFunction)
+        {
+            if (drewSection)
+            {
+                ImGui::Separator();
+            }
+            ImGui::TextUnformatted("Functions");
+            for (auto const & choice : choices)
+            {
+                if (choice.id.kind == CreateNodeChoiceKind::Function &&
+                    renderChoice(choice, "function-choice"))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool ModelEditor::createNodeFromChoice(nodes::Model & model,
+                                           nodes::PortId sourcePortId,
+                                           CreateNodeChoice const & choice,
+                                           ImVec2 canvasPosition)
+    {
+        if (!m_currentModel || m_currentModel.get() != &model || !m_assembly)
+        {
+            return false;
+        }
+
+        auto const * sourcePort = model.getPort(sourcePortId);
+        if (sourcePort == nullptr)
+        {
+            return false;
+        }
+        std::type_index const sourceType = sourcePort->getTypeIndex();
+
+        nodes::NodeBase * prototype = choice.prototype;
+        nodes::SharedModel functionModel;
+        if (choice.id.kind == CreateNodeChoiceKind::NodePrototype)
+        {
+            if (prototype == nullptr || prototype->name() != choice.id.nodeTypeName)
+            {
+                return false;
+            }
+
+            auto const inputIter = prototype->parameter().find(choice.id.inputName);
+            if (inputIter == prototype->parameter().end() || !inputIter->second.isVisible() ||
+                inputIter->second.isInternal() ||
+                !prototype->canAcceptInputType(choice.id.inputName, sourceType))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            functionModel = m_assembly->findModel(choice.id.functionId);
+            if (!functionModel || functionModel.get() == &model ||
+                choice.id.functionId == model.getResourceId())
+            {
+                return false;
+            }
+
+            auto * beginNode = functionModel->getBeginNode();
+            if (beginNode == nullptr || functionModel->getEndNode() == nullptr)
+            {
+                return false;
+            }
+            auto const inputIter = beginNode->outputs().find(choice.id.inputName);
+            if (inputIter == beginNode->outputs().end() || !inputIter->second.isVisible() ||
+                inputIter->second.getTypeIndex() != sourceType)
+            {
+                return false;
+            }
+        }
+
+        auto const assemblyBeforeCreate = *m_assembly;
+        nodes::NodeBase * createdNode = nullptr;
+        if (choice.id.kind == CreateNodeChoiceKind::NodePrototype)
+        {
+            nodes::staticFor(nodeTypePrototypes(),
+                             [&model, &choice, &createdNode](auto, auto & nodePrototype)
+                             {
+                                 if (createdNode == nullptr &&
+                                     nodePrototype.name() == choice.id.nodeTypeName)
+                                 {
+                                     createdNode = model.create(nodePrototype);
+                                 }
+                             });
+        }
+        else
+        {
+            createdNode = model.createFunctionCallNode(choice.id.functionId, *functionModel);
+        }
+        if (createdNode == nullptr)
+        {
+            return true;
+        }
+
+        auto const targetIter = createdNode->parameter().find(choice.id.inputName);
+        if (targetIter == createdNode->parameter().end())
+        {
+            model.remove(createdNode->getId());
+            closePopupMenu();
+            return true;
+        }
+
+        ed::SetNodePosition(createdNode->getId(), canvasPosition);
+        if (!model.addLink(sourcePortId, targetIter->second.getId(), false))
+        {
+            model.remove(createdNode->getId());
+            closePopupMenu();
+            return true;
+        }
+
+        createUndoRestorePoint("Create node", assemblyBeforeCreate);
+        m_createNodeChoiceHistory.record(sourceType, choice.id);
+        requestNodeFocus(createdNode->getId());
+        markModelAsModified();
+        closePopupMenu();
+        return true;
     }
 
     void ModelEditor::invalidateEverything()
@@ -2190,6 +2569,11 @@ namespace gladius::ui
             return;
         }
 
+        if (m_assembly != assembly)
+        {
+            m_createNodeChoiceHistory.clear();
+        }
+
         // Clear all editor contexts for new document - each function will get a fresh context
         for (auto & [id, ctx] : m_editorContexts)
         {
@@ -2254,14 +2638,19 @@ namespace gladius::ui
 
     bool ModelEditor::matchesNodeFilter(const std::string & text) const
     {
-        if (m_nodeFilterText.empty())
+        return matchesNodeFilter(text, m_nodeFilterText);
+    }
+
+    bool ModelEditor::matchesNodeFilter(const std::string & text, const std::string & filter) const
+    {
+        if (filter.empty())
         {
             return true; // No filter active, match everything
         }
 
         // Case-insensitive comparison
         std::string lowerText = text;
-        std::string lowerFilter = m_nodeFilterText;
+        std::string lowerFilter = filter;
         std::transform(lowerText.begin(),
                        lowerText.end(),
                        lowerText.begin(),
@@ -3242,6 +3631,16 @@ namespace gladius::ui
         m_history.storeState(*m_assembly, description);
     }
 
+    void ModelEditor::createUndoRestorePoint(std::string const & description,
+                                            nodes::Assembly const & assembly)
+    {
+        if (m_stateApplyingUndo)
+        {
+            return;
+        }
+        m_history.storeState(assembly, description);
+    }
+
     void ModelEditor::resetUndo()
     {
         m_history = History();
@@ -3689,6 +4088,7 @@ namespace gladius::ui
         auto const oldResourceId =
             m_currentModel ? m_currentModel->getResourceId() : nodes::ResourceId{0};
 
+        m_createNodeChoiceHistory.clear();
         m_assembly = std::move(newAssembly);
 
         if (m_assembly && oldResourceId != 0)

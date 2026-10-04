@@ -2489,6 +2489,7 @@ namespace gladius::ui
           {
               if (m_showOutputLinkAssignmentMenu)
               {
+                  m_modelEditor->resetCreateNodeSubmenuFilter();
                   ImGui::OpenPopup("Destinations");
                   m_showOutputLinkAssignmentMenu = false;
               }
@@ -2501,7 +2502,11 @@ namespace gladius::ui
                   return;
               }
 
-              auto const targetParameterId = outputMenu(*model, sourcePortId);
+                            auto const targetParameterId = outputMenu(
+                                *model,
+                                sourcePortId,
+                                [this, model, sourcePortId]()
+                                { return m_modelEditor->renderCreateNodeSubmenu(model, sourcePortId); });
               if (!targetParameterId.has_value())
               {
                   return;
