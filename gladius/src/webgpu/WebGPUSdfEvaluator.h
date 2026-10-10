@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/AsyncTask.h"
 #include "compute/SdfEvaluation.h"
 #include "webgpu/WebGPUComputeContext.h"
 
@@ -52,11 +53,29 @@ namespace gladius::webgpu
           ColorBatchSink colorSink,
           CancellationPredicate shouldCancel = {}) const;
 
+        /// @brief Coroutine variant of evaluateGenerated. Suspends during GPU readbacks instead of blocking.
+        /// The evaluator must outlive the returned task.
+        [[nodiscard]] compute::AsyncTask<bool> evaluateGeneratedAsync(
+          compute::SdfEvaluationRequest request,
+          std::size_t pointCount,
+          PositionBatchSource positionSource,
+          ValueBatchSink valueSink,
+          CancellationPredicate shouldCancel = {}) const;
+
+        /// @brief Coroutine variant of evaluateColorsGenerated. Suspends during GPU readbacks instead of blocking.
+        /// The evaluator must outlive the returned task.
+        [[nodiscard]] compute::AsyncTask<bool> evaluateColorsGeneratedAsync(
+          compute::SdfEvaluationRequest request,
+          std::size_t pointCount,
+          PositionBatchSource positionSource,
+          ColorBatchSink colorSink,
+          CancellationPredicate shouldCancel = {}) const;
+
       private:
         using RawValueBatchSink = std::function<void(std::size_t, std::vector<float> &&)>;
 
-        [[nodiscard]] bool evaluateGeneratedImpl(
-          compute::SdfEvaluationRequest const & request,
+        [[nodiscard]] compute::AsyncTask<bool> evaluateGeneratedImpl(
+          compute::SdfEvaluationRequest request,
           std::size_t pointCount,
           std::size_t outputComponents,
           PositionBatchSource positionSource,

@@ -201,7 +201,7 @@ namespace gladius::ui
 #endif // __linux__
 
         /// @brief Run save dialog (blocking)
-        [[nodiscard]] QueriedFilename runSaveDialog(FilePatterns patterns,
+        [[maybe_unused, nodiscard]] QueriedFilename runSaveDialog(FilePatterns patterns,
                                                      std::filesystem::path defaultPath)
         {
 #ifdef __linux__
@@ -216,7 +216,7 @@ namespace gladius::ui
         }
 
         /// @brief Run open dialog (blocking)
-        [[nodiscard]] QueriedFilename runOpenDialog(FilePatterns patterns,
+        [[maybe_unused, nodiscard]] QueriedFilename runOpenDialog(FilePatterns patterns,
                                                      std::filesystem::path defaultPath)
         {
 #ifdef __linux__
@@ -230,7 +230,7 @@ namespace gladius::ui
         }
 
         /// @brief Run directory dialog (blocking)
-        [[nodiscard]] QueriedFilename runDirectoryDialog(std::filesystem::path defaultPath)
+        [[maybe_unused, nodiscard]] QueriedFilename runDirectoryDialog(std::filesystem::path defaultPath)
         {
 #ifdef __linux__
             auto [toolAvailable, result] = showLinuxDialog(DialogMode::Directory, {}, defaultPath);
@@ -246,6 +246,10 @@ namespace gladius::ui
 
     void AsyncFileDialog::saveFile(FilePatterns patterns, std::filesystem::path defaultPath)
     {
+#ifdef __EMSCRIPTEN__
+        // Browser builds have no native dialogs and no worker threads.
+        return;
+#endif
         if (isActive())
         {
             return; // Already running
@@ -264,6 +268,10 @@ namespace gladius::ui
 
     void AsyncFileDialog::openFile(FilePatterns patterns, std::filesystem::path defaultPath)
     {
+#ifdef __EMSCRIPTEN__
+        // Browser builds have no native dialogs and no worker threads.
+        return;
+#endif
         if (isActive())
         {
             return;
@@ -282,6 +290,10 @@ namespace gladius::ui
 
     void AsyncFileDialog::selectDirectory(std::filesystem::path defaultPath)
     {
+#ifdef __EMSCRIPTEN__
+        // Browser builds have no native dialogs and no worker threads.
+        return;
+#endif
         if (isActive())
         {
             return;

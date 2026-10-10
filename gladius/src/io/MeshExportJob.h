@@ -1,9 +1,12 @@
 #pragma once
 
+#include "compute/AsyncTask.h"
+
 #include <exception>
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -77,5 +80,32 @@ namespace gladius::io
 
         std::shared_ptr<SharedState> m_sharedState;
         std::future<void> m_worker;
+    };
+
+    /// Thread-free job that advances an AsyncTask by one step per poll(). Used where worker threads are unavailable.
+    class SteppedMeshExportJob final : public MeshExportJob
+    {
+      public:
+        using TaskFactory = std::function<compute::AsyncTask<void>(MeshExportCancellationPredicate,
+                                                                   MeshExportProgressCallback)>;
+
+        explicit SteppedMeshExportJob(TaskFactory factory);
+
+        SteppedMeshExportJob(SteppedMeshExportJob const&) = delete;
+        SteppedMeshExportJob& operator=(SteppedMeshExportJob const&) = delete;
+        SteppedMeshExportJob(SteppedMeshExportJob&&) = delete;
+        SteppedMeshExportJob& operator=(SteppedMeshExportJob&&) = delete;
+        ~SteppedMeshExportJob() override = default;
+
+        void poll() override;
+        void requestCancellation() override;
+        [[nodiscard]] MeshExportJobStatus getStatus() const override;
+
+      private:
+        void reportProgress(double progress, std::string_view phase);
+        void finish(MeshExportJobState state, std::string phase, std::string errorMessage);
+
+        MeshExportJobStatus m_status;
+        std::optional<compute::AsyncTask<void>> m_task;
     };
 } // namespace gladius::io

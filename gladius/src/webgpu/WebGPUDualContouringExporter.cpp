@@ -82,6 +82,22 @@ namespace gladius::webgpu
       io::DualContouringOptions const & options,
       WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
     {
+        auto pumpContext = context;
+        return compute::runBlocking(generateMeshAsync(std::move(context),
+                                                      snapshot,
+                                                      bounds,
+                                                      options,
+                                                      std::move(shouldCancel)),
+                                    [pumpContext] { pumpContext->processEvents(); });
+    }
+
+    compute::AsyncTask<io::IndexedTriangleMesh> WebGPUDualContouringExporter::generateMeshAsync(
+      std::shared_ptr<WebGPUComputeContext> context,
+      compute::RenderSceneSnapshot const & snapshot,
+      compute::BoundsResult bounds,
+      io::DualContouringOptions options,
+      WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
+    {
         if (!context || !context->isValid())
         {
             throw std::runtime_error("WebGPU compute context is unavailable");
@@ -134,7 +150,7 @@ namespace gladius::webgpu
         auto evaluationRequest = makeSdfEvaluationRequest(snapshot, options.isoValue);
         WebGPUSdfEvaluator evaluator{std::move(context)};
         auto const planeSize = options.sdfResolution * options.sdfResolution;
-        bool const completed = evaluator.evaluateGenerated(
+        bool const completed = co_await evaluator.evaluateGeneratedAsync(
           evaluationRequest,
           sampleCount,
           [&](std::size_t const offset,
@@ -176,7 +192,7 @@ namespace gladius::webgpu
         config.enableCurvatureRefinement = false;
         config.enableBalancedRefinement = false;
 
-        return io::buildIndexedDualContouringMesh(gridBounds,
+        co_return io::buildIndexedDualContouringMesh(gridBounds,
                                                    config,
                                                    options.sdfResolution,
                                                    options.sdfResolution,

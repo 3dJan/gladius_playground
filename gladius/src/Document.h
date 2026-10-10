@@ -4,6 +4,7 @@
 #include "BitmapChannel.h"
 #include "Mesh.h"
 #include "MeshSdfMethod.h"
+#include "compute/AsyncTask.h"
 #include "compute/RenderContracts.h"
 #include "compute/types.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
@@ -257,6 +258,12 @@ namespace gladius
         void exportMesh(io::MeshExportRequest const & request,
                 io::MeshExportCancellationPredicate shouldCancel = {},
                 io::MeshExportProgressCallback reportProgress = {});
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        /// @brief Non-blocking mesh export for WebGPU backends. Drive it with io::SteppedMeshExportJob.
+        [[nodiscard]] compute::AsyncTask<void> exportMeshAsync(io::MeshExportRequest request,
+                                                                io::MeshExportCancellationPredicate shouldCancel = {},
+                                                                io::MeshExportProgressCallback reportProgress = {});
+#endif
 
         void markFileAsChanged();
 
@@ -552,6 +559,9 @@ namespace gladius
         void exportWebGpuMesh(io::MeshExportRequest const & request,
                               io::MeshExportCancellationPredicate shouldCancel = {},
                               io::MeshExportProgressCallback reportProgress = {});
+        compute::AsyncTask<void> exportWebGpuMeshAsync(io::MeshExportRequest request,
+                                                       io::MeshExportCancellationPredicate shouldCancel = {},
+                                                       io::MeshExportProgressCallback reportProgress = {});
 #endif
 
         enum class RefreshMode

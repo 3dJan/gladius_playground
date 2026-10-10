@@ -329,6 +329,24 @@ namespace gladius::webgpu
       io::MeshExportCancellationPredicate shouldCancel,
       ProgressCallback reportProgress)
     {
+        auto pumpContext = context;
+        return compute::runBlocking(generateMeshAsync(std::move(context),
+                                                      snapshot,
+                                                      bounds,
+                                                      qualityLevel,
+                                                      std::move(shouldCancel),
+                                                      std::move(reportProgress)),
+                                    [pumpContext] { pumpContext->processEvents(); });
+    }
+
+    compute::AsyncTask<io::IndexedTriangleMesh> WebGPULayeredMarchingCubesExporter::generateMeshAsync(
+      std::shared_ptr<WebGPUComputeContext> context,
+      compute::RenderSceneSnapshot const & snapshot,
+      compute::BoundsResult bounds,
+      std::size_t const qualityLevel,
+      io::MeshExportCancellationPredicate shouldCancel,
+      ProgressCallback reportProgress)
+    {
         if (!context || !context->isValid())
         {
             throw std::runtime_error("WebGPU compute context is unavailable");
@@ -379,7 +397,7 @@ namespace gladius::webgpu
         auto request = makeSdfEvaluationRequest(snapshot);
         WebGPUSdfEvaluator evaluator{std::move(context)};
         auto const planeSize = resolution * resolution;
-        bool const completed = evaluator.evaluateGenerated(
+        bool const completed = co_await evaluator.evaluateGeneratedAsync(
           request,
           sampleCount,
           [=](std::size_t const offset,
@@ -419,6 +437,6 @@ namespace gladius::webgpu
         }
 
         GridSurfaceBuilder builder{resolution, minimum, spacing, values};
-        return builder.build(shouldCancel, reportProgress);
+        co_return builder.build(shouldCancel, reportProgress);
     }
 } // namespace gladius::webgpu

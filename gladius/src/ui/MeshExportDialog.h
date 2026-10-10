@@ -52,6 +52,7 @@ namespace gladius::ui
 
       private:
         void pollExportJob();
+        void deliverBrowserDownload();
         void renderConfiguration(std::shared_ptr<Document> const & document);
         void renderFileSelection();
         void renderMeshExtractionTab();
@@ -65,11 +66,18 @@ namespace gladius::ui
 
         std::filesystem::path m_targetFile;
         bool m_visible{false};
-        std::unique_ptr<io::AsyncMeshExportJob> m_exportJob;
+        std::unique_ptr<io::MeshExportJob> m_exportJob;
+        std::filesystem::path m_exportOutputPath;
+        std::string m_exportDownloadName;
         std::weak_ptr<Document> m_document;
         MeshOutputFormat m_outputFormat = MeshOutputFormat::ThreeMF;
+#if defined(__EMSCRIPTEN__)
+        io::SurfaceExtractionMethod m_selectedMethod =
+          io::SurfaceExtractionMethod::LayeredMarchingCubes;
+#else
         io::SurfaceExtractionMethod m_selectedMethod =
           io::SurfaceExtractionMethod::ManifoldDualContouring;
+#endif
         std::size_t m_marchingCubesQuality = 1U;
         io::DualContouringQuality m_dualQualityPreset = io::DualContouringQuality::Balanced;
         bool m_dualForceUniform = false;

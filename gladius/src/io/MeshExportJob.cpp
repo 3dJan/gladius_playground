@@ -28,6 +28,10 @@ namespace gladius::io
             throw std::invalid_argument("Mesh export job requires a work function");
         }
 
+#ifdef __EMSCRIPTEN__
+        // Browser builds have no worker threads; running here would block the page.
+        throw std::runtime_error("Mesh export is not available in the browser build yet");
+#else
         auto const state = m_sharedState;
         m_worker = std::async(std::launch::async, [state, work = std::move(work)]() mutable {
             CancellationPredicate const shouldCancel = [state]() {
@@ -48,6 +52,7 @@ namespace gladius::io
 
             work(shouldCancel, reportProgress);
         });
+#endif
     }
 
     AsyncMeshExportJob::~AsyncMeshExportJob()
@@ -135,5 +140,84 @@ namespace gladius::io
             m_worker.wait();
             poll();
         }
+    }
+
+    SteppedMeshExportJob::SteppedMeshExportJob(TaskFactory factory)
+    {
+        if (!factory)
+        {
+            throw std::invalid_argument("Mesh export job requires a task factory");
+        }
+        m_task.emplace(factory(
+          [this]() { return m_status.state == MeshExportJobState::Cancelling; },
+          [this](double progress, std::string_view phase) { reportProgress(progress, phase); }));
+    }
+
+    void SteppedMeshExportJob::poll()
+    {
+        if (m_status.state != MeshExportJobState::Running &&
+            m_status.state != MeshExportJobState::Cancelling)
+        {
+            return;
+        }
+
+        m_task->step();
+        if (!m_task->done())
+        {
+            return;
+        }
+
+        try
+        {
+            m_task->take();
+        }
+        catch (MeshExportCancelled const&)
+        {
+            finish(MeshExportJobState::Cancelled, "Export cancelled", {});
+            return;
+        }
+        catch (std::exception const& error)
+        {
+            finish(MeshExportJobState::Failed, "Export failed", error.what());
+            return;
+        }
+        catch (...)
+        {
+            finish(MeshExportJobState::Failed, "Export failed", "Unknown error while exporting mesh");
+            return;
+        }
+
+        m_status.progress = 1.0;
+        finish(MeshExportJobState::Completed, "Export complete", {});
+    }
+
+    void SteppedMeshExportJob::requestCancellation()
+    {
+        if (m_status.state == MeshExportJobState::Running)
+        {
+            m_status.state = MeshExportJobState::Cancelling;
+        }
+    }
+
+    MeshExportJobStatus SteppedMeshExportJob::getStatus() const
+    {
+        return m_status;
+    }
+
+    void SteppedMeshExportJob::reportProgress(double progress, std::string_view phase)
+    {
+        if (!std::isfinite(progress))
+        {
+            return;
+        }
+        m_status.progress = std::clamp(progress, 0.0, 1.0);
+        m_status.phase.assign(phase);
+    }
+
+    void SteppedMeshExportJob::finish(MeshExportJobState state, std::string phase, std::string errorMessage)
+    {
+        m_status.state = state;
+        m_status.phase = std::move(phase);
+        m_status.errorMessage = std::move(errorMessage);
     }
 } // namespace gladius::io

@@ -433,11 +433,26 @@ namespace gladius::webgpu
                                                ValueBatchSink valueSink,
                                                CancellationPredicate shouldCancel) const
     {
+        return compute::runBlocking(evaluateGeneratedAsync(request,
+                                                           pointCount,
+                                                           std::move(positionSource),
+                                                           std::move(valueSink),
+                                                           std::move(shouldCancel)),
+                                    [this] { m_context->processEvents(); });
+    }
+
+    compute::AsyncTask<bool> WebGPUSdfEvaluator::evaluateGeneratedAsync(
+      compute::SdfEvaluationRequest request,
+      std::size_t const pointCount,
+      PositionBatchSource positionSource,
+      ValueBatchSink valueSink,
+      CancellationPredicate shouldCancel) const
+    {
         if (request.returnColor)
         {
             throw std::invalid_argument("Color evaluation requires evaluateColorsGenerated");
         }
-        return evaluateGeneratedImpl(request,
+        return evaluateGeneratedImpl(std::move(request),
                                      pointCount,
                                      1u,
                                      std::move(positionSource),
@@ -447,6 +462,21 @@ namespace gladius::webgpu
 
     bool WebGPUSdfEvaluator::evaluateColorsGenerated(
       compute::SdfEvaluationRequest const & request,
+      std::size_t const pointCount,
+      PositionBatchSource positionSource,
+      ColorBatchSink colorSink,
+      CancellationPredicate shouldCancel) const
+    {
+        return compute::runBlocking(evaluateColorsGeneratedAsync(request,
+                                                                 pointCount,
+                                                                 std::move(positionSource),
+                                                                 std::move(colorSink),
+                                                                 std::move(shouldCancel)),
+                                    [this] { m_context->processEvents(); });
+    }
+
+    compute::AsyncTask<bool> WebGPUSdfEvaluator::evaluateColorsGeneratedAsync(
+      compute::SdfEvaluationRequest request,
       std::size_t const pointCount,
       PositionBatchSource positionSource,
       ColorBatchSink colorSink,
@@ -462,7 +492,7 @@ namespace gladius::webgpu
         }
 
         return evaluateGeneratedImpl(
-          request,
+          std::move(request),
           pointCount,
           4u,
           std::move(positionSource),
@@ -482,8 +512,8 @@ namespace gladius::webgpu
           std::move(shouldCancel));
     }
 
-    bool WebGPUSdfEvaluator::evaluateGeneratedImpl(
-      compute::SdfEvaluationRequest const & request,
+    compute::AsyncTask<bool> WebGPUSdfEvaluator::evaluateGeneratedImpl(
+      compute::SdfEvaluationRequest request,
       std::size_t const pointCount,
       std::size_t const outputComponents,
       PositionBatchSource positionSource,
@@ -492,11 +522,11 @@ namespace gladius::webgpu
     {
         if (pointCount == 0u)
         {
-            return true;
+            co_return true;
         }
         if (shouldCancel && shouldCancel())
         {
-            return false;
+            co_return false;
         }
         if (!isAvailable())
         {
@@ -742,7 +772,7 @@ namespace gladius::webgpu
         {
             if (shouldCancel && shouldCancel())
             {
-                return false;
+                co_return false;
             }
             auto const batchCount = std::min(batchCapacity, pointCount - valueOffset);
             generatedPositions.clear();
@@ -792,63 +822,69 @@ namespace gladius::webgpu
             auto const commandBuffer = encoder.Finish();
             m_context->getQueue().Submit(1u, &commandBuffer);
 
-            std::vector<float> batchValues(batchCount * outputComponents);
-            bool complete = false;
-            std::string errorMessage;
-            buffers.staging().MapAsync(
+            // Map callbacks may run after this coroutine frame is destroyed (cancelled or abandoned browser
+            // tasks), so the callback only captures shared state and a refcounted staging buffer handle.
+            struct ReadbackState
+            {
+                std::vector<float> values;
+                std::string errorMessage;
+                bool complete{false};
+            };
+            auto readback = std::make_shared<ReadbackState>();
+            readback->values.resize(batchCount * outputComponents);
+            wgpu::Buffer const staging = buffers.staging();
+            // Browser builds must receive map callbacks from the JS event loop; native builds pump them in the driver.
+            staging.MapAsync(
               wgpu::MapMode::Read,
               0u,
               batchOutputSize,
+#ifdef __EMSCRIPTEN__
+              wgpu::CallbackMode::AllowSpontaneous,
+#else
               wgpu::CallbackMode::AllowProcessEvents,
-              [&batchValues,
-               &buffers,
-               &complete,
-               &errorMessage,
-               batchOutputSize](wgpu::MapAsyncStatus const status,
-                                wgpu::StringView const message)
+#endif
+              [readback, staging, batchOutputSize](wgpu::MapAsyncStatus const status,
+                                                   wgpu::StringView const message)
               {
                   (void)message;
                   if (status != wgpu::MapAsyncStatus::Success)
                   {
-                      errorMessage = "WebGPU SDF evaluation readback failed";
-                      complete = true;
+                      readback->errorMessage = "WebGPU SDF evaluation readback failed";
+                      readback->complete = true;
                       return;
                   }
 
                   auto const * mappedValues = static_cast<float const *>(
-                    buffers.staging().GetConstMappedRange(0u, batchOutputSize));
+                    staging.GetConstMappedRange(0u, batchOutputSize));
                   if (mappedValues == nullptr)
                   {
-                      errorMessage = "WebGPU SDF evaluation staging buffer returned no mapped data";
-                      complete = true;
+                      readback->errorMessage = "WebGPU SDF evaluation staging buffer returned no mapped data";
+                      readback->complete = true;
                       return;
                   }
 
-                  std::memcpy(batchValues.data(), mappedValues, batchOutputSize);
-                  buffers.staging().Unmap();
-                  complete = true;
+                  std::memcpy(readback->values.data(), mappedValues, batchOutputSize);
+                  staging.Unmap();
+                  readback->complete = true;
               });
 
-            while (!complete)
+            co_await compute::WaitUntil([this, readback] { return readback->complete || !m_context->isValid(); });
+            if (!m_context->isValid())
             {
-                m_context->processEvents();
-                if (!m_context->isValid())
-                {
-                    throw std::runtime_error(m_context->getErrorMessage());
-                }
+                throw std::runtime_error(m_context->getErrorMessage());
             }
-            if (!errorMessage.empty())
+            if (!readback->errorMessage.empty())
             {
-                throw std::runtime_error(errorMessage);
+                throw std::runtime_error(readback->errorMessage);
             }
             if (shouldCancel && shouldCancel())
             {
-                return false;
+                co_return false;
             }
 
-            valueSink(valueOffset, std::move(batchValues));
+            valueSink(valueOffset, std::move(readback->values));
             valueOffset += batchCount;
         }
-        return true;
+        co_return true;
     }
 }

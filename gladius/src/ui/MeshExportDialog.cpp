@@ -2,6 +2,8 @@
 #include "Document.h"
 #include "FileDialogService.h"
 #include "ColorToThicknessDialog.h"
+#include "BrowserDownload.h"
+#include "FileSystemUtils.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "io/3mf/PaletteExtractor.h"
 #include "compute/ComputeCore.h"
@@ -103,6 +105,57 @@ namespace gladius::ui
                 stem = stem.stem();
             }
             return stem;
+        }
+
+        /// True when the dialog runs in the browser, where exports are delivered as downloads
+#if defined(__EMSCRIPTEN__)
+        constexpr bool IS_BROWSER_BUILD = true;
+#else
+        constexpr bool IS_BROWSER_BUILD = false;
+#endif
+
+        /// Browser exports have no save dialog; the download name is derived from the target file
+        std::string browserDownloadName(std::filesystem::path const & targetFile, MeshOutputFormat format)
+        {
+            std::string const stem = targetFile.empty()
+                                       ? std::string{"mesh"}
+                                       : stripCompoundExtensions(targetFile).string();
+            return stem + FORMAT_EXTENSIONS[static_cast<std::size_t>(format)];
+        }
+
+        /// Scratch location in the browser virtual file system for the generated mesh
+        std::filesystem::path makeBrowserExportPath(char const * extension)
+        {
+            auto const directory = getAppDir() / "browser-downloads";
+            std::filesystem::create_directories(directory);
+            return directory / (std::string{"mesh-export"} + extension);
+        }
+
+        char const * browserDownloadMimeType(MeshOutputFormat format) noexcept
+        {
+            return format == MeshOutputFormat::ThreeMF
+                     ? "application/vnd.ms-package.3dmanufacturing-3mf"
+                     : "model/stl";
+        }
+
+        /// Creates the export job; the browser steps the export coroutine so the UI thread never blocks
+        std::unique_ptr<io::MeshExportJob> createMeshExportJob(std::shared_ptr<Document> const & document,
+                                                               io::MeshExportRequest request)
+        {
+#if defined(GLADIUS_ENABLE_WEBGPU)
+            if (IS_BROWSER_BUILD)
+            {
+                return std::make_unique<io::SteppedMeshExportJob>(
+                  [document, request = std::move(request)](auto shouldCancel, auto reportProgress) {
+                      return document->exportMeshAsync(request, std::move(shouldCancel), std::move(reportProgress));
+                  });
+            }
+#endif
+            return std::make_unique<io::AsyncMeshExportJob>(
+              [document, request = std::move(request)](auto const & shouldCancel,
+                                                       auto const & reportProgress) {
+                  document->exportMesh(request, shouldCancel, reportProgress);
+              });
         }
 
         [[nodiscard]] bool supportsShellExport(io::SurfaceExtractionMethod method) noexcept
@@ -238,12 +291,16 @@ namespace gladius::ui
                                ? "Export failed (no additional error information)"
                                : status.errorMessage;
         }
+        else if (IS_BROWSER_BUILD)
+        {
+            deliverBrowserDownload();
+        }
         else
         {
             std::error_code error;
-            bool const exists = std::filesystem::exists(m_targetFile, error);
+            bool const exists = std::filesystem::exists(m_exportOutputPath, error);
             auto const size = exists && !error
-                                ? std::filesystem::file_size(m_targetFile, error)
+                                ? std::filesystem::file_size(m_exportOutputPath, error)
                                 : 0U;
             if (error || !exists || size == 0U)
             {
@@ -251,7 +308,7 @@ namespace gladius::ui
                 m_statusMessage = "Export failed";
                 m_statusIsError = true;
                 m_errorMessage = fmt::format(
-                  "Export finished without a valid output file: {}", m_targetFile.string());
+                  "Export finished without a valid output file: {}", m_exportOutputPath.string());
             }
             else
             {
@@ -261,6 +318,44 @@ namespace gladius::ui
                 m_errorMessage.clear();
             }
         }
+
+        if (IS_BROWSER_BUILD)
+        {
+            std::error_code ignored;
+            std::filesystem::remove(m_exportOutputPath, ignored);
+        }
+    }
+
+    void MeshExportDialog::deliverBrowserDownload()
+    {
+        std::error_code error;
+        bool const exists = std::filesystem::exists(m_exportOutputPath, error);
+        auto const size = exists && !error
+                            ? std::filesystem::file_size(m_exportOutputPath, error)
+                            : 0U;
+        if (error || !exists || size == 0U)
+        {
+            m_exportCompleted = false;
+            m_statusMessage = "Export failed";
+            m_statusIsError = true;
+            m_errorMessage = "Export finished without a valid output file.";
+            return;
+        }
+
+        if (!startBrowserDownload(m_exportOutputPath, m_exportDownloadName,
+                                  browserDownloadMimeType(m_outputFormat)))
+        {
+            m_exportCompleted = false;
+            m_statusMessage = "Export failed";
+            m_statusIsError = true;
+            m_errorMessage = "The browser did not start the download.";
+            return;
+        }
+
+        m_exportCompleted = true;
+        m_statusMessage = "Download started.";
+        m_statusIsError = false;
+        m_errorMessage.clear();
     }
 
     void MeshExportDialog::renderConfiguration(std::shared_ptr<Document> const & document)
@@ -348,7 +443,8 @@ namespace gladius::ui
             ImGui::Spacing();
 
             // Buttons section
-            bool const canExport = !m_targetFile.empty() && document != nullptr;
+            bool const hasTarget = IS_BROWSER_BUILD || !m_targetFile.empty();
+            bool const canExport = hasTarget && document != nullptr;
             
             ImGui::BeginDisabled(!canExport);
             if (ImGui::Button("Start Export"))
@@ -372,7 +468,7 @@ namespace gladius::ui
             }
             ImGui::EndDisabled();
             
-            if (m_targetFile.empty())
+            if (!hasTarget)
             {
                 ImGui::SameLine();
                 ImGui::TextDisabled("(select a file first)");
@@ -405,7 +501,17 @@ namespace gladius::ui
             for (int i = 0; i < static_cast<int>(METHOD_LABELS.size()); ++i)
             {
                 bool const selected = (i == methodIndex);
-                if (ImGui::Selectable(METHOD_LABELS[static_cast<std::size_t>(i)], selected))
+                bool const unavailable =
+                  IS_BROWSER_BUILD &&
+                  METHOD_VALUES[static_cast<std::size_t>(i)] == io::SurfaceExtractionMethod::ManifoldDualContouring;
+                ImGui::BeginDisabled(unavailable);
+                bool const clicked = ImGui::Selectable(METHOD_LABELS[static_cast<std::size_t>(i)], selected);
+                ImGui::EndDisabled();
+                if (unavailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                {
+                    ImGui::SetTooltip("Not available in the browser build yet.");
+                }
+                if (clicked)
                 {
                     methodIndex = i;
                     m_selectedMethod = METHOD_VALUES[static_cast<std::size_t>(i)];
@@ -854,10 +960,12 @@ namespace gladius::ui
         }
         
         ImGui::Spacing();
-        ImGui::Text("Target File:");
+        ImGui::Text(IS_BROWSER_BUILD ? "Download name:" : "Target File:");
         
         // Display the current filename (read-only text input for copying)
-        std::string displayPath = m_targetFile.empty() ? "(no file selected)" : m_targetFile.string();
+        std::string const displayPath = IS_BROWSER_BUILD
+                                          ? browserDownloadName(m_targetFile, m_outputFormat)
+                                          : (m_targetFile.empty() ? "(no file selected)" : m_targetFile.string());
         
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 100.0F);
         
@@ -871,7 +979,7 @@ namespace gladius::ui
         // Button first - if dialog is active, disable it
         bool const dialogActive = m_browseDialog.isActive();
         ImGui::BeginDisabled(dialogActive);
-        if (ImGui::Button(dialogActive ? "Waiting..." : "Browse..."))
+        if (!IS_BROWSER_BUILD && ImGui::Button(dialogActive ? "Waiting..." : "Browse..."))
         {
             std::string const extension = FORMAT_EXTENSIONS[static_cast<std::size_t>(m_outputFormat)];
             std::string const filter = "*" + extension;
@@ -941,11 +1049,18 @@ namespace gladius::ui
             ImGui::TextUnformatted(m_statusMessage.c_str());
             ImGui::PopStyleColor();
             
-            ImGui::TextDisabled("Exported to: %s", m_targetFile.string().c_str());
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Open Folder"))
+            if (IS_BROWSER_BUILD)
             {
-                openFolderInFileManager(m_targetFile.parent_path());
+                ImGui::TextDisabled("Check your browser downloads for: %s", m_exportDownloadName.c_str());
+            }
+            else
+            {
+                ImGui::TextDisabled("Exported to: %s", m_targetFile.string().c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Open Folder"))
+                {
+                    openFolderInFileManager(m_targetFile.parent_path());
+                }
             }
         }
         // Error message
@@ -1061,7 +1176,7 @@ namespace gladius::ui
         {
             throw std::runtime_error("No active document is available for mesh export");
         }
-        if (m_targetFile.empty())
+        if (!IS_BROWSER_BUILD && m_targetFile.empty())
         {
             throw std::runtime_error("No target filename specified for mesh export");
         }
@@ -1090,8 +1205,25 @@ namespace gladius::ui
               "contouring.");
         }
 
+        if (IS_BROWSER_BUILD)
+        {
+            if (m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring)
+            {
+                throw std::runtime_error(
+                  "Manifold dual contouring is not available in the browser build yet. Select "
+                  "layered marching cubes.");
+            }
+            m_exportDownloadName = browserDownloadName(m_targetFile, m_outputFormat);
+            m_exportOutputPath =
+              makeBrowserExportPath(FORMAT_EXTENSIONS[static_cast<std::size_t>(m_outputFormat)]);
+        }
+        else
+        {
+            m_exportOutputPath = m_targetFile;
+        }
+
         io::MeshExportRequest request;
-        request.filename = m_targetFile;
+        request.filename = m_exportOutputPath;
         request.format = is3mf ? io::MeshExportFormat::ThreeMf : io::MeshExportFormat::Stl;
         request.extraction.method = m_selectedMethod;
         request.extraction.marchingCubesQualityLevel =
@@ -1147,11 +1279,7 @@ namespace gladius::ui
         }
 
         std::string const formatName = is3mf ? "3MF" : "STL";
-        m_exportJob = std::make_unique<io::AsyncMeshExportJob>(
-          [document, request = std::move(request)](auto const & shouldCancel,
-                                                   auto const & reportProgress) {
-              document->exportMesh(request, shouldCancel, reportProgress);
-          });
+        m_exportJob = createMeshExportJob(document, std::move(request));
         m_exportInProgress = true;
         m_exportCompleted = false;
         if (m_exportState != nullptr)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/AsyncTask.h"
 #include "compute/BoundingBoxContracts.h"
 #include "compute/RenderSceneSnapshot.h"
 #include "io/IndexedTriangleMesh.h"
@@ -25,6 +26,15 @@ namespace gladius::webgpu
           std::shared_ptr<WebGPUComputeContext> context,
           compute::RenderSceneSnapshot const & snapshot,
           compute::BoundsResult const & bounds,
+          std::size_t qualityLevel,
+          io::MeshExportCancellationPredicate shouldCancel = {},
+          ProgressCallback reportProgress = {});
+
+        /// @brief Coroutine variant of generateMesh. Suspends during GPU readbacks instead of blocking.
+        [[nodiscard]] static compute::AsyncTask<io::IndexedTriangleMesh> generateMeshAsync(
+          std::shared_ptr<WebGPUComputeContext> context,
+          compute::RenderSceneSnapshot const & snapshot,
+          compute::BoundsResult bounds,
           std::size_t qualityLevel,
           io::MeshExportCancellationPredicate shouldCancel = {},
           ProgressCallback reportProgress = {});

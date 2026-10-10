@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/AsyncTask.h"
 #include "compute/RenderSceneSnapshot.h"
 #include "io/3mf/FaceColors.h"
 #include "io/IndexedTriangleMesh.h"
@@ -27,6 +28,24 @@ namespace gladius::webgpu
           ProgressCallback reportProgress = {});
 
         [[nodiscard]] static std::vector<io::FaceColors> sampleFaceColorsMultipoint(
+          std::shared_ptr<WebGPUComputeContext> context,
+          compute::RenderSceneSnapshot const & snapshot,
+          io::IndexedTriangleMesh const & mesh,
+          bool convertToSrgb,
+          io::MeshExportCancellationPredicate shouldCancel = {},
+          ProgressCallback reportProgress = {});
+
+        /// @brief Coroutine variant of sampleFaceColors. The mesh and snapshot must outlive the returned task.
+        [[nodiscard]] static compute::AsyncTask<io::FaceColors> sampleFaceColorsAsync(
+          std::shared_ptr<WebGPUComputeContext> context,
+          compute::RenderSceneSnapshot const & snapshot,
+          io::IndexedTriangleMesh const & mesh,
+          bool convertToSrgb,
+          io::MeshExportCancellationPredicate shouldCancel = {},
+          ProgressCallback reportProgress = {});
+
+        /// @brief Coroutine variant of sampleFaceColorsMultipoint. The mesh and snapshot must outlive the returned task.
+        [[nodiscard]] static compute::AsyncTask<std::vector<io::FaceColors>> sampleFaceColorsMultipointAsync(
           std::shared_ptr<WebGPUComputeContext> context,
           compute::RenderSceneSnapshot const & snapshot,
           io::IndexedTriangleMesh const & mesh,

@@ -213,41 +213,48 @@ namespace gladius::webgpu
             accumulator.add(point);
         }
 
-        [[nodiscard]] compute::BoundsResult determineBounds(
-          std::shared_ptr<WebGPUComputeContext> const & context,
-          std::shared_ptr<const compute::RenderSceneSnapshot> const & snapshot,
-                    compute::BoundsRequest const & request,
-                    std::atomic_bool const & cancelRequested)
+        [[nodiscard]] compute::BoundsResult analyzeProbeValues(
+          compute::BoundsRequest const & request,
+          GridDimensions const & dimensions,
+          std::vector<float> const & values,
+          std::array<float, 3> const & extent,
+          compute::BoundsResult result);
+
+        [[nodiscard]] compute::AsyncTask<compute::BoundsResult> determineBoundsAsync(
+          std::shared_ptr<WebGPUComputeContext> context,
+          std::shared_ptr<const compute::RenderSceneSnapshot> snapshot,
+          compute::BoundsRequest request,
+          std::atomic_bool const & cancelRequested)
         {
             auto result = makeResultBase(request);
-                        if (cancelRequested.load(std::memory_order_acquire))
-                        {
-                                cancelResult(result);
-                                return result;
-                        }
+            if (cancelRequested.load(std::memory_order_acquire))
+            {
+                cancelResult(result);
+                co_return result;
+            }
 
             auto const dimensions = calculateGridDimensions(request);
             if (!dimensions.has_value())
             {
-                return makeError(request,
-                                 compute::BoundsResultStatus::Invalid,
-                                 compute::BoundsErrorCode::InvalidRequest,
-                                 "WebGPU bounds probe resolution exceeds the supported tiled limit");
+                co_return makeError(request,
+                                    compute::BoundsResultStatus::Invalid,
+                                    compute::BoundsErrorCode::InvalidRequest,
+                                    "WebGPU bounds probe resolution exceeds the supported tiled limit");
             }
 
             if (!context || !context->isValid())
             {
-                return makeError(request,
-                                 compute::BoundsResultStatus::Unavailable,
-                                 compute::BoundsErrorCode::Unavailable,
-                                 "WebGPU bounds service has no valid compute context");
+                co_return makeError(request,
+                                    compute::BoundsResultStatus::Unavailable,
+                                    compute::BoundsErrorCode::Unavailable,
+                                    "WebGPU bounds service has no valid compute context");
             }
             if (!snapshot || !snapshot->isValid())
             {
-                return makeError(request,
-                                 compute::BoundsResultStatus::Invalid,
-                                 compute::BoundsErrorCode::NoScene,
-                                 "WebGPU bounds service has no valid analytic scene snapshot");
+                co_return makeError(request,
+                                    compute::BoundsResultStatus::Invalid,
+                                    compute::BoundsErrorCode::NoScene,
+                                    "WebGPU bounds service has no valid analytic scene snapshot");
             }
 
             std::array<float, 3> const extent{
@@ -258,20 +265,19 @@ namespace gladius::webgpu
                 !std::isfinite(extent[2]) || extent[0] <= 0.0f || extent[1] <= 0.0f ||
                 extent[2] <= 0.0f)
             {
-                return makeError(request,
-                                 compute::BoundsResultStatus::Invalid,
-                                 compute::BoundsErrorCode::NoFiniteDomain,
-                                 "WebGPU bounds probe domain has a non-finite extent");
+                co_return makeError(request,
+                                    compute::BoundsResultStatus::Invalid,
+                                    compute::BoundsErrorCode::NoFiniteDomain,
+                                    "WebGPU bounds probe domain has a non-finite extent");
             }
 
             std::vector<float> values(dimensions->count,
                                       std::numeric_limits<float>::quiet_NaN());
-            auto const & resolution = request.probeSettings.resolution;
             auto const & pointDimensions = dimensions->points;
             auto baseRequest = makeSdfEvaluationRequest(*snapshot, request.probeSettings.isoValue);
             WebGPUSdfEvaluator evaluator{context};
 
-            auto const completed = evaluator.evaluateGenerated(
+            bool const completed = co_await evaluator.evaluateGeneratedAsync(
               baseRequest,
               dimensions->count,
               [&](std::size_t const offset,
@@ -305,9 +311,20 @@ namespace gladius::webgpu
             if (!completed || cancelRequested.load(std::memory_order_acquire))
             {
                 cancelResult(result);
-                return result;
+                co_return result;
             }
 
+            co_return analyzeProbeValues(request, *dimensions, values, extent, std::move(result));
+        }
+
+        compute::BoundsResult analyzeProbeValues(
+          compute::BoundsRequest const & request,
+          GridDimensions const & dimensions,
+          std::vector<float> const & values,
+          std::array<float, 3> const & extent,
+          compute::BoundsResult result)
+        {
+            auto const & resolution = request.probeSettings.resolution;
             auto const pointAt = [&](std::size_t const x,
                                      std::size_t const y,
                                      std::size_t const z)
@@ -322,7 +339,7 @@ namespace gladius::webgpu
                 {
                     for (std::size_t x = 0u; x < static_cast<std::size_t>(resolution[0]) + 1u; ++x)
                     {
-                        auto const value = values[gridIndex(*dimensions, x, y, z)];
+                        auto const value = values[gridIndex(dimensions, x, y, z)];
                         if (!std::isfinite(value))
                         {
                             result.diagnostics.encounteredNonFinite = true;
@@ -370,7 +387,7 @@ namespace gladius::webgpu
                         for (std::size_t corner = 0u; corner < cornerValues.size(); ++corner)
                         {
                             auto const offset = CORNER_OFFSETS[corner];
-                            cornerValues[corner] = values[gridIndex(*dimensions,
+                            cornerValues[corner] = values[gridIndex(dimensions,
                                                                     x + offset[0],
                                                                     y + offset[1],
                                                                     z + offset[2])];
@@ -475,11 +492,13 @@ namespace gladius::webgpu
         class WebGPUBoundsSubmission final : public compute::IBoundsSubmission
         {
           public:
-            WebGPUBoundsSubmission(std::future<compute::BoundsResult> future,
+            using ResultPoll = std::function<std::optional<compute::BoundsResult>(bool)>;
+
+            WebGPUBoundsSubmission(ResultPoll poll,
                                    std::shared_ptr<const compute::RenderSceneSnapshot> snapshot,
                                    std::function<void(compute::BoundsResult const &)> publish,
                                    std::shared_ptr<std::atomic_bool> cancelRequested)
-                : m_future{std::move(future)}
+                : m_poll{std::move(poll)}
                 , m_snapshot{std::move(snapshot)}
                 , m_publish{std::move(publish)}
                 , m_cancelRequested{std::move(cancelRequested)}
@@ -553,19 +572,20 @@ namespace gladius::webgpu
           private:
             void pollLocked(bool const block)
             {
-                if (m_status != compute::BoundsSubmissionStatus::Pending || !m_future.valid())
-                {
-                    return;
-                }
-                if (!block &&
-                    m_future.wait_for(std::chrono::milliseconds{0}) != std::future_status::ready)
+                if (m_status != compute::BoundsSubmissionStatus::Pending || !m_poll)
                 {
                     return;
                 }
 
                 try
                 {
-                    auto result = m_future.get();
+                    auto polled = m_poll(block);
+                    if (!polled.has_value())
+                    {
+                        return;
+                    }
+                    m_poll = nullptr;
+                    auto result = std::move(*polled);
                     if (m_cancelRequested &&
                         m_cancelRequested->load(std::memory_order_acquire))
                     {
@@ -606,7 +626,7 @@ namespace gladius::webgpu
             }
 
             mutable std::mutex m_mutex;
-            std::future<compute::BoundsResult> m_future;
+            ResultPoll m_poll;
             std::shared_ptr<const compute::RenderSceneSnapshot> m_snapshot;
             std::function<void(compute::BoundsResult const &)> m_publish;
             std::shared_ptr<std::atomic_bool> m_cancelRequested;
@@ -704,34 +724,54 @@ namespace gladius::webgpu
               "WebGPU bounds currently supports analytic scene snapshots only"));
         }
 
-#ifdef __EMSCRIPTEN__
-                // The browser build is single-threaded. The native implementation below uses
-                // std::async around synchronous GPU readbacks, which would either require pthreads or
-                // block the browser event loop. Rendering does not require bounds: the frame shader can
-                // evaluate the model and build plate without clipping/field overlays, so leave bounds
-                // absent rather than stalling preview startup.
-                return std::make_unique<WebGPUBoundsSubmission>(makeError(
-                    request,
-                    compute::BoundsResultStatus::Unavailable,
-                    compute::BoundsErrorCode::Unavailable,
-                    "WebGPU model bounds are deferred in the browser preview"));
-#else
         try
         {
             auto const state = m_state;
             auto cancelRequested = std::make_shared<std::atomic_bool>(false);
-            auto future = std::async(std::launch::async,
-                                     [context = m_context, snapshot, request, cancelRequested]()
-                                     {
-                                         return determineBounds(
-                                           context, snapshot, request, *cancelRequested);
-                                     });
             auto publish = [state](compute::BoundsResult const & result)
             {
                 std::scoped_lock lock{state->mutex};
                 state->cachedResult = result;
             };
-            return std::make_unique<WebGPUBoundsSubmission>(std::move(future),
+#ifdef __EMSCRIPTEN__
+            // Single-threaded browser: the probe is a coroutine advanced by progress()/getStatus(), so
+            // GPU readbacks suspend and return control to the JS event loop instead of blocking it.
+            auto task = std::make_shared<compute::AsyncTask<compute::BoundsResult>>(
+              determineBoundsAsync(m_context, snapshot, request, *cancelRequested));
+            WebGPUBoundsSubmission::ResultPoll poll =
+              [cancelRequested, task](bool const) -> std::optional<compute::BoundsResult>
+            {
+                if (!task->done())
+                {
+                    task->step();
+                }
+                if (!task->done())
+                {
+                    return std::nullopt;
+                }
+                return task->take();
+            };
+#else
+            auto future = std::make_shared<std::future<compute::BoundsResult>>(std::async(
+              std::launch::async,
+              [context = m_context, snapshot, request, cancelRequested]()
+              {
+                  return compute::runBlocking(
+                    determineBoundsAsync(context, snapshot, request, *cancelRequested),
+                    [context] { context->processEvents(); });
+              }));
+            WebGPUBoundsSubmission::ResultPoll poll =
+              [future](bool const block) -> std::optional<compute::BoundsResult>
+            {
+                if (!block &&
+                    future->wait_for(std::chrono::milliseconds{0}) != std::future_status::ready)
+                {
+                    return std::nullopt;
+                }
+                return future->get();
+            };
+#endif
+            return std::make_unique<WebGPUBoundsSubmission>(std::move(poll),
                                                               std::move(snapshot),
                                                               std::move(publish),
                                                               std::move(cancelRequested));
@@ -752,6 +792,5 @@ namespace gladius::webgpu
               compute::BoundsErrorCode::DispatchFailed,
               "Unable to submit WebGPU bounds work"));
         }
-#endif
     }
 }

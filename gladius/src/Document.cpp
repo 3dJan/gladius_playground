@@ -1206,6 +1206,26 @@ namespace gladius
                                     io::MeshExportCancellationPredicate shouldCancel,
                                     io::MeshExportProgressCallback reportProgress)
     {
+        auto const pumpWebGpu = [this]
+        {
+            if (m_backendRuntime == nullptr)
+            {
+                return;
+            }
+            if (auto context = m_backendRuntime->getWebGPUContext())
+            {
+                context->processEvents();
+            }
+        };
+        compute::runBlocking(
+          exportWebGpuMeshAsync(request, std::move(shouldCancel), std::move(reportProgress)),
+          pumpWebGpu);
+    }
+
+    compute::AsyncTask<void> Document::exportWebGpuMeshAsync(io::MeshExportRequest request,
+                                                             io::MeshExportCancellationPredicate shouldCancel,
+                                                             io::MeshExportProgressCallback reportProgress)
+    {
         auto const isStl = request.format == io::MeshExportFormat::Stl;
         auto const formatName = isStl ? "STL" : "3MF";
         auto const report = [&reportProgress](double const progress, std::string_view const phase)
@@ -1311,7 +1331,7 @@ namespace gladius
                     cancellationRequested = true;
                 }
                 report(0.15, "Calculating model bounds");
-                std::this_thread::yield();
+                co_await compute::AsyncYield{};
             }
             submission->wait();
             throwIfCancelled();
@@ -1333,10 +1353,13 @@ namespace gladius
             switch (request.extraction.method)
             {
             case io::SurfaceExtractionMethod::DualContouring:
-                mesh = webgpu::WebGPUDualContouringExporter::generateMesh(
+                mesh = co_await webgpu::WebGPUDualContouringExporter::generateMeshAsync(
                   context, *exportSnapshot, *bounds, request.extraction.dualContouring, shouldCancel);
                 break;
             case io::SurfaceExtractionMethod::ManifoldDualContouring:
+#if defined(__EMSCRIPTEN__)
+                throw std::runtime_error("Manifold Dual Contouring is not available in the browser build yet");
+#else
                 mesh = webgpu::WebGPUManifoldDualContouringExporter::generateMesh(
                   context,
                   *exportSnapshot,
@@ -1344,15 +1367,16 @@ namespace gladius
                   request.extraction.manifoldDualContouring,
                   shouldCancel);
                 break;
+#endif
             case io::SurfaceExtractionMethod::LayeredMarchingCubes:
-                                mesh = webgpu::WebGPULayeredMarchingCubesExporter::generateMesh(
-                                    context,
-                                    *exportSnapshot,
-                                    *bounds,
-                                    request.extraction.marchingCubesQualityLevel,
-                                    shouldCancel,
-                                    report);
-                                break;
+                mesh = co_await webgpu::WebGPULayeredMarchingCubesExporter::generateMeshAsync(
+                  context,
+                  *exportSnapshot,
+                  *bounds,
+                  request.extraction.marchingCubesQualityLevel,
+                  shouldCancel,
+                  report);
+                break;
             default:
                 throw std::runtime_error("Unsupported WebGPU surface extraction method");
             }
@@ -1387,7 +1411,7 @@ namespace gladius
                     io::FaceColors faceColors;
                     if (wantsMmuSamples)
                     {
-                        sampleSets = webgpu::WebGPUMeshColorSampler::sampleFaceColorsMultipoint(
+                        sampleSets = co_await webgpu::WebGPUMeshColorSampler::sampleFaceColorsMultipointAsync(
                           context,
                           *exportSnapshot,
                           mesh,
@@ -1397,7 +1421,7 @@ namespace gladius
                     }
                     else
                     {
-                        faceColors = webgpu::WebGPUMeshColorSampler::sampleFaceColors(
+                        faceColors = co_await webgpu::WebGPUMeshColorSampler::sampleFaceColorsAsync(
                           context,
                           *exportSnapshot,
                           mesh,
@@ -1662,6 +1686,24 @@ namespace gladius
         throw std::runtime_error(
           "Geometry-only 3MF mesh export through Document is currently available only for WebGPU");
     }
+
+#if defined(GLADIUS_ENABLE_WEBGPU)
+    compute::AsyncTask<void> Document::exportMeshAsync(io::MeshExportRequest request,
+                                                       io::MeshExportCancellationPredicate shouldCancel,
+                                                       io::MeshExportProgressCallback reportProgress)
+    {
+        if (request.filename.empty())
+        {
+            throw std::invalid_argument("Mesh export requires an output filename");
+        }
+        if (request.shell.has_value() && request.format != io::MeshExportFormat::ThreeMf)
+        {
+            throw std::invalid_argument("Shell export requires the 3MF output format");
+        }
+
+        co_await exportWebGpuMeshAsync(std::move(request), std::move(shouldCancel), std::move(reportProgress));
+    }
+#endif
 
     void Document::exportMesh(io::MeshExportRequest const & request,
                               io::MeshExportCancellationPredicate shouldCancel,

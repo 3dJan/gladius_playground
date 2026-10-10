@@ -15,7 +15,7 @@ namespace gladius::webgpu
 {
     namespace
     {
-        std::vector<io::FaceColors> sampleColors(
+        compute::AsyncTask<std::vector<io::FaceColors>> sampleColorsAsync(
           std::shared_ptr<WebGPUComputeContext> context,
           compute::RenderSceneSnapshot const & snapshot,
           io::IndexedTriangleMesh const & mesh,
@@ -46,7 +46,7 @@ namespace gladius::webgpu
             }
             if (sampleCount == 0u)
             {
-                return result;
+                co_return result;
             }
 
             if (reportProgress)
@@ -55,7 +55,7 @@ namespace gladius::webgpu
             }
             auto request = makeSdfEvaluationRequest(snapshot, 0.0F, true);
             WebGPUSdfEvaluator evaluator{std::move(context)};
-            bool const completed = evaluator.evaluateColorsGenerated(
+            bool const completed = co_await evaluator.evaluateColorsGeneratedAsync(
               request,
               sampleCount,
               [&mesh, samplesPerFace](std::size_t const offset,
@@ -122,7 +122,7 @@ namespace gladius::webgpu
             {
                 reportProgress(1.0);
             }
-            return result;
+            co_return result;
         }
     } // namespace
 
@@ -134,14 +134,32 @@ namespace gladius::webgpu
       io::MeshExportCancellationPredicate shouldCancel,
       ProgressCallback reportProgress)
     {
-        auto samples = sampleColors(std::move(context),
-                                    snapshot,
-                                    mesh,
-                                    1u,
-                                    convertToSrgb,
-                                    std::move(shouldCancel),
-                                    std::move(reportProgress));
-        return std::move(samples.front());
+        auto pumpContext = context;
+        return compute::runBlocking(sampleFaceColorsAsync(std::move(context),
+                                                          snapshot,
+                                                          mesh,
+                                                          convertToSrgb,
+                                                          std::move(shouldCancel),
+                                                          std::move(reportProgress)),
+                                    [pumpContext] { pumpContext->processEvents(); });
+    }
+
+    compute::AsyncTask<io::FaceColors> WebGPUMeshColorSampler::sampleFaceColorsAsync(
+      std::shared_ptr<WebGPUComputeContext> context,
+      compute::RenderSceneSnapshot const & snapshot,
+      io::IndexedTriangleMesh const & mesh,
+      bool const convertToSrgb,
+      io::MeshExportCancellationPredicate shouldCancel,
+      ProgressCallback reportProgress)
+    {
+        auto samples = co_await sampleColorsAsync(std::move(context),
+                                                  snapshot,
+                                                  mesh,
+                                                  1u,
+                                                  convertToSrgb,
+                                                  std::move(shouldCancel),
+                                                  std::move(reportProgress));
+        co_return std::move(samples.front());
     }
 
     std::vector<io::FaceColors> WebGPUMeshColorSampler::sampleFaceColorsMultipoint(
@@ -152,12 +170,30 @@ namespace gladius::webgpu
       io::MeshExportCancellationPredicate shouldCancel,
       ProgressCallback reportProgress)
     {
-        return sampleColors(std::move(context),
-                            snapshot,
-                            mesh,
-                            4u,
-                            convertToSrgb,
-                            std::move(shouldCancel),
-                            std::move(reportProgress));
+        auto pumpContext = context;
+        return compute::runBlocking(sampleFaceColorsMultipointAsync(std::move(context),
+                                                                    snapshot,
+                                                                    mesh,
+                                                                    convertToSrgb,
+                                                                    std::move(shouldCancel),
+                                                                    std::move(reportProgress)),
+                                    [pumpContext] { pumpContext->processEvents(); });
+    }
+
+    compute::AsyncTask<std::vector<io::FaceColors>> WebGPUMeshColorSampler::sampleFaceColorsMultipointAsync(
+      std::shared_ptr<WebGPUComputeContext> context,
+      compute::RenderSceneSnapshot const & snapshot,
+      io::IndexedTriangleMesh const & mesh,
+      bool const convertToSrgb,
+      io::MeshExportCancellationPredicate shouldCancel,
+      ProgressCallback reportProgress)
+    {
+        return sampleColorsAsync(std::move(context),
+                                 snapshot,
+                                 mesh,
+                                 4u,
+                                 convertToSrgb,
+                                 std::move(shouldCancel),
+                                 std::move(reportProgress));
     }
 } // namespace gladius::webgpu
