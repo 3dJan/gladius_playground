@@ -35,6 +35,7 @@ namespace gladius::compute
         /// also as a hard cap in other modes). In squared world units.
         float maxError{std::numeric_limits<float>::max()};
 
+
         /// Threshold for flip detection: minimum dot product between old and new normals
         float flipThreshold{0.2F};
 

@@ -1,7 +1,7 @@
 #include "webgpu/WebGPUBoundsService.h"
 
 #include "webgpu/WebGPUSdfEvaluator.h"
-#include "webgpu/WebGPUSdfShaderComposer.h"
+#include "webgpu/WebGPUSdfEvaluationRequest.h"
 
 #include <algorithm>
 #include <array>
@@ -66,18 +66,6 @@ namespace gladius::webgpu
                 add(other.max);
             }
         };
-
-        [[nodiscard]] std::vector<std::vector<float>> toPayloadTable(
-          std::vector<compute::MeshResourcePayload> const & resources)
-        {
-            std::vector<std::vector<float>> payloads;
-            payloads.reserve(resources.size());
-            for (auto const & resource : resources)
-            {
-                payloads.push_back(resource.data);
-            }
-            return payloads;
-        }
 
         [[nodiscard]] bool checkedProduct(std::size_t const left,
                                           std::size_t const right,
@@ -278,94 +266,46 @@ namespace gladius::webgpu
 
             std::vector<float> values(dimensions->count,
                                       std::numeric_limits<float>::quiet_NaN());
-                        bool const hasMeshes = !snapshot->meshResources.empty();
-                        bool const hasBeams = !snapshot->beamLatticeResources.empty();
-                        bool const hasImages = !snapshot->imageResources.empty();
-                        auto const shader = WebGPUSdfShaderComposer::composeWithResourceSupport(
-                            snapshot->analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
-                        auto const meshPayloadTable = toPayloadTable(snapshot->meshResources);
-                        auto const beamPayloadTable = toPayloadTable(snapshot->beamLatticeResources);
-                        auto const imagePayloadTable = toPayloadTable(snapshot->imageResources);
+            auto const & resolution = request.probeSettings.resolution;
+            auto const & pointDimensions = dimensions->points;
+            auto baseRequest = makeSdfEvaluationRequest(*snapshot, request.probeSettings.isoValue);
             WebGPUSdfEvaluator evaluator{context};
 
-            auto const & resolution = request.probeSettings.resolution;
-            auto const & tileSize = request.probeSettings.tileSize;
-            for (std::size_t zStart = 0u; zStart < resolution[2]; zStart += tileSize[2])
+            auto const completed = evaluator.evaluateGenerated(
+              baseRequest,
+              dimensions->count,
+              [&](std::size_t const offset,
+                  std::size_t const count,
+                  std::vector<std::array<float, 3>> & positions)
+              {
+                  auto const planeSize = static_cast<std::size_t>(pointDimensions[0]) *
+                                         static_cast<std::size_t>(pointDimensions[1]);
+                  positions.reserve(count);
+                  for (std::size_t index = offset; index < offset + count; ++index)
+                  {
+                      auto const z = index / planeSize;
+                      auto const y = (index / pointDimensions[0]) % pointDimensions[1];
+                      auto const x = index % pointDimensions[0];
+                      positions.push_back(
+                        gridPoint(request.probeDomain, request, x, y, z));
+                  }
+              },
+              [&](std::size_t const offset, std::vector<float> && batchValues)
+              {
+                  std::copy(batchValues.begin(),
+                            batchValues.end(),
+                            values.begin() + static_cast<std::ptrdiff_t>(offset));
+                  result.diagnostics.probeCount += batchValues.size();
+                  ++result.diagnostics.tileCount;
+              },
+              [&cancelRequested]()
+              {
+                  return cancelRequested.load(std::memory_order_acquire);
+              });
+            if (!completed || cancelRequested.load(std::memory_order_acquire))
             {
-                if (cancelRequested.load(std::memory_order_acquire))
-                {
-                    cancelResult(result);
-                    return result;
-                }
-                auto const zEnd = std::min<std::size_t>(resolution[2], zStart + tileSize[2]);
-                for (std::size_t yStart = 0u; yStart < resolution[1]; yStart += tileSize[1])
-                {
-                    if (cancelRequested.load(std::memory_order_acquire))
-                    {
-                        cancelResult(result);
-                        return result;
-                    }
-                    auto const yEnd = std::min<std::size_t>(resolution[1], yStart + tileSize[1]);
-                    for (std::size_t xStart = 0u; xStart < resolution[0]; xStart += tileSize[0])
-                    {
-                        if (cancelRequested.load(std::memory_order_acquire))
-                        {
-                            cancelResult(result);
-                            return result;
-                        }
-                        auto const xEnd = std::min<std::size_t>(resolution[0], xStart + tileSize[0]);
-                        std::vector<std::array<float, 3>> positions;
-                        std::vector<std::size_t> indices;
-                        positions.reserve((xEnd - xStart + 1u) * (yEnd - yStart + 1u) *
-                                           (zEnd - zStart + 1u));
-                        indices.reserve(positions.capacity());
-
-                        for (std::size_t z = zStart; z <= zEnd; ++z)
-                        {
-                            for (std::size_t y = yStart; y <= yEnd; ++y)
-                            {
-                                for (std::size_t x = xStart; x <= xEnd; ++x)
-                                {
-                                    positions.push_back(gridPoint(request.probeDomain,
-                                                                  request,
-                                                                  x,
-                                                                  y,
-                                                                  z));
-                                    indices.push_back(gridIndex(*dimensions, x, y, z));
-                                }
-                            }
-                        }
-
-                        auto evaluation = evaluator.evaluate(compute::SdfEvaluationRequest{
-                          .positions = std::move(positions),
-                          .isoValue = request.probeSettings.isoValue,
-                          .shaderSource = shader,
-                                                    .parameterValues = snapshot->parameterValues,
-                                                    .meshPayloadTable = meshPayloadTable,
-                                                    .beamPayloadTable = beamPayloadTable,
-                                                    .imagePayloadTable = imagePayloadTable});
-                        if (evaluation.values.size() != indices.size())
-                        {
-                            return makeError(request,
-                                             compute::BoundsResultStatus::Failed,
-                                             compute::BoundsErrorCode::ReadbackFailed,
-                                             "WebGPU bounds probe returned an unexpected sample count");
-                        }
-
-                        if (cancelRequested.load(std::memory_order_acquire))
-                        {
-                            cancelResult(result);
-                            return result;
-                        }
-
-                        for (std::size_t index = 0u; index < indices.size(); ++index)
-                        {
-                            values[indices[index]] = evaluation.values[index];
-                        }
-                        result.diagnostics.probeCount += evaluation.values.size();
-                        ++result.diagnostics.tileCount;
-                    }
-                }
+                cancelResult(result);
+                return result;
             }
 
             auto const pointAt = [&](std::size_t const x,

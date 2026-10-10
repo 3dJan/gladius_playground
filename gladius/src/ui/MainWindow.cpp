@@ -254,6 +254,9 @@ namespace gladius::ui
     #if defined(GLADIUS_ENABLE_OPENCL)
         m_meshExporterDialog.setExportState(&m_exportState);
     #endif
+    #if defined(GLADIUS_ENABLE_WEBGPU)
+        m_webGpuMeshExportDialog.setExportState(&m_exportState);
+    #endif
         m_modelEditor.setExportState(&m_exportState);
 
         // Defer the initial template load while the welcome screen is visible.
@@ -2094,14 +2097,18 @@ namespace gladius::ui
         }
 
     #if defined(GLADIUS_ENABLE_OPENCL)
-        CliWriter writer;
-        ImGui::Separator();
-        ImGui::TextUnformatted("Export");
+        bool const openCLSelected =
+          m_runtime && m_runtime->getBackendKind() == compute::ComputeBackendKind::OpenCL;
+        if (openCLSelected)
+        {
+            ImGui::Separator();
+            ImGui::TextUnformatted("Export");
+        }
 
         // Disable export menu items if async dialog is active
         bool const dialogActive = m_asyncFileDialog.isActive();
 
-        if (m_computeAvailable)
+        if (m_computeAvailable && openCLSelected)
         {
             ImGui::BeginDisabled(dialogActive);
             if (ImGui::MenuItem(reinterpret_cast<const char *>("\t" ICON_FA_MINUS
@@ -2175,16 +2182,47 @@ namespace gladius::ui
             }
             ImGui::EndDisabled();
         }
-        else
+    #endif
+
+    #if defined(GLADIUS_ENABLE_WEBGPU)
+        bool const webGPUSelected =
+          m_runtime && m_runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU;
+        if (webGPUSelected)
         {
-            ImGui::BeginDisabled();
-            ImGui::TextDisabled("Compute is disabled: export functions are unavailable.");
-            ImGui::EndDisabled();
-        }
-        #else
             ImGui::Separator();
-            ImGui::TextDisabled("Export functions are unavailable for the selected backend.");
-        #endif
+            ImGui::TextUnformatted("Export");
+
+            ImGui::BeginDisabled(!m_computeAvailable || !m_doc ||
+                                 loadingInProgress || m_webGpuMeshExportDialog.isBusy());
+            if (ImGui::MenuItem("Mesh Export..."))
+            {
+                closeMenu();
+                std::filesystem::path suggestedFilename = "part.stl";
+                if (m_currentAssemblyFileName.has_value())
+                {
+                    auto const sourceFilename = m_currentAssemblyFileName.value();
+                    auto stem = sourceFilename.stem();
+                    while (stem.extension() == ".implicit" || stem.extension() == ".model")
+                    {
+                        stem = stem.stem();
+                    }
+                    suggestedFilename =
+                      sourceFilename.parent_path() / (stem.string() + ".stl");
+                }
+                m_webGpuMeshExportDialog.show(std::move(suggestedFilename));
+            }
+            ImGui::EndDisabled();
+            ImGui::TextDisabled(
+                            "Standard dual contouring to STL or geometry-only 3MF; manifold, per-face "
+                            "color/material, and shell export are not yet supported.");
+        }
+    #endif
+
+        if (!m_computeAvailable || !m_runtime)
+        {
+            ImGui::Separator();
+            ImGui::TextDisabled("Export is unavailable: the selected compute backend is not ready.");
+        }
 
         ImGui::Separator();
 
@@ -2334,9 +2372,19 @@ namespace gladius::ui
 
     void MainWindow::meshExportDialog()
     {
-#if !defined(GLADIUS_ENABLE_OPENCL)
-        return;
-#else
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        if (m_runtime && m_runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU)
+        {
+            if (m_webGpuMeshExportDialog.isVisible())
+            {
+                m_mainView.startAnimationMode();
+            }
+            m_webGpuMeshExportDialog.render(m_doc);
+            return;
+        }
+#endif
+
+#if defined(GLADIUS_ENABLE_OPENCL)
         if (!m_core)
         {
             return;
@@ -2347,7 +2395,7 @@ namespace gladius::ui
             m_mainView.startAnimationMode();
         }
         m_meshExporterDialog.render(*m_core);
-    #endif
+#endif
     }
 
     void MainWindow::cliExportDialog()

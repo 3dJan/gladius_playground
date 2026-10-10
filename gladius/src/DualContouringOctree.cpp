@@ -1,8 +1,11 @@
 #include "DualContouringOctree.h"
 #include "DualContouringQef.h"
 
+#if defined(GLADIUS_ENABLE_OPENCL)
+#include "DualContouringGpuSampling.h"
 #include "ResourceContext.h"
 #include "compute/ComputeCore.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -135,6 +138,7 @@ namespace gladius::dual_contouring
         return values.at(index(x, y, z));
     }
 
+#if defined(GLADIUS_ENABLE_OPENCL)
     OctreeBuilder::OctreeBuilder(gladius::ComputeCore & core,
                                  BoundingBox const & targetBounds,
                                  OctreeBuildConfig config)
@@ -193,15 +197,18 @@ namespace gladius::dual_contouring
             resources->releasePreComputedSdf();
         }
     }
+#endif
 
     OctreeBuilder::~OctreeBuilder()
     {
+#if defined(GLADIUS_ENABLE_OPENCL)
         // Release precomputed SDF if GPU sampling was used
         if (m_gpuSession && m_computeCore)
         {
             auto resources = m_computeCore->getResourceContext();
             resources->releasePreComputedSdf();
         }
+#endif
     }
 
     OctreeBuilder::OctreeBuilder(AxisAlignedBoundingBox const & targetBounds,
@@ -217,9 +224,36 @@ namespace gladius::dual_contouring
             throw std::invalid_argument("SDF grid dimensions must be at least 2 in each axis");
         }
 
-        if (values.size() != width * height * depth)
+        if (width > std::numeric_limits<size_t>::max() / height ||
+            width * height > std::numeric_limits<size_t>::max() / depth)
+        {
+            throw std::length_error("SDF grid dimensions exceed the supported size range");
+        }
+
+        auto const expectedValueCount = width * height * depth;
+        if (values.size() != expectedValueCount)
         {
             throw std::invalid_argument("SDF grid value count does not match provided dimensions");
+        }
+
+        auto const extent = targetBounds.max - targetBounds.min;
+        if (!targetBounds.min.allFinite() || !targetBounds.max.allFinite() ||
+            !extent.allFinite() || (extent.array() <= 0.0F).any())
+        {
+            throw std::invalid_argument("SDF grid bounds must be finite and have positive extent");
+        }
+        if (!std::isfinite(m_config.isoValue))
+        {
+            throw std::invalid_argument("SDF grid iso value must be finite");
+        }
+        if (m_config.maxDepth > std::numeric_limits<std::uint8_t>::max())
+        {
+            throw std::invalid_argument("Octree depth exceeds the supported node depth range");
+        }
+        if (!std::all_of(values.begin(), values.end(), [](float const value)
+                         { return std::isfinite(value); }))
+        {
+            throw std::invalid_argument("SDF grid contains a non-finite sample");
         }
 
         m_grid.min = targetBounds.min;
@@ -266,7 +300,8 @@ namespace gladius::dual_contouring
         metrics.nodeCount += 1U;
         metrics.maxDepthReached = std::max<size_t>(metrics.maxDepthReached, depth);
 
-        // Use GPU acceleration if available
+        // Use GPU acceleration when the OpenCL runtime supplied a sampling session.
+    #if defined(GLADIUS_ENABLE_OPENCL)
         if (m_gpuSession)
         {
             evaluateCornersGpu(*node);
@@ -275,6 +310,9 @@ namespace gladius::dual_contouring
         {
             evaluateCorners(*node);
         }
+    #else
+        evaluateCorners(*node);
+    #endif
 
         if (shouldSubdivide(*node, depth))
         {
@@ -299,7 +337,8 @@ namespace gladius::dual_contouring
             node->isLeaf = true;
             metrics.leafCount += 1U;
             
-            // Use GPU acceleration if available
+            // Use GPU acceleration when the OpenCL runtime supplied a sampling session.
+#if defined(GLADIUS_ENABLE_OPENCL)
             if (m_gpuSession)
             {
                 gatherHermiteSamplesGpu(*node);
@@ -308,6 +347,9 @@ namespace gladius::dual_contouring
             {
                 gatherHermiteSamples(*node);
             }
+#else
+            gatherHermiteSamples(*node);
+#endif
             
             computeVertex(*node);
         }
@@ -531,6 +573,7 @@ namespace gladius::dual_contouring
         node.hasVertex = true;
     }
 
+#if defined(GLADIUS_ENABLE_OPENCL)
     void OctreeBuilder::evaluateCornersGpu(OctreeNode & node) const
     {
         // Collect corner positions plus center for GPU sampling
@@ -725,6 +768,7 @@ namespace gladius::dual_contouring
             node.hermiteSamples.push_back(OctreeNode::HermiteSample{hermitePositions[i], gradient});
         }
     }
+#endif
 
     Eigen::Vector3f OctreeBuilder::evaluateGradient(Eigen::Vector3f const & position) const
     {

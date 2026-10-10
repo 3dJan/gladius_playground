@@ -458,7 +458,44 @@ namespace gladius::compute
                 if (!inserted && it->second != i) ++mergedCount;
             }
 
+            bool createsNonManifoldEdge = false;
             if (mergedCount > 0U)
+            {
+                std::unordered_map<std::uint64_t, std::size_t> weldedEdgeUse;
+                weldedEdgeUse.reserve(indices.size());
+                auto countWeldedEdge = [&weldedEdgeUse, &createsNonManifoldEdge](
+                                           std::uint32_t first,
+                                           std::uint32_t second)
+                {
+                    if (first > second)
+                    {
+                        std::swap(first, second);
+                    }
+                    std::uint64_t const key = (static_cast<std::uint64_t>(first) << 32U) | second;
+                    if (++weldedEdgeUse[key] > 2U)
+                    {
+                        createsNonManifoldEdge = true;
+                    }
+                };
+
+                for (std::size_t offset = 0U; offset + 2U < indices.size(); offset += 3U)
+                {
+                    std::uint32_t const first = remap[indices[offset]];
+                    std::uint32_t const second = remap[indices[offset + 1U]];
+                    std::uint32_t const third = remap[indices[offset + 2U]];
+                    if (first == second || second == third || third == first)
+                    {
+                        continue;
+                    }
+                    countWeldedEdge(first, second);
+                    countWeldedEdge(second, third);
+                    countWeldedEdge(third, first);
+                }
+            }
+
+            // Coincident vertices can be intentional: the octree duplicates them to keep
+            // touching surface sheets topologically separate. Do not undo that separation.
+            if (mergedCount > 0U && !createsNonManifoldEdge)
             {
                 for (auto & idx : indices)
                 {
@@ -514,7 +551,14 @@ namespace gladius::compute
             te.heapIdx = idx;
             triHeapIdx[te.triIdx] = idx;
         };
-        auto lessPred = [](TriError const & a, TriError const & b) { return a.value < b.value; };
+        auto lessPred = [](TriError const & a, TriError const & b)
+        {
+            if (a.value != b.value)
+            {
+                return a.value < b.value;
+            }
+            return a.triIdx < b.triIdx;
+        };
 
         MutablePriorityQueue<TriError, decltype(indexSetter), decltype(lessPred)> pq(indexSetter, lessPred);
         pq.reserve(initialTriCount);
@@ -571,7 +615,10 @@ namespace gladius::compute
             auto const triIdx = best.triIdx;
             if (tris[triIdx].deleted) continue;
 
-            if (best.value > config.maxError) break;
+            if (best.value > config.maxError)
+            {
+                break;
+            }
 
             // Try all three edges of the triangle, starting with the minimum-error
             // edge, then falling back to the other two.  This drastically reduces
@@ -596,11 +643,20 @@ namespace gladius::compute
             std::array<float, 3> const edgeErr = {err0, err1, err2};
             std::sort(edgeOrder.begin(), edgeOrder.end(),
                       [&edgeErr](std::uint8_t a, std::uint8_t b)
-                      { return edgeErr[a] < edgeErr[b]; });
+                      {
+                          if (edgeErr[a] != edgeErr[b])
+                          {
+                              return edgeErr[a] < edgeErr[b];
+                          }
+                          return a < b;
+                      });
 
             for (auto const edgeIdx : edgeOrder)
             {
-                if (edgeErr[edgeIdx] > config.maxError) break;
+                if (edgeErr[edgeIdx] > config.maxError)
+                {
+                    break;
+                }
 
                 auto [id0, id1] = triEdgeVerts(triIdx, edgeIdx, indices);
 

@@ -15,8 +15,6 @@ namespace gladius::dual_contouring
         {
             int vertexIndex{-1};
             Eigen::Vector3f normal{Eigen::Vector3f::Zero()};
-            float centerValue{0.0F};
-            bool hasVertex{false};
         };
 
         [[nodiscard]] size_t flattenIndex(size_t x,
@@ -69,8 +67,7 @@ namespace gladius::dual_contouring
         }
 
         void collectLeafVertices(OctreeNode const & node,
-                                 OctreeBuilder const & builder,
-                                 float isoValue,
+                     OctreeBuilder const & builder,
                                  size_t cellWidth,
                                  size_t cellHeight,
                                  size_t cellDepth,
@@ -85,7 +82,6 @@ namespace gladius::dual_contouring
                     {
                         collectLeafVertices(*child,
                                             builder,
-                                            isoValue,
                                             cellWidth,
                                             cellHeight,
                                             cellDepth,
@@ -126,7 +122,7 @@ namespace gladius::dual_contouring
                                               cellHeight);
 
             CellData & cell = cells[flat];
-            if (cell.hasVertex)
+            if (cell.vertexIndex >= 0)
             {
                 return;
             }
@@ -158,41 +154,15 @@ namespace gladius::dual_contouring
             {
                 cell.normal = -cell.normal;
             }
-            cell.centerValue = builder.gridSample(node.bounds.center()) - isoValue;
-            cell.hasVertex = true;
         }
 
         [[nodiscard]] bool hasSignChange(float a, float b)
         {
             constexpr float epsilon = 1e-6F;
-
-            auto classify = [](float value) -> int
-            {
-                if (value > epsilon)
-                {
-                    return 1;
-                }
-                if (value < -epsilon)
-                {
-                    return -1;
-                }
-                return 0;
-            };
-
-            int const signA = classify(a);
-            int const signB = classify(b);
-
-            if (signA == 0 && signB == 0)
-            {
-                return false;
-            }
-
-            if (signA == 0 || signB == 0)
-            {
-                return signA != 0 || signB != 0;
-            }
-
-            return signA != signB;
+            // Classify iso-value ties as outside so each sampled crossing is emitted once.
+            bool const insideA = a < -epsilon;
+            bool const insideB = b < -epsilon;
+            return insideA != insideB;
         }
 
         void emitTriangle(int idx0,
@@ -360,7 +330,7 @@ namespace gladius::dual_contouring
                             }
                             size_t const flat = flatten(cx, cy, cz);
                             CellData const & cell = cells.at(flat);
-                            if (!cell.hasVertex)
+                            if (cell.vertexIndex < 0)
                             {
                                 skip = true;
                                 break;
@@ -427,7 +397,7 @@ namespace gladius::dual_contouring
                             }
                             size_t const flat = flatten(cx, cy, cz);
                             CellData const & cell = cells.at(flat);
-                            if (!cell.hasVertex)
+                            if (cell.vertexIndex < 0)
                             {
                                 skip = true;
                                 break;
@@ -494,7 +464,7 @@ namespace gladius::dual_contouring
                             }
                             size_t const flat = flatten(cx, cy, cz);
                             CellData const & cell = cells.at(flat);
-                            if (!cell.hasVertex)
+                            if (cell.vertexIndex < 0)
                             {
                                 skip = true;
                                 break;
@@ -577,12 +547,12 @@ namespace gladius::dual_contouring
 
         std::vector<CellData> cells(cellWidth * cellHeight * cellDepth);
 
-        mesh.faces.reserve(cellWidth * cellHeight * cellDepth * 2U);
-        mesh.faceNormals.reserve(cellWidth * cellHeight * cellDepth * 2U);
+        auto const cellCount = cellWidth * cellHeight * cellDepth;
+        mesh.faces.reserve(cellCount / 16U);
+        mesh.faceNormals.reserve(cellCount / 16U);
 
         collectLeafVertices(root,
-                            builder,
-                            config.isoValue,
+                    builder,
                             cellWidth,
                             cellHeight,
                             cellDepth,

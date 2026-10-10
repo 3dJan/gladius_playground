@@ -229,6 +229,5 @@ namespace gladius::compute
         
         // Hierarchical octree approach (watertight mesh generation)
         void generateMeshHierarchical();
-        std::unique_ptr<GlobalMortonOctree> m_hierarchicalOctree;
     };
     }

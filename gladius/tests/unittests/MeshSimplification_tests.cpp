@@ -614,6 +614,31 @@ namespace gladius::compute::tests
             << "Simplification created " << outputNonManifold << " non-manifold edges";
     }
 
+    TEST(FastQemSimplifyTest, CoincidentClosedSheets_AvoidWeldThatCreatesNonManifoldEdge)
+    {
+        std::vector<Eigen::Vector3f> positions = {
+            {0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}, {0.0F, 0.0F, 1.0F},
+            {0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, -1.0F, 0.0F}, {0.0F, 0.0F, -1.0F}};
+        std::vector<std::uint32_t> indices = {
+            0U, 2U, 1U, 0U, 1U, 3U, 1U, 2U, 3U, 2U, 0U, 3U,
+            4U, 6U, 5U, 4U, 5U, 7U, 5U, 6U, 7U, 6U, 4U, 7U};
+
+        auto const [inputBoundary, inputNonManifold] = countEdgeDefects(indices);
+        ASSERT_EQ(inputBoundary, 0U);
+        ASSERT_EQ(inputNonManifold, 0U);
+
+        FastQemConfig config;
+        config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
+        config.targetReductionPercent = 10.0F;
+        fastQemSimplify(positions, indices, config);
+
+        auto const [outputBoundary, outputNonManifold] = countEdgeDefects(indices);
+        EXPECT_EQ(outputBoundary, 0U);
+        EXPECT_EQ(outputNonManifold, 0U);
+        EXPECT_EQ(positions.size(), 8U)
+            << "Coincident vertices on distinct sheets must not be welded together";
+    }
+
     TEST(FastQemSimplifyTest, ClosedMesh_AggressiveReduction_RemainsWatertight)
     {
         auto sphere = generateClosedSphere(1.0F, 24, 48); // larger mesh for aggressive test

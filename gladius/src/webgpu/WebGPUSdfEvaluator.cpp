@@ -16,6 +16,8 @@ namespace gladius::webgpu
 {
     namespace
     {
+        constexpr std::size_t MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE = 128u * 1024u * 1024u;
+
         struct alignas(16) EvaluationUniforms
         {
             float isoValue{};
@@ -44,6 +46,13 @@ namespace gladius::webgpu
                 auto const parameterSize = std::max(sizeof(float), parameterCount * sizeof(float));
                 auto const positionSize = pointCount * sizeof(EvaluationPosition);
                 auto const outputSize = pointCount * sizeof(float);
+                if (positionSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE ||
+                    outputSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE ||
+                    parameterSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE)
+                {
+                    throw std::length_error(
+                      "WebGPU SDF evaluation exceeds the minimum storage-buffer binding limit");
+                }
 
                 wgpu::BufferDescriptor uniformDescriptor;
                 uniformDescriptor.label = "Gladius SDF evaluation uniforms";
@@ -115,6 +124,13 @@ namespace gladius::webgpu
                 {
                     return;
                 }
+                if (totalFloats > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE / sizeof(float) ||
+                    offsetTable.size() > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE /
+                                           sizeof(std::uint32_t))
+                {
+                    throw std::length_error(
+                      "WebGPU image payload exceeds the minimum storage-buffer binding limit");
+                }
 
                 m_imagePayloadData.clear();
                 m_imagePayloadData.reserve(totalFloats);
@@ -169,6 +185,13 @@ namespace gladius::webgpu
                 {
                     return;
                 }
+                if (totalFloats > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE / sizeof(float) ||
+                    offsetTable.size() > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE /
+                                           sizeof(std::uint32_t))
+                {
+                    throw std::length_error(
+                      "WebGPU beam payload exceeds the minimum storage-buffer binding limit");
+                }
 
                 m_beamPayloadData.clear();
                 m_beamPayloadData.reserve(totalFloats);
@@ -222,6 +245,13 @@ namespace gladius::webgpu
                 if (totalFloats == 0u)
                 {
                     return;
+                }
+                if (totalFloats > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE / sizeof(float) ||
+                    offsetTable.size() > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE /
+                                           sizeof(std::uint32_t))
+                {
+                    throw std::length_error(
+                      "WebGPU mesh payload exceeds the minimum storage-buffer binding limit");
                 }
 
                 m_meshPayloadData.clear();
@@ -361,6 +391,47 @@ namespace gladius::webgpu
         {
             return {};
         }
+
+        auto inputPositions = std::move(request.positions);
+        compute::SdfEvaluationResult result;
+        result.values.resize(inputPositions.size());
+        if (!evaluateGenerated(
+              request,
+              inputPositions.size(),
+              [positions = std::move(inputPositions)](
+                std::size_t const offset,
+                std::size_t const count,
+                std::vector<std::array<float, 3>> & output)
+              {
+                  output.assign(positions.begin() + static_cast<std::ptrdiff_t>(offset),
+                                positions.begin() + static_cast<std::ptrdiff_t>(offset + count));
+              },
+              [&result](std::size_t const offset, std::vector<float> && values)
+              {
+                  std::copy(values.begin(),
+                            values.end(),
+                            result.values.begin() + static_cast<std::ptrdiff_t>(offset));
+              }))
+        {
+            throw std::runtime_error("WebGPU SDF evaluation was cancelled");
+        }
+        return result;
+    }
+
+    bool WebGPUSdfEvaluator::evaluateGenerated(compute::SdfEvaluationRequest const& request,
+                                               std::size_t const pointCount,
+                                               PositionBatchSource positionSource,
+                                               ValueBatchSink valueSink,
+                                               CancellationPredicate shouldCancel) const
+    {
+        if (pointCount == 0u)
+        {
+            return true;
+        }
+        if (shouldCancel && shouldCancel())
+        {
+            return false;
+        }
         if (!isAvailable())
         {
             throw std::runtime_error("WebGPU compute context is unavailable");
@@ -372,34 +443,32 @@ namespace gladius::webgpu
         {
             throw std::invalid_argument("WebGPU SDF evaluator shader source must not be empty");
         }
-        if (request.positions.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
+        if (!request.positions.empty())
+        {
+            throw std::invalid_argument(
+              "Generated WebGPU SDF evaluation request must not contain materialized positions");
+        }
+        if (!positionSource || !valueSink)
+        {
+            throw std::invalid_argument("Generated WebGPU SDF evaluation callbacks must be provided");
+        }
+        if (pointCount > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()))
         {
             throw std::invalid_argument("WebGPU SDF evaluation point count is too large");
         }
-        auto const pointCount = static_cast<std::uint32_t>(request.positions.size());
-        auto const dispatchPlan = makeSdfEvaluationDispatchPlan(pointCount);
-
+        auto const batchCapacity = std::min(pointCount, MAX_BATCH_POINTS);
+        std::vector<std::array<float, 3>> generatedPositions;
+        generatedPositions.reserve(batchCapacity);
         std::vector<EvaluationPosition> positions;
-        positions.reserve(request.positions.size());
-        for (auto const & position : request.positions)
-        {
-            positions.push_back(EvaluationPosition{{position[0], position[1], position[2], 0.0f}});
-        }
+        positions.reserve(batchCapacity);
 
         EvaluationBuffers buffers;
         buffers.create(m_context->getDevice(),
-                       positions.size(),
+                       batchCapacity,
                        request.parameterValues.size(),
                        request.meshPayloadTable,
                        request.beamPayloadTable,
                        request.imagePayloadTable);
-        buffers.write(m_context->getQueue(),
-                      EvaluationUniforms{request.isoValue,
-                                         pointCount,
-                                         dispatchPlan.workgroupsX,
-                                         0u},
-                      positions,
-                      request.parameterValues);
 
         if (buffers.hasMeshPayloads())
         {
@@ -451,7 +520,7 @@ namespace gladius::webgpu
         bindings[1].binding = 1u;
         bindings[1].visibility = wgpu::ShaderStage::Compute;
         bindings[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-        bindings[1].buffer.minBindingSize = positions.size() * sizeof(EvaluationPosition);
+        bindings[1].buffer.minBindingSize = batchCapacity * sizeof(EvaluationPosition);
         bindings[2].binding = 2u;
         bindings[2].visibility = wgpu::ShaderStage::Compute;
         bindings[2].buffer.type = wgpu::BufferBindingType::Storage;
@@ -542,7 +611,7 @@ namespace gladius::webgpu
         bindGroupEntries[0].size = sizeof(EvaluationUniforms);
         bindGroupEntries[1].binding = 1u;
         bindGroupEntries[1].buffer = buffers.positions();
-        bindGroupEntries[1].size = positions.size() * sizeof(EvaluationPosition);
+        bindGroupEntries[1].size = batchCapacity * sizeof(EvaluationPosition);
         bindGroupEntries[2].binding = 2u;
         bindGroupEntries[2].buffer = buffers.output();
         bindGroupEntries[2].size = buffers.outputSize();
@@ -602,66 +671,117 @@ namespace gladius::webgpu
         bindGroupDescriptor.entries = allEntries.data();
         auto const bindGroup = m_context->getDevice().CreateBindGroup(&bindGroupDescriptor);
 
-        auto const encoder = m_context->getDevice().CreateCommandEncoder();
-        auto const computePass = encoder.BeginComputePass();
-        computePass.SetPipeline(pipeline);
-        computePass.SetBindGroup(0u, bindGroup);
-        computePass.DispatchWorkgroups(dispatchPlan.workgroupsX, dispatchPlan.workgroupsY, 1u);
-        computePass.End();
-        encoder.CopyBufferToBuffer(buffers.output(),
-                                   0u,
-                                   buffers.staging(),
-                                   0u,
-                                   buffers.outputSize());
-        auto const commandBuffer = encoder.Finish();
-        m_context->getQueue().Submit(1u, &commandBuffer);
-
-        std::vector<float> values(positions.size());
-        bool complete = false;
-        std::string errorMessage;
-        buffers.staging().MapAsync(
-          wgpu::MapMode::Read,
-          0u,
-          buffers.outputSize(),
-          wgpu::CallbackMode::AllowProcessEvents,
-          [&values, &buffers, &complete, &errorMessage](wgpu::MapAsyncStatus const status,
-                                                        wgpu::StringView const message)
-          {
-              (void)message;
-              if (status != wgpu::MapAsyncStatus::Success)
-              {
-                  errorMessage = "WebGPU SDF evaluation readback failed";
-                  complete = true;
-                  return;
-              }
-
-              auto const * mappedValues = static_cast<float const *>(
-                buffers.staging().GetConstMappedRange(0u, buffers.outputSize()));
-              if (mappedValues == nullptr)
-              {
-                  errorMessage = "WebGPU SDF evaluation staging buffer returned no mapped data";
-                  complete = true;
-                  return;
-              }
-
-              std::memcpy(values.data(), mappedValues, buffers.outputSize());
-              buffers.staging().Unmap();
-              complete = true;
-          });
-
-        while (!complete)
+        for (std::size_t valueOffset = 0u; valueOffset < pointCount;)
         {
-            m_context->processEvents();
-            if (!m_context->isValid())
+            if (shouldCancel && shouldCancel())
             {
-                throw std::runtime_error(m_context->getErrorMessage());
+                return false;
             }
-        }
-        if (!errorMessage.empty())
-        {
-            throw std::runtime_error(errorMessage);
-        }
+            auto const batchCount = std::min(batchCapacity, pointCount - valueOffset);
+            generatedPositions.clear();
+            positionSource(valueOffset, batchCount, generatedPositions);
+            if (generatedPositions.size() != batchCount)
+            {
+                throw std::runtime_error(
+                  "WebGPU SDF position source returned an unexpected batch size");
+            }
 
-        return compute::SdfEvaluationResult{.values = std::move(values)};
+            positions.clear();
+            for (auto const & position : generatedPositions)
+            {
+                if (!std::isfinite(position[0]) || !std::isfinite(position[1]) ||
+                    !std::isfinite(position[2]))
+                {
+                    throw std::invalid_argument(
+                      "WebGPU SDF position source returned a non-finite coordinate");
+                }
+                positions.push_back(
+                  EvaluationPosition{{position[0], position[1], position[2], 0.0f}});
+            }
+
+            auto const batchPointCount = static_cast<std::uint32_t>(batchCount);
+            auto const dispatchPlan = makeSdfEvaluationDispatchPlan(batchPointCount);
+            auto const batchOutputSize = batchCount * sizeof(float);
+            buffers.write(m_context->getQueue(),
+                          EvaluationUniforms{request.isoValue,
+                                             batchPointCount,
+                                             dispatchPlan.workgroupsX,
+                                             0u},
+                          positions,
+                          request.parameterValues);
+
+            auto const encoder = m_context->getDevice().CreateCommandEncoder();
+            auto const computePass = encoder.BeginComputePass();
+            computePass.SetPipeline(pipeline);
+            computePass.SetBindGroup(0u, bindGroup);
+            computePass.DispatchWorkgroups(
+              dispatchPlan.workgroupsX, dispatchPlan.workgroupsY, 1u);
+            computePass.End();
+            encoder.CopyBufferToBuffer(buffers.output(),
+                                       0u,
+                                       buffers.staging(),
+                                       0u,
+                                       batchOutputSize);
+            auto const commandBuffer = encoder.Finish();
+            m_context->getQueue().Submit(1u, &commandBuffer);
+
+            std::vector<float> batchValues(batchCount);
+            bool complete = false;
+            std::string errorMessage;
+            buffers.staging().MapAsync(
+              wgpu::MapMode::Read,
+              0u,
+              batchOutputSize,
+              wgpu::CallbackMode::AllowProcessEvents,
+              [&batchValues,
+               &buffers,
+               &complete,
+               &errorMessage,
+               batchOutputSize](wgpu::MapAsyncStatus const status,
+                                wgpu::StringView const message)
+              {
+                  (void)message;
+                  if (status != wgpu::MapAsyncStatus::Success)
+                  {
+                      errorMessage = "WebGPU SDF evaluation readback failed";
+                      complete = true;
+                      return;
+                  }
+
+                  auto const * mappedValues = static_cast<float const *>(
+                    buffers.staging().GetConstMappedRange(0u, batchOutputSize));
+                  if (mappedValues == nullptr)
+                  {
+                      errorMessage = "WebGPU SDF evaluation staging buffer returned no mapped data";
+                      complete = true;
+                      return;
+                  }
+
+                  std::memcpy(batchValues.data(), mappedValues, batchOutputSize);
+                  buffers.staging().Unmap();
+                  complete = true;
+              });
+
+            while (!complete)
+            {
+                m_context->processEvents();
+                if (!m_context->isValid())
+                {
+                    throw std::runtime_error(m_context->getErrorMessage());
+                }
+            }
+            if (!errorMessage.empty())
+            {
+                throw std::runtime_error(errorMessage);
+            }
+            if (shouldCancel && shouldCancel())
+            {
+                return false;
+            }
+
+            valueSink(valueOffset, std::move(batchValues));
+            valueOffset += batchCount;
+        }
+        return true;
     }
 }

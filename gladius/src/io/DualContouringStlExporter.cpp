@@ -1,18 +1,14 @@
 #include "DualContouringStlExporter.h"
 
-#include "MeshExporter.h"
+#include "IndexedTriangleMeshWriter.h"
 
 #include "ComputeCore.h"
-#include "ComputeContext.h"
-#include "../types.h"
 
 #include <algorithm>
 #include <bit>
-#include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <utility>
-
-#include <Eigen/Geometry>
 
 #include <fmt/format.h>
 
@@ -47,11 +43,6 @@ namespace gladius::io
                 ++depth;
             }
             return std::max<std::size_t>(depth, 1U);
-        }
-
-        [[nodiscard]] Vector3 toVector3(Eigen::Vector3f const & value)
-        {
-            return Vector3{value.x(), value.y(), value.z()};
         }
     }
 
@@ -216,7 +207,7 @@ namespace gladius::io
             return;
         }
 
-        writeMeshToFile(generator, mesh);
+        writeMeshToFile(mesh);
 
         if (m_logger)
         {
@@ -227,56 +218,35 @@ namespace gladius::io
         }
     }
 
-    void DualContouringStlExporter::writeMeshToFile(ComputeCore & generator,
-                                                    dual_contouring::DualContouringMesh const & mesh) const
+        void DualContouringStlExporter::writeMeshToFile(
+            dual_contouring::DualContouringMesh const & mesh) const
     {
         if (mesh.faces.empty())
         {
             throw std::runtime_error("Dual contouring produced an empty mesh");
         }
 
-        auto computeContext = generator.getComputeContext();
-        if (computeContext == nullptr)
+        IndexedTriangleMesh indexedMesh;
+        indexedMesh.positions = mesh.vertices;
+        if (mesh.faces.size() > indexedMesh.indices.max_size() / 3U)
         {
-            throw std::runtime_error("Compute context unavailable for STL export");
+            throw std::runtime_error("Dual contouring mesh exceeds the maximum index count");
         }
-
-        Mesh convertedMesh(*computeContext);
+        indexedMesh.indices.reserve(mesh.faces.size() * 3U);
         for (auto const & face : mesh.faces)
         {
-            auto const indexA = static_cast<std::size_t>(face.x());
-            auto const indexB = static_cast<std::size_t>(face.y());
-            auto const indexC = static_cast<std::size_t>(face.z());
-
-            if (indexA >= mesh.vertices.size() || indexB >= mesh.vertices.size() ||
-                indexC >= mesh.vertices.size())
-            {
-                throw std::runtime_error("Dual contouring mesh references out-of-range vertex indices");
-            }
-
-            auto const a = mesh.vertices.at(indexA);
-            auto const b = mesh.vertices.at(indexB);
-            auto const c = mesh.vertices.at(indexC);
-
-            Eigen::Vector3f normal = (b - a).cross(c - a);
-            if (normal.squaredNorm() <= 1e-12F)
-            {
-                normal = Eigen::Vector3f{0.0F, 0.0F, 1.0F};
-            }
-            else
-            {
-                normal.normalize();
-            }
-
-            Face faceData{};
-            faceData.normal = toVector3(normal);
-            faceData.vertices = {toVector3(a), toVector3(b), toVector3(c)};
-            faceData.vertexNormals = {faceData.normal, faceData.normal, faceData.normal};
-
-            convertedMesh.addFace(faceData);
+            indexedMesh.indices.push_back(static_cast<std::uint32_t>(face.x()));
+            indexedMesh.indices.push_back(static_cast<std::uint32_t>(face.y()));
+            indexedMesh.indices.push_back(static_cast<std::uint32_t>(face.z()));
         }
 
-        vdb::exportMeshToSTL(convertedMesh, m_targetFile);
+        if (auto const validationError = indexedMesh.validationError())
+        {
+            throw std::runtime_error(
+              fmt::format("Dual contouring produced an invalid mesh: {}", *validationError));
+        }
+
+        writeIndexedMeshToBinaryStl(m_targetFile, indexedMesh);
     }
 
     dual_contouring::OctreeBuildConfig DualContouringStlExporter::makeConfig() const

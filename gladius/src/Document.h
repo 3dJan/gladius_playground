@@ -247,6 +247,9 @@ namespace gladius
         void exportAsStl(std::filesystem::path const & filename);
         void exportAsStl(std::filesystem::path const & filename,
                          io::StlExportOptions const & options);
+        /// @brief Export a geometry-only 3MF mesh through the selected WebGPU backend.
+        void exportAs3mf(std::filesystem::path const & filename,
+                 io::StlExportOptions const & options);
 
         void markFileAsChanged();
 
@@ -538,6 +541,18 @@ namespace gladius
         void updateFlatAssembly();
 
       private:
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        enum class WebGpuMeshExportFormat
+        {
+            Stl,
+            ThreeMf
+        };
+
+        void exportWebGpuMesh(std::filesystem::path const & filename,
+                              io::StlExportOptions const & options,
+                              WebGpuMeshExportFormat format);
+#endif
+
         enum class RefreshMode
         {
             Normal,
@@ -580,6 +595,7 @@ namespace gladius
         std::optional<std::filesystem::path> m_currentAssemblyFileName;
         std::shared_ptr<ComputeCore> m_core;
         compute::IBackendRuntime * m_backendRuntime{nullptr};
+        std::atomic<std::uint64_t> m_webGpuExportSceneGeneration{std::uint64_t{1} << 63u};
         events::SharedLogger m_logger;
         bool m_fileChanged{false};
         std::atomic<uint64_t> m_saveVersion{0};

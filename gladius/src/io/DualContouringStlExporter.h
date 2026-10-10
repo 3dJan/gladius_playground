@@ -5,7 +5,6 @@
 
 #include "../DualContouringMesher.h"
 #include "../EventLogger.h"
-#include "../Mesh.h"
 
 #include <atomic>
 #include <filesystem>
@@ -45,8 +44,7 @@ namespace gladius::io
         };
 
         void performExport(ComputeCore & generator);
-        void writeMeshToFile(ComputeCore & generator,
-                             dual_contouring::DualContouringMesh const & mesh) const;
+        void writeMeshToFile(dual_contouring::DualContouringMesh const & mesh) const;
         [[nodiscard]] dual_contouring::OctreeBuildConfig makeConfig() const;
 
         events::SharedLogger m_logger;

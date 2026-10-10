@@ -18,6 +18,7 @@
  */
 
 #include "GlobalVertexRegistry.h"
+#include "ManifoldSdfSampler.h"
 #include "../types.h"
 #include "../kernel/types.h"
 
@@ -31,15 +32,8 @@
 #include <unordered_map>
 #include <vector>
 
-namespace gladius
-{
-    class ComputeCore;
-    class Primitives;
-}
-
 namespace gladius::compute
 {
-    class ManifoldDualContouringProgram;
 
     /**
      * @brief Edge corner lookup table: which corners each of 12 edges connects.
@@ -74,9 +68,7 @@ namespace gladius::compute
 
         /// Optional override for the octree/SDF domain bounding box.
         ///
-        /// If not set, the octree will use ComputeCore::getBoundingBox().
-        /// When set, the caller must ensure the precomputed SDF buffer corresponds
-        /// to the same bounding box, otherwise sampling will be incorrect.
+        /// The caller must supply the domain used by its sampler; omitting it is an error.
         std::optional<BoundingBox> boundingBoxOverride{std::nullopt};
 
         // ---- Thickness Field Support ----
@@ -225,7 +217,7 @@ namespace gladius::compute
     class GlobalMortonOctree
     {
       public:
-        explicit GlobalMortonOctree(ComputeCore& core);
+        explicit GlobalMortonOctree(ManifoldSdfSampler& sampler);
         ~GlobalMortonOctree();
 
         /**
@@ -286,9 +278,12 @@ namespace gladius::compute
          */
         [[nodiscard]] bool wasCancelled() const { return m_wasCancelled; }
 
+        /// @brief Check whether a backend sampling query failed or became unavailable.
+        [[nodiscard]] bool hasSamplingError() const { return m_samplingFailed; }
+
       private:
-        ComputeCore& m_core;
-        ManifoldDualContouringProgram* m_program{nullptr};
+        ManifoldSdfSampler& m_sampler;
+        mutable bool m_samplingFailed{false};
         GlobalMortonOctreeConfig m_config;
         OctreeStats m_stats;
 
@@ -352,7 +347,8 @@ namespace gladius::compute
                                    std::vector<std::uint32_t>& indices);
         void fillBoundaryHoles(std::vector<std::uint32_t>& indices,
                                std::vector<Eigen::Vector3f> const& positions);
-        void fixTriangleOrientation(std::vector<std::uint32_t>& indices);
+        void fixTriangleOrientation(std::vector<std::uint32_t>& indices,
+                        std::vector<Eigen::Vector3f> const& positions);
         void findSharedEdges();
 
         // Helper methods
@@ -405,9 +401,11 @@ namespace gladius::compute
         
         // Cancellation support
         CancellationCheckCallback m_cancellationCheckCallback{nullptr};
-        bool m_wasCancelled{false};
+        mutable bool m_wasCancelled{false};
         
         /// Check if the operation should be cancelled
-        [[nodiscard]] bool isCancelled();
+        [[nodiscard]] bool isCancelled() const;
+        [[nodiscard]] ManifoldSdfSamplingCallbacks makeSamplingCallbacks() const;
+        [[nodiscard]] bool acceptSamplingStatus(ManifoldSdfSamplingStatus status) const;
     };
 }

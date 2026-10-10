@@ -25,6 +25,9 @@
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "MeshExportDialog.h"
 #endif
+#if defined(GLADIUS_ENABLE_WEBGPU)
+#include "WebGPUMeshExportDialog.h"
+#endif
 #include "ModelEditor.h"
 #include "Outline.h"
 #include "ParameterThrottle.h"
@@ -337,9 +340,14 @@ namespace gladius::ui
         bool m_moving = false;
 
         bool m_showAuthoringTools{true};
+        // Keep the state alive longer than either export dialog.
+        ExportState m_exportState;
     #if defined(GLADIUS_ENABLE_OPENCL)
         MeshExportDialog m_meshExporterDialog;
         CliExportDialog m_cliExportDialog;
+    #endif
+    #if defined(GLADIUS_ENABLE_WEBGPU)
+        WebGPUMeshExportDialog m_webGpuMeshExportDialog;
     #endif
         LibraryExportDialog m_libraryExportDialog;
         SliceView m_sliceView;
@@ -456,9 +464,6 @@ namespace gladius::ui
                 /// @brief Returns a unique temporary path in Emscripten's virtual filesystem.
                 [[nodiscard]] std::filesystem::path makeBrowserSaveTempPath();
             #endif
-
-        // Export state for blocking UI modifications during mesh export
-        ExportState m_exportState;
 
         // --- Deferred OpenCL initialization ---
         /// @brief State of the async compute initialization

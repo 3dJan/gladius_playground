@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <queue>
@@ -74,9 +75,14 @@ namespace gladius::io
 {
     WindingRepairStats repairTriangleWindingConsistency(
         std::vector<Eigen::Vector3f> const& positions,
-        std::vector<std::uint32_t>& indices)
+        std::vector<std::uint32_t>& indices,
+        std::vector<std::uint32_t>* triangleComponents)
     {
         WindingRepairStats stats;
+        if (triangleComponents != nullptr)
+        {
+            triangleComponents->clear();
+        }
         if (indices.size() < 3U || (indices.size() % 3U) != 0U)
         {
             return stats;
@@ -84,6 +90,10 @@ namespace gladius::io
 
         std::size_t const triCount = indices.size() / 3U;
         stats.triangleCount = triCount;
+        if (triangleComponents != nullptr)
+        {
+            triangleComponents->assign(triCount, std::numeric_limits<std::uint32_t>::max());
+        }
 
         std::vector<std::array<std::uint32_t, 3>> neighbors(triCount, {
             std::numeric_limits<std::uint32_t>::max(),
@@ -192,8 +202,12 @@ namespace gladius::io
                 continue;
             }
 
-            ++stats.components;
+            std::uint32_t const componentId = static_cast<std::uint32_t>(stats.components++);
             flip[t] = 0;
+            if (triangleComponents != nullptr)
+            {
+                (*triangleComponents)[t] = componentId;
+            }
             queue.push(t);
 
             while (!queue.empty())
@@ -215,12 +229,27 @@ namespace gladius::io
                     if (flip[other] == static_cast<std::int8_t>(-1))
                     {
                         flip[other] = desired;
+                        if (triangleComponents != nullptr)
+                        {
+                            (*triangleComponents)[other] = componentId;
+                        }
                         queue.push(other);
                     }
                     else if (flip[other] != desired)
                     {
                         stats.hadInconsistency = true;
                     }
+                }
+            }
+        }
+
+        if (triangleComponents != nullptr)
+        {
+            for (std::size_t triangle = 0U; triangle < triCount; ++triangle)
+            {
+                if ((*triangleComponents)[triangle] == std::numeric_limits<std::uint32_t>::max())
+                {
+                    (*triangleComponents)[triangle] = static_cast<std::uint32_t>(stats.components++);
                 }
             }
         }
@@ -247,6 +276,119 @@ namespace gladius::io
         }
 
         return stats;
+    }
+
+    std::size_t orientTriangleComponentsByVotes(
+        std::vector<std::uint32_t>& indices,
+        std::vector<std::uint32_t> const& triangleComponents,
+        std::vector<double> const& componentVotes)
+    {
+        std::size_t const triangleCount = indices.size() / 3U;
+        if (indices.size() % 3U != 0U || triangleComponents.size() != triangleCount)
+        {
+            return 0U;
+        }
+
+        std::vector<std::uint8_t> shouldFlip(componentVotes.size(), 0U);
+        std::size_t flippedComponents = 0U;
+        for (std::size_t component = 0U; component < componentVotes.size(); ++component)
+        {
+            if (std::isfinite(componentVotes[component]) && componentVotes[component] < 0.0)
+            {
+                shouldFlip[component] = 1U;
+                ++flippedComponents;
+            }
+        }
+
+        for (std::size_t triangle = 0U; triangle < triangleCount; ++triangle)
+        {
+            std::uint32_t const component = triangleComponents[triangle];
+            if (component < shouldFlip.size() && shouldFlip[component] != 0U)
+            {
+                std::swap(indices[triangle * 3U + 1U], indices[triangle * 3U + 2U]);
+            }
+        }
+
+        return flippedComponents;
+    }
+
+    std::vector<TriangleOrientationSample> makeTriangleOrientationSamples(
+        std::vector<Eigen::Vector3f> const& positions,
+        std::vector<std::uint32_t> const& indices,
+        std::vector<std::uint32_t> const& triangleComponents,
+        std::size_t const maximumSamplesPerComponent)
+    {
+        std::size_t const triangleCount = indices.size() / 3U;
+        if (indices.size() % 3U != 0U || triangleComponents.size() != triangleCount ||
+            maximumSamplesPerComponent == 0U)
+        {
+            return {};
+        }
+
+        std::size_t componentCount = 0U;
+        for (std::uint32_t const component : triangleComponents)
+        {
+            if (static_cast<std::size_t>(component) >= triangleCount)
+            {
+                return {};
+            }
+            componentCount = std::max(componentCount, static_cast<std::size_t>(component) + 1U);
+        }
+        std::vector<std::size_t> triangleCounts(componentCount, 0U);
+        for (std::uint32_t const component : triangleComponents)
+        {
+            ++triangleCounts[component];
+        }
+
+        std::vector<std::size_t> sampleStrides(componentCount, 1U);
+        std::size_t sampleCapacity = 0U;
+        for (std::size_t component = 0U; component < componentCount; ++component)
+        {
+            if (triangleCounts[component] > maximumSamplesPerComponent)
+            {
+                sampleStrides[component] =
+                    (triangleCounts[component] + maximumSamplesPerComponent - 1U) /
+                    maximumSamplesPerComponent;
+            }
+            sampleCapacity += (triangleCounts[component] + sampleStrides[component] - 1U) /
+                              sampleStrides[component];
+        }
+
+        std::vector<TriangleOrientationSample> samples;
+        samples.reserve(sampleCapacity);
+        std::vector<std::size_t> triangleOrdinals(componentCount, 0U);
+        for (std::size_t triangle = 0U; triangle < triangleCount; ++triangle)
+        {
+            std::uint32_t const component = triangleComponents[triangle];
+            std::size_t const ordinal = triangleOrdinals[component]++;
+            if (ordinal % sampleStrides[component] != 0U)
+            {
+                continue;
+            }
+
+            std::uint32_t const first = indices[triangle * 3U];
+            std::uint32_t const second = indices[triangle * 3U + 1U];
+            std::uint32_t const third = indices[triangle * 3U + 2U];
+            if (first >= positions.size() || second >= positions.size() || third >= positions.size())
+            {
+                continue;
+            }
+
+            Eigen::Vector3f normal =
+                (positions[second] - positions[first]).cross(positions[third] - positions[first]);
+            float const normalLength = normal.norm();
+            if (!std::isfinite(normalLength) || normalLength <= 1.0e-10F)
+            {
+                continue;
+            }
+            normal /= normalLength;
+            Eigen::Vector3f const samplePosition = (positions[first] + positions[second]) * 0.5F;
+            if (samplePosition.allFinite())
+            {
+                samples.push_back({samplePosition, normal, component});
+            }
+        }
+        return samples;
     }
 
 } // namespace gladius::io

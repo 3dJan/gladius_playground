@@ -558,6 +558,10 @@ void kernel adoptVertexOfMeshToSurface(__global float4 * in, __global float4 * o
             minDist = fabs(sdf);
             bestPos = pos;
         }
+        if (fabs(sdf) <= 1.0e-5f)
+        {
+            break;
+        }
         sdf = clamp(sdf, -1.0f, 1.0f);
         sdf *= 0.5f;
         pos = pos - normal * sdf;

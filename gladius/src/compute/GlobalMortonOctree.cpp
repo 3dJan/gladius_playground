@@ -1,9 +1,5 @@
 #include "GlobalMortonOctree.h"
-#include "ManifoldDualContouringProgram.h"
-#include "ComputeCore.h"
-#include "../Primitives.h"
 #include "../DualContouringQef.h"
-#include "../ResourceContext.h"
 
 #include <Eigen/Geometry>
 #include <Eigen/SVD>
@@ -118,8 +114,8 @@ namespace gladius::compute
         return bounds;
     }
 
-    GlobalMortonOctree::GlobalMortonOctree(ComputeCore& core)
-        : m_core(core)
+    GlobalMortonOctree::GlobalMortonOctree(ManifoldSdfSampler& sampler)
+        : m_sampler(sampler)
     {
     }
 
@@ -130,13 +126,37 @@ namespace gladius::compute
         m_cancellationCheckCallback = std::move(callback);
     }
 
-    bool GlobalMortonOctree::isCancelled()
+    bool GlobalMortonOctree::isCancelled() const
     {
         if (!m_wasCancelled && m_cancellationCheckCallback && m_cancellationCheckCallback())
         {
             m_wasCancelled = true;
         }
         return m_wasCancelled;
+    }
+
+    ManifoldSdfSamplingCallbacks GlobalMortonOctree::makeSamplingCallbacks() const
+    {
+        ManifoldSdfSamplingCallbacks callbacks;
+        callbacks.shouldCancel = [this]() { return isCancelled(); };
+        return callbacks;
+    }
+
+    bool GlobalMortonOctree::acceptSamplingStatus(ManifoldSdfSamplingStatus status) const
+    {
+        if (status == ManifoldSdfSamplingStatus::Completed)
+        {
+            return true;
+        }
+        if (status == ManifoldSdfSamplingStatus::Cancelled)
+        {
+            m_wasCancelled = true;
+        }
+        else
+        {
+            m_samplingFailed = true;
+        }
+        return false;
     }
 
     void GlobalMortonOctree::build(GlobalMortonOctreeConfig const& config)
@@ -148,53 +168,37 @@ namespace gladius::compute
         m_nodes.clear();
         m_levels.clear();
         m_mortonToIndex.clear();
+        m_wasCancelled = false;
+        m_samplingFailed = false;
 
-        // Get the program from ProgramManager
-        auto& programManager = m_core.getProgramManager();
-        programManager.ensureManifoldDcProgramCompiled();
-        m_program = programManager.getManifoldDualContouringProgram();
-        if (!m_program)
+        if (!config.boundingBoxOverride.has_value())
         {
-            std::cerr << "ManifoldDualContouringProgram not available" << std::endl;
+            std::cerr << "GlobalMortonOctree requires an explicit sampling domain" << std::endl;
+            m_samplingFailed = true;
             return;
         }
 
-        // Get global bounding box.
-        // IMPORTANT: The octree domain must fully contain the surface. If the surface
-        // intersects the domain boundary, owned-edge quad emission will necessarily
-        // skip out-of-bounds neighbors and produce holes (boundary edges).
-        //
-        // For parity with the GPU path, allow callers to provide a padded bounding box.
-        BoundingBox domainBbox{};
-        if (config.boundingBoxOverride.has_value())
-        {
-            domainBbox = *config.boundingBoxOverride;
-        }
-        else
-        {
-            auto bbox = m_core.getBoundingBox();
-            if (!bbox.has_value())
-            {
-                std::cerr << "No bounding box available" << std::endl;
-                return;
-            }
-            domainBbox = *bbox;
-        }
-
+        BoundingBox const& domainBbox = *config.boundingBoxOverride;
         m_globalBboxMin = Eigen::Vector3f(domainBbox.min.s[0], domainBbox.min.s[1], domainBbox.min.s[2]);
         m_globalBboxMax = Eigen::Vector3f(domainBbox.max.s[0], domainBbox.max.s[1], domainBbox.max.s[2]);
         m_globalBboxSize = m_globalBboxMax - m_globalBboxMin;
 
-        // Initialize vertex registry with global bounds
-        m_vertexRegistry.initialize(m_globalBboxMin, m_globalBboxMax,
-                                     static_cast<std::uint32_t>(config.maxDepth));
+        if (!m_globalBboxMin.allFinite() || !m_globalBboxMax.allFinite() ||
+            (m_globalBboxSize.array() <= 0.0F).any())
+        {
+            std::cerr << "GlobalMortonOctree received an invalid sampling domain" << std::endl;
+            m_samplingFailed = true;
+            return;
+        }
 
-        #ifdef GLOBALMORTON_DEBUG_OUTPUT
+        m_vertexRegistry.initialize(m_globalBboxMin, m_globalBboxMax,
+                                    static_cast<std::uint32_t>(config.maxDepth));
+
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Building GlobalMortonOctree:" << std::endl;
         std::cout << "  BBox: [" << m_globalBboxMin.transpose() << "] to ["
                   << m_globalBboxMax.transpose() << "]" << std::endl;
         std::cout << "  Depth range: " << config.initialDepth << " to " << config.maxDepth << std::endl;
-
 #endif
         auto phaseStart = std::chrono::high_resolution_clock::now();
         auto logPhaseTime = [&](char const* phaseName)
@@ -205,48 +209,64 @@ namespace gladius::compute
             phaseStart = now;
         };
 
-        // Phase 1: Build initial coarse octree
         buildInitialOctree();
         logPhaseTime("buildInitialOctree");
+        if (m_samplingFailed || isCancelled())
+        {
+            return;
+        }
 
-        // Phase 1b: Balance octree for watertight mesh generation
-        // Ensures all intersecting cells have face-adjacent neighbors at the same depth
         balanceOctree();
         logPhaseTime("balanceOctree");
+        if (m_samplingFailed || isCancelled())
+        {
+            return;
+        }
 
-        // Phase 2: Adaptive refinement
         if (config.enableAdaptiveRefinement && config.refinementPasses > 0U)
         {
             refineAdaptively();
             logPhaseTime("refineAdaptively");
-            // Re-balance after adaptive refinement
+            if (m_samplingFailed || isCancelled())
+            {
+                return;
+            }
             balanceOctree();
             logPhaseTime("balanceOctree (post-refine)");
+            if (m_samplingFailed || isCancelled())
+            {
+                return;
+            }
         }
 
-        // Phase 3: Generate vertices using QEF
         generateVertices();
         logPhaseTime("generateVertices");
+        if (m_samplingFailed || isCancelled())
+        {
+            return;
+        }
 
-        // Phase 3b: Generate "halo" vertices for non-intersecting neighbors that are required
-        // to close owned-edge quads. This is the CPU analogue of the GPU halo approach.
         generateHaloVerticesForWatertightness();
         logPhaseTime("generateHaloVertices");
-        #ifdef GLOBALMORTON_DEBUG_OUTPUT
-        std::cout << "Vertices generated: " << m_stats.vertexCount << std::endl;
+        if (m_samplingFailed || isCancelled())
+        {
+            return;
+        }
 
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
+        std::cout << "Vertices generated: " << m_stats.vertexCount << std::endl;
 #endif
         auto const endTime = std::chrono::high_resolution_clock::now();
         m_stats.constructionTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
 
-        #ifdef GLOBALMORTON_DEBUG_OUTPUT
+#ifdef GLOBALMORTON_DEBUG_OUTPUT
         std::cout << "Octree construction complete:" << std::endl;
         std::cout << "  Total nodes: " << m_stats.totalNodes << std::endl;
         std::cout << "  Leaf nodes: " << m_stats.leafNodes << std::endl;
         std::cout << "  Intersecting leaves: " << m_stats.intersectingLeaves << std::endl;
         std::cout << "  Vertices: " << m_stats.vertexCount << std::endl;
         std::cout << "  Time: " << m_stats.constructionTimeMs << " ms" << std::endl;
-        #endif
+#endif
     }
 
     void GlobalMortonOctree::buildInitialOctree()
@@ -363,127 +383,121 @@ namespace gladius::compute
 
     void GlobalMortonOctree::evaluateCornersCpu(std::vector<std::size_t> const& nodeIndices)
     {
-        // Debug: Check SDF buffer status
-        auto resources = m_core.getResourceContext();
-        if (resources)
+        if (nodeIndices.empty())
         {
-            auto& sdfBuffer = resources->getPrecompSdfBuffer();
-            
-            // Read SDF data from GPU to CPU
-            sdfBuffer.read();
-            
-            #ifdef GLOBALMORTON_DEBUG_OUTPUT
-            std::cout << "  SDF buffer size: " << sdfBuffer.getWidth() << "x" 
-                      << sdfBuffer.getHeight() << "x" << sdfBuffer.getDepth()
-                      << " (data size: " << sdfBuffer.getData().size() << ")" << std::endl;
-            
-            #endif
-            // Print min/max of SDF data for debugging
-            auto const& data = sdfBuffer.getData();
-            if (!data.empty())
-            {
-                float minVal = data[0].s[3];
-                float maxVal = data[0].s[3];
-                for (auto const & sample : data)
-                {
-                    float const v = sample.s[3];
-                    minVal = std::min(minVal, v);
-                    maxVal = std::max(maxVal, v);
-                }
-                #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                std::cout << "  SDF value range: [" << minVal << ", " << maxVal << "]" << std::endl;
-                #endif
-            }
-            else
-            {
-                #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                std::cout << "  SDF buffer is EMPTY!" << std::endl;
-                #endif
-            }
-        }
-        else
-        {
-            #ifdef GLOBALMORTON_DEBUG_OUTPUT
-            std::cout << "  No resources available for SDF sampling!" << std::endl;
-            #endif
-        }
-
-        for (std::size_t nodeIdx : nodeIndices)
-        {
-            auto& node = m_nodes[nodeIdx];
-            BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize,
-                                                           static_cast<std::uint32_t>(m_config.maxDepth));
-
-            for (std::uint8_t c = 0U; c < 8U; ++c)
-            {
-                Eigen::Vector3f const corner = cornerPosition(c, bounds);
-                node.cornerValues[c] = sampleEffectiveSdf(corner);
-            }
-            
-            // Debug: Print first node's corner values
-            if (nodeIdx == 0U)
-            {
-                #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                std::cout << "  Root node corner values: ";
-                #endif
-                for (int c = 0; c < 8; ++c)
-                {
-                    #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                    std::cout << node.cornerValues[c] << " ";
-                    #endif
-                }
-                #ifdef GLOBALMORTON_DEBUG_OUTPUT
-                std::cout << std::endl;
-                #endif
-            }
-        }
-    }
-
-    void GlobalMortonOctree::evaluateCornersGpuBatch(std::vector<std::size_t> const& nodeIndices)
-    {
-        if (nodeIndices.empty() || !m_program)
-        {
-            evaluateCornersCpu(nodeIndices);
             return;
         }
 
-        auto const primitives = m_core.getPrimitives();
-        if (!primitives)
+        auto const callbacks = makeSamplingCallbacks();
+        if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
         {
-            evaluateCornersCpu(nodeIndices);
+            for (std::size_t nodeIdx : nodeIndices)
+            {
+                auto& node = m_nodes[nodeIdx];
+                BoundingBox const bounds = node.computeBounds(
+                    m_globalBboxMin, m_globalBboxSize,
+                    static_cast<std::uint32_t>(m_config.maxDepth));
+                for (std::uint8_t corner = 0U; corner < 8U; ++corner)
+                {
+                    Eigen::Vector3f const position = cornerPosition(corner, bounds);
+                    node.cornerValues[corner] = sampleEffectiveSdf(position);
+                    if (m_samplingFailed || isCancelled())
+                    {
+                        return;
+                    }
+                }
+            }
             return;
         }
 
-        // Collect all corner positions: 8 corners per node
-        std::size_t const totalCorners = nodeIndices.size() * 8U;
         std::vector<Eigen::Vector3f> positions;
-        positions.reserve(totalCorners);
-
+        positions.reserve(nodeIndices.size() * 8U);
         for (std::size_t nodeIdx : nodeIndices)
         {
             auto const& node = m_nodes[nodeIdx];
             BoundingBox const bounds = node.computeBounds(
                 m_globalBboxMin, m_globalBboxSize,
                 static_cast<std::uint32_t>(m_config.maxDepth));
-
-            for (std::uint8_t c = 0U; c < 8U; ++c)
+            for (std::uint8_t corner = 0U; corner < 8U; ++corner)
             {
-                positions.push_back(cornerPosition(c, bounds));
+                positions.push_back(cornerPosition(corner, bounds));
             }
         }
 
-        // Dispatch GPU batch evaluation
-        std::vector<float> const sdfValues =
-            m_program->evaluateSdfBatch(positions, *primitives, m_config.isoValue);
+        std::vector<float> values;
+        auto const status = m_sampler.evaluateSdfBatch(
+            positions, m_config.isoValue, values, callbacks);
+        if (!acceptSamplingStatus(status) || values.size() != positions.size())
+        {
+            if (status == ManifoldSdfSamplingStatus::Completed)
+            {
+                m_samplingFailed = true;
+            }
+            return;
+        }
 
-        // Scatter results back to nodes
-        std::size_t idx = 0U;
+        std::size_t valueIndex = 0U;
         for (std::size_t nodeIdx : nodeIndices)
         {
             auto& node = m_nodes[nodeIdx];
-            for (std::uint8_t c = 0U; c < 8U; ++c)
+            for (std::uint8_t corner = 0U; corner < 8U; ++corner)
             {
-                node.cornerValues[c] = sdfValues[idx++];
+                node.cornerValues[corner] = values[valueIndex++];
+            }
+        }
+    }
+
+    void GlobalMortonOctree::evaluateCornersGpuBatch(std::vector<std::size_t> const& nodeIndices)
+    {
+        if (nodeIndices.empty())
+        {
+            return;
+        }
+
+        if (m_samplingFailed || isCancelled())
+        {
+            return;
+        }
+
+        if (m_config.useThicknessField && !m_config.outerThicknessField.empty())
+        {
+            evaluateCornersCpu(nodeIndices);
+            return;
+        }
+
+        std::vector<Eigen::Vector3f> positions;
+        positions.reserve(nodeIndices.size() * 8U);
+        for (std::size_t nodeIdx : nodeIndices)
+        {
+            auto const& node = m_nodes[nodeIdx];
+            BoundingBox const bounds = node.computeBounds(
+                m_globalBboxMin, m_globalBboxSize,
+                static_cast<std::uint32_t>(m_config.maxDepth));
+            for (std::uint8_t corner = 0U; corner < 8U; ++corner)
+            {
+                positions.push_back(cornerPosition(corner, bounds));
+            }
+        }
+
+        std::vector<float> sdfValues;
+        auto const status = m_sampler.evaluateSdfBatch(
+            positions, m_config.isoValue, sdfValues, makeSamplingCallbacks());
+        if (!acceptSamplingStatus(status) || sdfValues.size() != positions.size())
+        {
+            if (status == ManifoldSdfSamplingStatus::Completed)
+            {
+                m_samplingFailed = true;
+            }
+            return;
+        }
+
+        std::size_t valueIndex = 0U;
+        for (std::size_t nodeIdx : nodeIndices)
+        {
+            auto& node = m_nodes[nodeIdx];
+            for (std::uint8_t corner = 0U; corner < 8U; ++corner)
+            {
+                node.cornerValues[corner] = sdfValues[valueIndex++];
             }
         }
     }
@@ -987,14 +1001,8 @@ namespace gladius::compute
             return;
         }
 
-        auto const primitives = m_core.getPrimitives();
-        if (!primitives || !m_program)
+        if (m_samplingFailed || isCancelled())
         {
-            // Fallback: per-node CPU projection
-            for (std::size_t idx : nodeIndices)
-            {
-                ensureProjectedVertex(m_nodes[idx]);
-            }
             return;
         }
 
@@ -1061,10 +1069,18 @@ namespace gladius::compute
 
         std::vector<Eigen::Vector3f> projectedPositions;
         std::vector<Eigen::Vector3f> projectedGradients;
-        m_program->newtonProjectToSurfaceBatch(
-            positions, bboxMins, bboxMaxs,
-            *primitives, m_config.isoValue, commonEpsilon,
-            projectedPositions, projectedGradients);
+        auto const status = m_sampler.projectToSurfaceBatch(
+            positions, bboxMins, bboxMaxs, m_config.isoValue, commonEpsilon,
+            projectedPositions, projectedGradients, makeSamplingCallbacks());
+        if (!acceptSamplingStatus(status) || projectedPositions.size() != work.size() ||
+            projectedGradients.size() != work.size())
+        {
+            if (status == ManifoldSdfSamplingStatus::Completed)
+            {
+                m_samplingFailed = true;
+            }
+            return;
+        }
 
         // Register vertices
         for (std::size_t i = 0U; i < work.size(); ++i)
@@ -1385,25 +1401,16 @@ namespace gladius::compute
 
     void GlobalMortonOctree::estimateCurvatureGpu(std::vector<std::size_t> const& leafIndices)
     {
-        if (leafIndices.empty())
-        {
-            return;
-        }
-
-        auto const primitives = m_core.getPrimitives();
-        if (!primitives || !m_program)
+        if (leafIndices.empty() || m_samplingFailed || isCancelled())
         {
             return;
         }
 
         float const epsilon = m_globalBboxSize.maxCoeff() / static_cast<float>(1U << m_config.maxDepth) * 0.5F;
-
-        // Collect all sample positions: 7 per leaf (center + 6 axis neighbors).
         std::size_t const samplesPerLeaf = 7U;
         std::vector<Eigen::Vector3f> positions;
         positions.reserve(leafIndices.size() * samplesPerLeaf);
-
-        static Eigen::Vector3f const axisOffsets[6] = {
+        Eigen::Vector3f const axisOffsets[6] = {
             {1.0F, 0.0F, 0.0F}, {-1.0F, 0.0F, 0.0F},
             {0.0F, 1.0F, 0.0F}, {0.0F, -1.0F, 0.0F},
             {0.0F, 0.0F, 1.0F}, {0.0F, 0.0F, -1.0F}};
@@ -1413,12 +1420,10 @@ namespace gladius::compute
             auto const& node = m_nodes[nodeIdx];
             BoundingBox const bounds = node.computeBounds(m_globalBboxMin, m_globalBboxSize,
                                                            static_cast<std::uint32_t>(m_config.maxDepth));
-
             Eigen::Vector3f const center(
                 (bounds.min.s[0] + bounds.max.s[0]) * 0.5F,
                 (bounds.min.s[1] + bounds.max.s[1]) * 0.5F,
                 (bounds.min.s[2] + bounds.max.s[2]) * 0.5F);
-
             positions.push_back(center);
             for (auto const& offset : axisOffsets)
             {
@@ -1426,31 +1431,35 @@ namespace gladius::compute
             }
         }
 
-        // Single GPU dispatch for all gradient evaluations.
         std::vector<float> sdfValues;
         std::vector<Eigen::Vector3f> gradients;
-        m_program->evaluateSdfGradientBatch(positions, *primitives, m_config.isoValue, epsilon,
-                                            sdfValues, gradients);
-
-        // Scatter results back to nodes.
-        for (std::size_t li = 0U; li < leafIndices.size(); ++li)
+        auto const status = m_sampler.evaluateSdfGradientBatch(
+            positions, m_config.isoValue, epsilon, sdfValues, gradients, makeSamplingCallbacks());
+        if (!acceptSamplingStatus(status) || sdfValues.size() != positions.size() ||
+            gradients.size() != positions.size())
         {
-            auto& node = m_nodes[leafIndices[li]];
-            std::size_t const base = li * samplesPerLeaf;
-
-            Eigen::Vector3f const normCenter = gradients[base].normalized();
-
-            float variance = 0.0F;
-            for (std::size_t j = 1U; j < samplesPerLeaf; ++j)
+            if (status == ManifoldSdfSamplingStatus::Completed)
             {
-                Eigen::Vector3f const normNeighbor = gradients[base + j].normalized();
+                m_samplingFailed = true;
+            }
+            return;
+        }
+
+        for (std::size_t leafIndex = 0U; leafIndex < leafIndices.size(); ++leafIndex)
+        {
+            auto& node = m_nodes[leafIndices[leafIndex]];
+            std::size_t const base = leafIndex * samplesPerLeaf;
+            Eigen::Vector3f const normCenter = gradients[base].normalized();
+            float variance = 0.0F;
+            for (std::size_t sampleIndex = 1U; sampleIndex < samplesPerLeaf; ++sampleIndex)
+            {
+                Eigen::Vector3f const normNeighbor = gradients[base + sampleIndex].normalized();
                 Eigen::Vector3f const diff = normCenter - normNeighbor;
                 variance += diff.squaredNorm();
             }
             variance /= 6.0F;
-
             node.curvatureMetric = variance;
-            node.needsRefinement = (variance > m_config.curvatureThreshold);
+            node.needsRefinement = variance > m_config.curvatureThreshold;
         }
     }
 
@@ -1687,17 +1696,8 @@ namespace gladius::compute
 
     void GlobalMortonOctree::gatherHermiteSamplesBatchGpu()
     {
-        auto const primitives = m_core.getPrimitives();
-        if (!primitives || !m_program)
+        if (m_samplingFailed || isCancelled())
         {
-            // Fall back to per-node CPU path
-            for (auto& node : m_nodes)
-            {
-                if (node.isLeaf && node.isIntersecting)
-                {
-                    gatherHermiteSamples(node);
-                }
-            }
             return;
         }
 
@@ -1772,10 +1772,18 @@ namespace gladius::compute
 
         std::vector<Eigen::Vector3f> zeroCrossings;
         std::vector<Eigen::Vector3f> gradients;
-        m_program->hermiteBisectAndGradientBatch(
-            edgeStarts, edgeEnds, edgeStartValues, edgeEndValues,
-            *primitives, m_config.isoValue, commonEpsilon,
-            zeroCrossings, gradients);
+        auto const status = m_sampler.refineHermiteEdgesBatch(
+            edgeStarts, edgeEnds, edgeStartValues, edgeEndValues, m_config.isoValue, commonEpsilon,
+            zeroCrossings, gradients, makeSamplingCallbacks());
+        if (!acceptSamplingStatus(status) || zeroCrossings.size() != edges.size() ||
+            gradients.size() != edges.size())
+        {
+            if (status == ManifoldSdfSamplingStatus::Completed)
+            {
+                m_samplingFailed = true;
+            }
+            return;
+        }
 
         // --- Step 3: Scatter results back into node Hermite samples ---
         for (std::size_t i = 0U; i < edges.size(); ++i)
@@ -1822,6 +1830,7 @@ namespace gladius::compute
         // 6 faces using marching-squares connectivity (with asymptotic decider for
         // ambiguous cases 5/10).
         float constexpr NORMAL_EPS = 1e-6F;
+        float constexpr BILINEAR_SIGN_TIE_TOLERANCE = 2e-5F;
 
         // Map edgeIndex -> hermite sample index (or -1 if no intersection on that edge).
         std::array<int, 12> sampleIndexByEdge;
@@ -1989,8 +1998,12 @@ namespace gladius::compute
                         s2 * xStar * yStar +
                         s3 * (1.0F - xStar) * yStar;
 
-                    bool const centerInside = bilinearValue < 0.0F;
                     bool const diagonal02Inside = isCornerInside(f.corners[0]) && isCornerInside(f.corners[2]);
+                    bool centerInside = bilinearValue < 0.0F;
+                    if (std::abs(bilinearValue) <= BILINEAR_SIGN_TIE_TOLERANCE)
+                    {
+                        centerInside = diagonal02Inside;
+                    }
 
                     // If center sign matches the (0,2) diagonal's inside-ness, connect edges
                     // around the opposite diagonal. This generalizes the asymptotic decider
@@ -2257,7 +2270,7 @@ namespace gladius::compute
         constexpr std::size_t MAX_TRIANGLES_FOR_ORIENTATION_FIX = 250000U;
         if (triangleCount <= MAX_TRIANGLES_FOR_ORIENTATION_FIX)
         {
-            fixTriangleOrientation(indices);
+            fixTriangleOrientation(indices, positions);
             logPhaseTime("fixTriangleOrientation");
 
 #ifdef GLOBALMORTON_DEBUG_OUTPUT
@@ -2347,7 +2360,7 @@ namespace gladius::compute
         // If the boundary is tiny and the mesh is otherwise manifold, we can optionally
         // fill the resulting hole loops with a simple fan triangulation.
         // This is a pragmatic safeguard for rare degeneracy cases.
-        constexpr std::size_t MAX_BOUNDARY_EDGES_FOR_FILL = 256U;
+        constexpr std::size_t MAX_BOUNDARY_EDGES_FOR_FILL = 2048U;
         std::vector<std::uint64_t> boundaryEdgeKeys;
         boundaryEdgeKeys.reserve(32U);
         bool boundaryTooLargeForFill = false;
@@ -2631,11 +2644,13 @@ namespace gladius::compute
                             };
 
                             bool triangulated = true;
-                            float constexpr MIN_EAR_AREA2 = 1e-12F;
+                            float constexpr MIN_EAR_AREA2 = 1e-10F;
+                            float constexpr AREA_SCORE_RELATIVE_TOLERANCE = 1e-2F;
                             while (poly.size() > 3U)
                             {
                                 std::size_t bestIndex = std::numeric_limits<std::size_t>::max();
                                 float bestArea2 = 0.0F;
+                                std::array<std::uint32_t, 3> bestEarKey{};
 
                                 for (std::size_t i = 0U; i < poly.size(); ++i)
                                 {
@@ -2662,10 +2677,20 @@ namespace gladius::compute
                                         continue;
                                     }
 
-                                    if (area2 > bestArea2)
+                                    std::array<std::uint32_t, 3> earKey{prev, curr, next};
+                                    std::sort(earKey.begin(), earKey.end());
+                                    float const areaScoreTolerance = AREA_SCORE_RELATIVE_TOLERANCE *
+                                        std::max({area2, bestArea2, MIN_EAR_AREA2});
+                                    bool const isBetterEar =
+                                        bestIndex == std::numeric_limits<std::size_t>::max() ||
+                                        area2 > bestArea2 + areaScoreTolerance ||
+                                        (std::abs(area2 - bestArea2) <= areaScoreTolerance &&
+                                         earKey < bestEarKey);
+                                    if (isBetterEar)
                                     {
                                         bestArea2 = area2;
                                         bestIndex = i;
+                                        bestEarKey = earKey;
                                     }
                                 }
 
@@ -3510,26 +3535,16 @@ namespace gladius::compute
                 ++zeroDiagonalKeys;
             }
 
-            bool const diag12Ok = (c.area12a >= MIN_AREA) && (c.area12b >= MIN_AREA);
-            bool const diag03Ok = (c.area03a >= MIN_AREA) && (c.area03b >= MIN_AREA);
-
             float const min12 = std::min(c.area12a, c.area12b);
             float const min03 = std::min(c.area03a, c.area03b);
 
-            bool useDiag12 = diag12Ok;
-            if (!diag12Ok && diag03Ok)
+            float constexpr AREA_SCORE_RELATIVE_TOLERANCE = 1e-2F;
+            float const areaScoreTolerance = AREA_SCORE_RELATIVE_TOLERANCE *
+                std::max({min12, min03, MIN_AREA});
+            bool useDiag12 = min12 > min03;
+            if (std::abs(min12 - min03) <= areaScoreTolerance)
             {
-                useDiag12 = false;
-            }
-            else if (diag12Ok && diag03Ok)
-            {
-                useDiag12 = min12 >= min03;
-            }
-            else if (!diag12Ok && !diag03Ok)
-            {
-                // Neither diagonal is "good" by threshold, but we still must pick one.
-                // Choose the less-bad one (bigger minimum area) to minimize sliver facets.
-                useDiag12 = min12 >= min03;
+                useDiag12 = c.diag12Key < c.diag03Key;
             }
 
             // Hard rule: never pick a diagonal that equals any perimeter edge in the full quad set.
@@ -3688,11 +3703,9 @@ namespace gladius::compute
                                                     std::vector<Eigen::Vector3f>& normals,
                                                     std::vector<std::uint32_t>& indices)
     {
-        // Resolve non-manifold edges (edges shared by 3+ triangles) by splitting vertex fans.
-        //
-        // For each vertex that participates in a non-manifold edge, partition its incident
-        // triangle fan into edge-connected components (using only manifold edges for
-        // connectivity). Each component beyond the first gets its own copy of the vertex.
+        // Resolve non-manifold edges and branching boundary vertices by splitting vertex fans.
+        // Each incident triangle fan is partitioned into edge-connected components, and each
+        // component beyond the first gets its own copy of the vertex.
         //
         // To avoid cascading issues from stale edge counts, we make multiple passes:
         // after splitting a batch of vertices, recompute edge counts and repeat until
@@ -3729,14 +3742,28 @@ namespace gladius::compute
                 ++edgeCount[makeEdgeKey(indices[i + 2U], indices[i])];
             }
 
-            // Collect non-manifold vertices.
+            // Collect vertices that must be split: endpoints of overused edges, plus boundary
+            // vertices where otherwise separate boundary loops touch.
             std::unordered_set<std::uint32_t> nonManifoldVertices;
+            std::unordered_map<std::uint32_t, std::size_t> boundaryVertexDegree;
             for (auto const& [edgeKey, count] : edgeCount)
             {
                 if (count > 2U)
                 {
                     nonManifoldVertices.insert(static_cast<std::uint32_t>(edgeKey >> 32U));
                     nonManifoldVertices.insert(static_cast<std::uint32_t>(edgeKey & 0xFFFFFFFFU));
+                }
+                else if (count == 1U)
+                {
+                    ++boundaryVertexDegree[static_cast<std::uint32_t>(edgeKey >> 32U)];
+                    ++boundaryVertexDegree[static_cast<std::uint32_t>(edgeKey & 0xFFFFFFFFU)];
+                }
+            }
+            for (auto const& [vertex, degree] : boundaryVertexDegree)
+            {
+                if (degree > 2U)
+                {
+                    nonManifoldVertices.insert(vertex);
                 }
             }
 
@@ -3765,7 +3792,7 @@ namespace gladius::compute
 
             for (auto const& [vertex, triList] : vertexToTriangles)
             {
-                if (triList.size() <= 2U)
+                if (triList.size() < 2U)
                 {
                     continue;
                 }
@@ -3883,7 +3910,7 @@ namespace gladius::compute
         if (totalNewComponents > 0U)
         {
             std::cout << "  splitNonManifoldEdges: split " << totalSplitVertices
-                      << " non-manifold vertices into " << totalNewComponents
+                      << " non-manifold/boundary vertices into " << totalNewComponents
                       << " additional components" << std::endl;
         }
     }
@@ -4068,7 +4095,9 @@ namespace gladius::compute
         #endif
     }
 
-    void GlobalMortonOctree::fixTriangleOrientation(std::vector<std::uint32_t>& indices)
+    void GlobalMortonOctree::fixTriangleOrientation(
+        std::vector<std::uint32_t>& indices,
+        std::vector<Eigen::Vector3f> const& positions)
     {
         // Fix triangle orientation by propagating consistent winding through the mesh.
         // This ensures each mesh edge is traversed in opposite directions by its two triangles.
@@ -4078,7 +4107,6 @@ namespace gladius::compute
             return;
         }
         
-        auto const& positions = m_vertexRegistry.getPositions();
         std::size_t const numTriangles = indices.size() / 3;
         
         // Build edge-to-triangle map for adjacency
@@ -4304,18 +4332,19 @@ namespace gladius::compute
         // Batch GPU evaluation
         std::vector<float> batchSdf;
         std::vector<Eigen::Vector3f> batchGrad;
-        auto const primitives = m_core.getPrimitives();
-        if (!midpoints.empty() && primitives && m_program)
+        if (!midpoints.empty())
         {
-            m_program->evaluateSdfGradientBatch(
-                midpoints, *primitives, m_config.isoValue, gradEpsilon,
-                batchSdf, batchGrad);
-        }
-        else
-        {
-            // Fallback: fill with zeros (orientation voting will be skipped)
-            batchSdf.assign(midpoints.size(), 0.0F);
-            batchGrad.assign(midpoints.size(), Eigen::Vector3f::Zero());
+            auto const status = m_sampler.evaluateSdfGradientBatch(
+                midpoints, m_config.isoValue, gradEpsilon, batchSdf, batchGrad, makeSamplingCallbacks());
+            if (!acceptSamplingStatus(status) || batchSdf.size() != midpoints.size() ||
+                batchGrad.size() != midpoints.size())
+            {
+                if (status == ManifoldSdfSamplingStatus::Completed)
+                {
+                    m_samplingFailed = true;
+                }
+                return;
+            }
         }
 
         // Tally votes per component
@@ -4428,71 +4457,19 @@ namespace gladius::compute
 
     float GlobalMortonOctree::sampleSdf(Eigen::Vector3f const& position) const
     {
-        // Use precomputed SDF buffer for evaluation
-        auto resources = m_core.getResourceContext();
-        if (!resources)
+        if (m_samplingFailed || isCancelled())
         {
             return 0.0F;
         }
 
-        auto& sdfBuffer = resources->getPrecompSdfBuffer();
-        auto const width = sdfBuffer.getWidth();
-        auto const height = sdfBuffer.getHeight();
-        auto const depth = sdfBuffer.getDepth();
-
-        if (width == 0U || height == 0U || depth == 0U)
+        float value = 0.0F;
+        auto const status = m_sampler.sampleSdf(
+            position, m_globalBboxMin, m_globalBboxSize, value, makeSamplingCallbacks());
+        if (!acceptSamplingStatus(status))
         {
             return 0.0F;
         }
-
-        // Transform world position to normalized coordinates within the bounding box
-        Eigen::Vector3f const safeExtent = m_globalBboxSize.cwiseMax(Eigen::Vector3f::Constant(1e-6F));
-        Eigen::Vector3f normalized = (position - m_globalBboxMin).cwiseQuotient(safeExtent);
-        normalized = normalized.cwiseMax(Eigen::Vector3f::Zero()).cwiseMin(Eigen::Vector3f::Ones());
-
-        // Convert to grid indices
-        float const gx = normalized.x() * static_cast<float>(width - 1U);
-        float const gy = normalized.y() * static_cast<float>(height - 1U);
-        float const gz = normalized.z() * static_cast<float>(depth - 1U);
-
-        auto const x0 = static_cast<std::size_t>(std::floor(gx));
-        auto const y0 = static_cast<std::size_t>(std::floor(gy));
-        auto const z0 = static_cast<std::size_t>(std::floor(gz));
-        auto const x1 = std::min(x0 + 1U, width - 1U);
-        auto const y1 = std::min(y0 + 1U, height - 1U);
-        auto const z1 = std::min(z0 + 1U, depth - 1U);
-
-        // Trilinear interpolation weights
-        float const fx = gx - static_cast<float>(x0);
-        float const fy = gy - static_cast<float>(y0);
-        float const fz = gz - static_cast<float>(z0);
-
-        // Sample 8 corners
-        auto const& data = sdfBuffer.getData();
-        auto sampleAt = [&](std::size_t x, std::size_t y, std::size_t z) -> float {
-            std::size_t const index = z * width * height + y * width + x;
-            return (index < data.size()) ? data[index].s[3] : 0.0F;
-        };
-
-        float const v000 = sampleAt(x0, y0, z0);
-        float const v100 = sampleAt(x1, y0, z0);
-        float const v010 = sampleAt(x0, y1, z0);
-        float const v110 = sampleAt(x1, y1, z0);
-        float const v001 = sampleAt(x0, y0, z1);
-        float const v101 = sampleAt(x1, y0, z1);
-        float const v011 = sampleAt(x0, y1, z1);
-        float const v111 = sampleAt(x1, y1, z1);
-
-        // Trilinear interpolation
-        float const v00 = v000 * (1.0F - fx) + v100 * fx;
-        float const v01 = v001 * (1.0F - fx) + v101 * fx;
-        float const v10 = v010 * (1.0F - fx) + v110 * fx;
-        float const v11 = v011 * (1.0F - fx) + v111 * fx;
-
-        float const v0 = v00 * (1.0F - fy) + v10 * fy;
-        float const v1 = v01 * (1.0F - fy) + v11 * fy;
-
-        return v0 * (1.0F - fz) + v1 * fz;
+        return value;
     }
 
     Eigen::Vector3f GlobalMortonOctree::sampleGradient(Eigen::Vector3f const& position,
@@ -4609,31 +4586,37 @@ namespace gladius::compute
 
     float GlobalMortonOctree::sampleSdfAnalytical(Eigen::Vector3f const& position) const
     {
-        auto const primitives = m_core.getPrimitives();
-        if (!primitives || !m_program)
-        {
-            return sampleSdf(position);
-        }
-
         std::vector<Eigen::Vector3f> const positions{position};
-        auto const values = m_program->evaluateSdfBatch(positions, *primitives, m_config.isoValue);
+        std::vector<float> values;
+        auto const status = m_sampler.evaluateSdfBatch(
+            positions, m_config.isoValue, values, makeSamplingCallbacks());
+        if (!acceptSamplingStatus(status) || values.size() != 1U)
+        {
+            if (status == ManifoldSdfSamplingStatus::Completed)
+            {
+                m_samplingFailed = true;
+            }
+            return 0.0F;
+        }
         return values.front();
     }
 
     Eigen::Vector3f GlobalMortonOctree::sampleGradientAnalytical(Eigen::Vector3f const& position,
                                                                    float epsilon) const
     {
-        auto const primitives = m_core.getPrimitives();
-        if (!primitives || !m_program)
-        {
-            return sampleGradient(position, epsilon);
-        }
-
         std::vector<Eigen::Vector3f> const positions{position};
         std::vector<float> sdfValues;
         std::vector<Eigen::Vector3f> gradients;
-        m_program->evaluateSdfGradientBatch(
-            positions, *primitives, m_config.isoValue, epsilon, sdfValues, gradients);
+        auto const status = m_sampler.evaluateSdfGradientBatch(
+            positions, m_config.isoValue, epsilon, sdfValues, gradients, makeSamplingCallbacks());
+        if (!acceptSamplingStatus(status) || sdfValues.size() != 1U || gradients.size() != 1U)
+        {
+            if (status == ManifoldSdfSamplingStatus::Completed)
+            {
+                m_samplingFailed = true;
+            }
+            return Eigen::Vector3f::Zero();
+        }
         return gradients.front();
     }
 

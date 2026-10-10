@@ -3,8 +3,12 @@
 #include "compute/SdfEvaluation.h"
 #include "webgpu/WebGPUComputeContext.h"
 
+#include <array>
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace gladius::webgpu
 {
@@ -17,12 +21,26 @@ namespace gladius::webgpu
     class WebGPUSdfEvaluator final
     {
       public:
+        static constexpr std::size_t MAX_BATCH_POINTS = 1024u * 1024u;
+
+        using PositionBatchSource =
+          std::function<void(std::size_t, std::size_t, std::vector<std::array<float, 3>> &)>;
+        using ValueBatchSink = std::function<void(std::size_t, std::vector<float> &&)>;
+        using CancellationPredicate = std::function<bool()>;
+
         WebGPUSdfEvaluator();
         explicit WebGPUSdfEvaluator(std::shared_ptr<WebGPUComputeContext> context);
 
         [[nodiscard]] bool isAvailable() const noexcept;
         [[nodiscard]] std::string const & getErrorMessage() const noexcept;
         [[nodiscard]] compute::SdfEvaluationResult evaluate(compute::SdfEvaluationRequest request) const;
+
+        /// @brief Evaluate generated positions in bounded batches, retaining GPU buffers between batches.
+        [[nodiscard]] bool evaluateGenerated(compute::SdfEvaluationRequest const& request,
+                     std::size_t pointCount,
+                     PositionBatchSource positionSource,
+                     ValueBatchSink valueSink,
+                     CancellationPredicate shouldCancel = {}) const;
 
       private:
         std::shared_ptr<WebGPUComputeContext> m_context;

@@ -1,4 +1,5 @@
 #include "ManifoldDualContouringGpu.h"
+#include "OpenCLManifoldSdfSampler.h"
 #include "../Buffer.h"
 #include "../Primitives.h"
 #include "../ResourceContext.h"
@@ -818,6 +819,12 @@ namespace gladius::compute
         // Support both legacy enableSimplification flag and new simplificationMethod enum
         bool const shouldSimplify = (m_config.simplificationMethod != SimplificationMethod::None) ||
                                     m_config.enableSimplification;
+        bool const hasBoundedFastQem =
+            m_config.simplificationMethod == SimplificationMethod::QemFast &&
+            m_config.simplificationTerminationMode == SimplificationTerminationMode::ErrorBounded &&
+            std::isfinite(m_config.simplificationMaxGeometricError) &&
+            m_config.simplificationMaxGeometricError > 0.0F &&
+            m_config.simplificationMaxGeometricError < std::numeric_limits<float>::max();
 
         if (shouldSimplify && !m_mesh.indices.empty())
         {
@@ -852,10 +859,13 @@ namespace gladius::compute
 
         reportProgress(0.78F, "Projecting to surface");
 
-        // Project vertices to SDF surface AFTER simplification and quality improvement
-        // This snaps simplified vertices back onto the iso-surface, fixing off-surface artifacts
-        // Note: Skip projection for thickness field mode - the shell surface is not SDF=0
-        if (m_config.projectToSurface && !m_mesh.indices.empty() && !m_config.useThicknessField)
+        // Avoid a second displacement pass after error-bounded fast QEM: the QEM error threshold
+        // is not a strict geometric-distance bound, and projection can move thin-sheet vertices
+        // onto a neighboring iso-surface branch.
+        bool const shouldProjectToSurface =
+            m_config.projectToSurface && !m_config.useThicknessField &&
+            (!shouldSimplify || !hasBoundedFastQem);
+        if (shouldProjectToSurface && !m_mesh.indices.empty())
         {
             projectVerticesToSurface();
         }
@@ -2141,7 +2151,9 @@ namespace gladius::compute
             {
                 fastConfig.targetReductionPercent = *m_config.simplificationTargetReduction;
             }
+            dumpTopologyStats("before fast QEM simplification", m_mesh);
             fastQemSimplify(m_mesh.positions, m_mesh.indices, fastConfig);
+            dumpTopologyStats("after fast QEM simplification", m_mesh);
             break;
         }
 
@@ -4838,16 +4850,13 @@ namespace gladius::compute
 
         reportProgress(0.15F, "Building hierarchical octree");
 
-        // Create or reuse the hierarchical octree
-        if (!m_hierarchicalOctree)
-        {
-            m_hierarchicalOctree = std::make_unique<GlobalMortonOctree>(m_core);
-        }
+        OpenCLManifoldSdfSampler sampler(m_core, *m_program);
+        GlobalMortonOctree octree(sampler);
 
         // Wire cancellation callback to the octree
         if (m_cancellationCheckCallback)
         {
-            m_hierarchicalOctree->setCancellationCheckCallback(m_cancellationCheckCallback);
+            octree.setCancellationCheckCallback(m_cancellationCheckCallback);
         }
 
         // Configure the octree
@@ -4870,18 +4879,25 @@ namespace gladius::compute
         octreeConfig.isInnermostLayer = m_config.isInnermostLayer;
 
         // Build the octree
-        m_hierarchicalOctree->build(octreeConfig);
+        octree.build(octreeConfig);
 
         // Check for cancellation after octree build (including if cancelled during balancing)
-        if (isCancelled() || m_hierarchicalOctree->wasCancelled())
+        if (isCancelled() || octree.wasCancelled())
         {
+            return;
+        }
+
+        if (octree.hasSamplingError())
+        {
+            std::cout << "  Falling back to non-hierarchical MDC because SDF sampling failed." << std::endl;
+            generateMeshNonHierarchical();
             return;
         }
 
         reportProgress(0.35F, "Extracting mesh");
 
         // Extract mesh
-        m_hierarchicalOctree->extractMesh(m_mesh.positions, m_mesh.normals, m_mesh.indices);
+        octree.extractMesh(m_mesh.positions, m_mesh.normals, m_mesh.indices);
 
         // Check for cancellation after mesh extraction
         if (isCancelled())
@@ -4892,8 +4908,15 @@ namespace gladius::compute
             return;
         }
 
+        if (octree.hasSamplingError())
+        {
+            std::cout << "  Falling back to non-hierarchical MDC because SDF sampling failed." << std::endl;
+            generateMeshNonHierarchical();
+            return;
+        }
+
         // Report statistics
-        auto const & stats = m_hierarchicalOctree->getStats();
+        auto const & stats = octree.getStats();
         std::cout << "Hierarchical mesh generation complete:" << std::endl;
         std::cout << "  Vertices: " << m_mesh.positions.size() << std::endl;
         std::cout << "  Triangles: " << m_mesh.indices.size() / 3U << std::endl;

@@ -1,6 +1,6 @@
 
 set(BINARY ${CMAKE_PROJECT_NAME})
-file(GLOB_RECURSE SOURCES LIST_DIRECTORIES true *.h *.cpp)
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS LIST_DIRECTORIES true *.h *.cpp)
 if(NOT GLADIUS_ENABLE_OPENCL)
 	list(FILTER SOURCES EXCLUDE REGEX ".*/DualContouringStlExporter\\.cpp$")
 	list(FILTER SOURCES EXCLUDE REGEX ".*/HierarchicalDualContouringStlExporter\\.cpp$")

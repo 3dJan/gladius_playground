@@ -1,7 +1,8 @@
 #pragma once
 
-#include "DualContouringGpuSampling.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "kernel/types.h"
+#endif
 
 #include <Eigen/Core>
 
@@ -14,12 +15,13 @@
 
 namespace gladius
 {
+#if defined(GLADIUS_ENABLE_OPENCL)
     class ComputeCore;
-}
-
-namespace gladius::dual_contouring
-{
-    class GpuSamplingSession;
+    namespace dual_contouring
+    {
+        class GpuSamplingSession;
+    }
+#endif
 }
 
 namespace gladius::dual_contouring
@@ -78,43 +80,44 @@ namespace gladius::dual_contouring
     class OctreeBuilder
     {
       public:
+#if defined(GLADIUS_ENABLE_OPENCL)
         OctreeBuilder(gladius::ComputeCore & core,
                       BoundingBox const & targetBounds,
                       OctreeBuildConfig config);
-        
+#endif
         ~OctreeBuilder();
 
-                OctreeBuilder(AxisAlignedBoundingBox const & targetBounds,
-                                            OctreeBuildConfig config,
-                                            size_t width,
-                                            size_t height,
-                                            size_t depth,
-                                            std::vector<float> values);
+        OctreeBuilder(AxisAlignedBoundingBox const & targetBounds,
+                  OctreeBuildConfig config,
+                  size_t width,
+                  size_t height,
+                  size_t depth,
+                  std::vector<float> values);
 
         [[nodiscard]] std::unique_ptr<OctreeNode> build(OctreeMetrics & metrics);
 
-                [[nodiscard]] Eigen::Vector3f const & gridMin() const;
-                [[nodiscard]] Eigen::Vector3f const & gridMax() const;
-                [[nodiscard]] Eigen::Vector3f const & gridSpacing() const;
-                [[nodiscard]] size_t gridWidth() const;
-                [[nodiscard]] size_t gridHeight() const;
-                [[nodiscard]] size_t gridDepth() const;
-                [[nodiscard]] float gridSample(Eigen::Vector3f const & position) const;
-                [[nodiscard]] float gridValueAt(size_t x, size_t y, size_t z) const;
+            [[nodiscard]] Eigen::Vector3f const & gridMin() const;
+            [[nodiscard]] Eigen::Vector3f const & gridMax() const;
+            [[nodiscard]] Eigen::Vector3f const & gridSpacing() const;
+            [[nodiscard]] size_t gridWidth() const;
+            [[nodiscard]] size_t gridHeight() const;
+            [[nodiscard]] size_t gridDepth() const;
+            [[nodiscard]] float gridSample(Eigen::Vector3f const & position) const;
+            [[nodiscard]] float gridValueAt(size_t x, size_t y, size_t z) const;
 
       private:
         struct SdfGrid
         {
             Eigen::Vector3f min = Eigen::Vector3f::Zero();
             Eigen::Vector3f max = Eigen::Vector3f::Zero();
-                        Eigen::Vector3f spacing = Eigen::Vector3f::Ones();
+            Eigen::Vector3f spacing = Eigen::Vector3f::Ones();
             size_t width{1U};
             size_t height{1U};
             size_t depth{1U};
             std::vector<float> values{0.0F};
 
             [[nodiscard]] float sample(Eigen::Vector3f const & position) const;
-                        [[nodiscard]] float valueAt(size_t x, size_t y, size_t z) const;
+            [[nodiscard]] float valueAt(size_t x, size_t y, size_t z) const;
 
           private:
             [[nodiscard]] size_t index(size_t x, size_t y, size_t z) const;
@@ -124,12 +127,14 @@ namespace gladius::dual_contouring
                                               std::uint8_t depth,
                                               OctreeMetrics & metrics);
         void evaluateCorners(OctreeNode & node) const;
+        void gatherHermiteSamples(OctreeNode & node) const;
+        void computeVertex(OctreeNode & node) const;
+        [[nodiscard]] Eigen::Vector3f evaluateGradient(Eigen::Vector3f const & position) const;
+        [[nodiscard]] Eigen::Vector3f clampToGrid(Eigen::Vector3f const & position) const;
+    #if defined(GLADIUS_ENABLE_OPENCL)
         void evaluateCornersGpu(OctreeNode & node) const;
-                void gatherHermiteSamples(OctreeNode & node) const;
-                void gatherHermiteSamplesGpu(OctreeNode & node) const;
-                void computeVertex(OctreeNode & node) const;
-                [[nodiscard]] Eigen::Vector3f evaluateGradient(Eigen::Vector3f const & position) const;
-                [[nodiscard]] Eigen::Vector3f clampToGrid(Eigen::Vector3f const & position) const;
+        void gatherHermiteSamplesGpu(OctreeNode & node) const;
+    #endif
         [[nodiscard]] bool shouldSubdivide(OctreeNode const & node, std::uint8_t depth) const;
         
         // Balanced refinement support
@@ -140,7 +145,9 @@ namespace gladius::dual_contouring
         SdfGrid m_grid{};
         OctreeBuildConfig m_config{};
         AxisAlignedBoundingBox m_rootBounds{};
+#if defined(GLADIUS_ENABLE_OPENCL)
         ComputeCore * m_computeCore{nullptr}; ///< Optional ComputeCore for GPU sampling
-        std::unique_ptr<dual_contouring::GpuSamplingSession> m_gpuSession;
+        std::unique_ptr<GpuSamplingSession> m_gpuSession;
+#endif
     };
 }

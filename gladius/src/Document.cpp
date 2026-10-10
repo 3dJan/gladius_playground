@@ -22,8 +22,12 @@
 #include "compute/ApplicationComputeRuntime.h"
 #if defined(GLADIUS_ENABLE_WEBGPU)
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
+#include "compute/IBoundsService.h"
+#include "compute/RenderBackendSession.h"
 #include "webgpu/WebGPUContourGenerator.h"
-#include "webgpu/WebGPUSdfShaderComposer.h"
+#include "webgpu/WebGPUDualContouringExporter.h"
+#include "webgpu/WebGPUManifoldDualContouringExporter.h"
+#include "webgpu/WebGPUSdfEvaluationRequest.h"
 #include "webgpu/WebGPUThumbnailRenderer.h"
 #endif
 #include "exceptions.h"
@@ -1183,6 +1187,153 @@ namespace gladius
 #endif
     }
 
+#if defined(GLADIUS_ENABLE_WEBGPU)
+    void Document::exportWebGpuMesh(std::filesystem::path const & filename,
+                                    io::StlExportOptions const & options,
+                                    WebGpuMeshExportFormat format)
+    {
+        auto const formatName = format == WebGpuMeshExportFormat::Stl ? "STL" : "3MF";
+                if (options.method != io::SurfaceExtractionMethod::DualContouring &&
+                        options.method != io::SurfaceExtractionMethod::ManifoldDualContouring)
+        {
+            throw std::runtime_error(
+                            fmt::format("WebGPU {} export currently supports dual contouring only",
+                          formatName));
+        }
+
+        if (m_backendRuntime == nullptr ||
+            m_backendRuntime->getBackendKind() != compute::ComputeBackendKind::WebGPU)
+        {
+            throw std::runtime_error("Selected WebGPU runtime is unavailable for mesh export");
+        }
+        if (!m_backendRuntime->isAvailable())
+        {
+            throw std::runtime_error("Selected WebGPU runtime is unavailable: " +
+                                     m_backendRuntime->getErrorMessage());
+        }
+
+        auto * const renderSession = m_backendRuntime->getRenderBackendSession();
+        auto * const boundsService = m_backendRuntime->getBoundsService();
+        auto const context = m_backendRuntime->getWebGPUContext();
+        if (renderSession == nullptr || boundsService == nullptr || !context)
+        {
+            throw std::runtime_error("Selected WebGPU runtime does not expose mesh-export services");
+        }
+        if (!boundsService->isAvailable())
+        {
+            throw std::runtime_error(
+              "Selected WebGPU runtime cannot determine authoritative model bounds");
+        }
+
+        std::shared_ptr<const compute::RenderSceneSnapshot> exportSnapshot;
+        {
+            auto assemblyToken = waitForAssemblyToken();
+            auto const previousFlatAssembly = getFlatAssembly();
+            updateFlatAssembly();
+            auto const flatAssembly = getFlatAssembly();
+            if (!flatAssembly || flatAssembly == previousFlatAssembly ||
+                flatAssembly->assemblyModel() == nullptr)
+            {
+                throw std::runtime_error("WebGPU mesh export requires a current flattened model");
+            }
+
+            auto const generation =
+              m_webGpuExportSceneGeneration.fetch_add(1u, std::memory_order_relaxed);
+            auto snapshot = compute::AnalyticRenderSceneSnapshotFactory::create(
+              *flatAssembly->assemblyModel(), generation, getResourceManager());
+            if (!snapshot.isValid())
+            {
+                throw std::runtime_error(
+                  "WebGPU mesh export could not create a valid analytic scene snapshot");
+            }
+            exportSnapshot =
+              std::make_shared<const compute::RenderSceneSnapshot>(std::move(snapshot));
+        }
+
+        auto const previousSnapshot = renderSession->getSceneSnapshot();
+        boundsService->setSceneSnapshot(exportSnapshot);
+        try
+        {
+            compute::BoundsRequest boundsRequest;
+            boundsRequest.freshness = {.sceneGeneration = exportSnapshot->sceneGeneration,
+                                       .viewGeneration = 0u,
+                                       .parameterGeneration = exportSnapshot->sceneGeneration,
+                                       .resourceGeneration = exportSnapshot->sceneGeneration,
+                                       .evaluationGeneration = exportSnapshot->sceneGeneration};
+            boundsRequest.probeSettings.resolution = {256u, 256u, 256u};
+            boundsRequest.probeSettings.tileSize = {64u, 64u, 64u};
+            boundsRequest.probeSettings.allowMetadataFallback = false;
+
+            auto submission = boundsService->submit(boundsRequest);
+            if (!submission)
+            {
+                throw std::runtime_error("WebGPU bounds service rejected the export request");
+            }
+            submission->wait();
+            auto const bounds = submission->takeResult();
+            if (!bounds.has_value() || !bounds->isUsable())
+            {
+                auto const message = bounds.has_value() ? bounds->diagnostics.message
+                                                        : submission->getErrorMessage();
+                throw std::runtime_error(
+                  fmt::format("WebGPU {} export requires authoritative, unclipped model bounds{}{}",
+                              formatName,
+                              message.empty() ? "" : ": ",
+                              message));
+            }
+
+            if (format == WebGpuMeshExportFormat::Stl)
+            {
+                if (options.method == io::SurfaceExtractionMethod::ManifoldDualContouring)
+                {
+                    webgpu::WebGPUManifoldDualContouringExporter::exportStl(
+                        filename, context, *exportSnapshot, *bounds,
+                        options.manifoldDualContouring);
+                }
+                else
+                {
+                    webgpu::WebGPUDualContouringExporter::exportStl(filename,
+                                                                     context,
+                                                                     *exportSnapshot,
+                                                                     *bounds,
+                                                                     options.dualContouring);
+                }
+            }
+            else
+            {
+                if (options.method == io::SurfaceExtractionMethod::ManifoldDualContouring)
+                {
+                    webgpu::WebGPUManifoldDualContouringExporter::export3mf(
+                        filename, context, *exportSnapshot, *bounds,
+                        options.manifoldDualContouring);
+                }
+                else
+                {
+                    webgpu::WebGPUDualContouringExporter::export3mf(filename,
+                                                                     context,
+                                                                     *exportSnapshot,
+                                                                     *bounds,
+                                                                     options.dualContouring);
+                }
+            }
+        }
+        catch (...)
+        {
+            boundsService->setSceneSnapshot(previousSnapshot);
+            throw;
+        }
+        boundsService->setSceneSnapshot(previousSnapshot);
+
+        if (m_logger)
+        {
+            m_logger->addEvent({fmt::format("WebGPU dual contouring {} export completed: {}",
+                                            formatName,
+                                            filename.string()),
+                                events::Severity::Info});
+        }
+    }
+#endif
+
     void Document::exportAsStl(std::filesystem::path const & filename)
     {
         exportAsStl(filename, io::StlExportOptions{});
@@ -1191,6 +1342,15 @@ namespace gladius
     void Document::exportAsStl(std::filesystem::path const & filename,
                                io::StlExportOptions const & options)
     {
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        if (m_backendRuntime != nullptr &&
+            m_backendRuntime->getBackendKind() == compute::ComputeBackendKind::WebGPU)
+        {
+            exportWebGpuMesh(filename, options, WebGpuMeshExportFormat::Stl);
+            return;
+        }
+#endif
+
 #if !defined(GLADIUS_ENABLE_OPENCL)
         (void) filename;
         (void) options;
@@ -1275,6 +1435,23 @@ namespace gladius
             throw std::runtime_error("Unsupported surface extraction method");
         }
 #endif
+    }
+
+    void Document::exportAs3mf(std::filesystem::path const & filename,
+                               io::StlExportOptions const & options)
+    {
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        if (m_backendRuntime != nullptr &&
+            m_backendRuntime->getBackendKind() == compute::ComputeBackendKind::WebGPU)
+        {
+            exportWebGpuMesh(filename, options, WebGpuMeshExportFormat::ThreeMf);
+            return;
+        }
+#endif
+        (void) filename;
+        (void) options;
+        throw std::runtime_error(
+          "Geometry-only 3MF mesh export through Document is currently available only for WebGPU");
     }
 
     void Document::markFileAsChanged()
@@ -1770,29 +1947,7 @@ namespace gladius
             throw std::runtime_error("Failed to create analytic scene for contour generation");
         }
 
-        compute::SdfEvaluationRequest baseRequest;
-        baseRequest.isoValue = 0.0f;
-        baseRequest.parameterValues = std::move(snapshot.parameterValues);
-
-        bool const hasMeshes = !snapshot.meshResources.empty();
-        bool const hasBeams = !snapshot.beamLatticeResources.empty();
-        bool const hasImages = !snapshot.imageResources.empty();
-        baseRequest.shaderSource =
-          webgpu::WebGPUSdfShaderComposer::composeWithResourceSupport(
-            snapshot.analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
-
-        for (auto const & mesh : snapshot.meshResources)
-        {
-            baseRequest.meshPayloadTable.push_back(mesh.data);
-        }
-        for (auto const & beam : snapshot.beamLatticeResources)
-        {
-            baseRequest.beamPayloadTable.push_back(beam.data);
-        }
-        for (auto const & image : snapshot.imageResources)
-        {
-            baseRequest.imagePayloadTable.push_back(image.data);
-        }
+        auto baseRequest = webgpu::makeSdfEvaluationRequest(snapshot);
 
         webgpu::ContourGridRequest gridRequest;
         gridRequest.zHeight_mm = z;

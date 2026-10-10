@@ -6,6 +6,7 @@
 #include "ResourceContext.h"
 #include "SurfaceExtractionOptions.h"
 #include "compute/ManifoldDualContouringGpu.h"
+#include "io/IndexedTriangleMesh.h"
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/3mf/Lib3mfLoader.h"
 #include <gtest/gtest.h>
@@ -1459,9 +1460,10 @@ namespace gladius::compute::tests
         EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Single-pass mode should not produce non-manifold edges";
     }
 
-    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_ExportDialogDefaults_IsWatertight)
+    TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_ExportDialogBaseSettingsNoSimplification_IsWatertight)
     {
-        // This test intentionally mirrors the export dialog defaults for Manifold Dual Contouring:
+        // This test uses the export dialog's UltraFine, hierarchical, and projection settings,
+        // but disables simplification to isolate base mesher topology.
         // - UltraFine preset (initialDepth=7, maxDepth=9)
         // - hierarchical octree enabled (watertight-by-construction)
         // - chunking enabled by default, but inactive because minFeatureSize == 0
@@ -1504,8 +1506,38 @@ namespace gladius::compute::tests
         ASSERT_FALSE(mesh.indices.empty());
 
         MeshEdgeStats const stats = analyzeMeshEdges(mesh);
-        EXPECT_EQ(stats.openEdges, 0U) << "Export-dialog default config should not produce boundary/open edges";
-        EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Export-dialog default config should not produce non-manifold edges";
+        EXPECT_EQ(stats.openEdges, 0U) << "Export-dialog base config with simplification disabled should not produce boundary/open edges";
+        EXPECT_EQ(stats.nonManifoldEdges, 0U) << "Export-dialog base config with simplification disabled should not produce non-manifold edges";
+
+        auto const diagnostics =
+          gladius::io::computeIndexedTriangleMeshDiagnostics(mesh);
+        EXPECT_EQ(diagnostics.boundaryEdgeCount, stats.openEdges);
+        EXPECT_EQ(diagnostics.nonManifoldEdgeCount, stats.nonManifoldEdges);
+        EXPECT_EQ(diagnostics.trailingIndexCount, 0U);
+        EXPECT_EQ(diagnostics.invalidTriangleIndexCount, 0U);
+
+        std::cout << "MDC_PARITY_BASELINE fixture=SphereInACage"
+                  << " initialDepth=" << config.initialDepth
+                  << " maxDepth=" << config.maxDepth
+                  << " isoValue=" << config.isoValue
+                  << " hierarchical=" << config.enableHierarchicalOctree
+                  << " chunking=" << config.enableChunking
+                  << " minFeatureSize=" << config.minFeatureSize
+                  << " projectToSurface=" << config.projectToSurface
+                  << " simplification="
+                  << (config.simplificationMethod == SimplificationMethod::None ? "none" : "enabled")
+                  << " vertices=" << diagnostics.vertexCount
+                  << " triangles=" << diagnostics.triangleCount
+                  << " components=" << diagnostics.connectedComponentCount
+                  << " boundsMin=(" << diagnostics.boundsMin.x() << ','
+                  << diagnostics.boundsMin.y() << ',' << diagnostics.boundsMin.z() << ')'
+                  << " boundsMax=(" << diagnostics.boundsMax.x() << ','
+                  << diagnostics.boundsMax.y() << ',' << diagnostics.boundsMax.z() << ')'
+                  << " boundaryEdges=" << diagnostics.boundaryEdgeCount
+                  << " nonManifoldEdges=" << diagnostics.nonManifoldEdgeCount
+                  << " windingErrors=" << diagnostics.inconsistentWindingEdgeCount
+                  << " degenerates=" << diagnostics.degenerateTriangleCount
+                  << " signedVolume=" << diagnostics.signedVolume << std::endl;
     }
 
     TEST_F(ManifoldDualContouringGpu_Test, GenerateMesh_WithSphereInACage_Export3mf_Readback_IsWatertight)

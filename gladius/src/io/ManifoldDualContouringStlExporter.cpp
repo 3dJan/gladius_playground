@@ -8,6 +8,7 @@
 #include "ComputeContext.h"
 #include "ComputeCore.h"
 #include "../compute/ManifoldDualContouringGpu.h"
+#include "../compute/OpenCLManifoldSdfSampler.h"
 #include "../types.h"
 
 #include <Eigen/Geometry>
@@ -21,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <queue>
@@ -352,15 +354,85 @@ namespace gladius::io
         // Repair winding inconsistencies on the indexed mesh before converting to triangle soup.
         // This prevents slicers from interpreting an otherwise watertight mesh as broken.
         std::vector<std::uint32_t> repairedIndices = indices;
-        WindingRepairStats const repairStats = repairTriangleWindingConsistency(positions, repairedIndices);
+        std::vector<std::uint32_t> triangleComponents;
+        WindingRepairStats const repairStats =
+            repairTriangleWindingConsistency(positions, repairedIndices, &triangleComponents);
+        std::size_t sdfOrientedComponents = 0U;
+        auto const orientationSamples = makeTriangleOrientationSamples(
+            positions, repairedIndices, triangleComponents, 128U);
+        if (!orientationSamples.empty())
+        {
+            auto const program = generator.getProgramManager().getManifoldDualContouringProgram();
+            if (program == nullptr)
+            {
+                throw std::runtime_error("OpenCL manifold program unavailable for component orientation");
+            }
+
+            std::vector<Eigen::Vector3f> samplePositions;
+            samplePositions.reserve(orientationSamples.size());
+            for (auto const& sample : orientationSamples)
+            {
+                samplePositions.push_back(sample.position);
+            }
+            std::vector<float> sdfValues;
+            std::vector<Eigen::Vector3f> gradients;
+            compute::ManifoldSdfSamplingCallbacks callbacks;
+            callbacks.shouldCancel = [this]() { return isCancellationRequested(); };
+            compute::OpenCLManifoldSdfSampler sampler(generator, *program);
+
+            Eigen::Vector3f min = positions.front();
+            Eigen::Vector3f max = positions.front();
+            for (auto const& position : positions)
+            {
+                min = min.cwiseMin(position);
+                max = max.cwiseMax(position);
+            }
+            float const maxDepthScale = std::exp2(static_cast<float>(m_options.maxDepth));
+            float const cellWidth = (max - min).maxCoeff() / maxDepthScale;
+            float const sdfDistanceTolerance = std::max(1.0e-4F, cellWidth * 0.5F);
+            float const gradientEpsilon = std::max(1.0e-5F, cellWidth * 0.01F);
+            auto const status = sampler.evaluateSdfGradientBatch(
+                samplePositions,
+                m_options.isoValue,
+                gradientEpsilon,
+                sdfValues,
+                gradients,
+                callbacks);
+            if (status != compute::ManifoldSdfSamplingStatus::Completed ||
+                sdfValues.size() != orientationSamples.size() ||
+                gradients.size() != orientationSamples.size())
+            {
+                throw std::runtime_error("OpenCL failed to sample SDF gradients for component orientation");
+            }
+
+            std::vector<double> componentVotes(repairStats.components, 0.0);
+            for (std::size_t sampleIndex = 0U; sampleIndex < orientationSamples.size(); ++sampleIndex)
+            {
+                float const sdf = sdfValues[sampleIndex];
+                Eigen::Vector3f const& gradient = gradients[sampleIndex];
+                float const gradientLength = gradient.norm();
+                auto const& sample = orientationSamples[sampleIndex];
+                if (!std::isfinite(sdf) || std::abs(sdf) > sdfDistanceTolerance ||
+                    !std::isfinite(gradientLength) || gradientLength <= 1.0e-10F ||
+                    sample.component >= componentVotes.size())
+                {
+                    continue;
+                }
+                componentVotes[sample.component] +=
+                    static_cast<double>(sample.normal.dot(gradient / gradientLength));
+            }
+            sdfOrientedComponents = orientTriangleComponentsByVotes(
+                repairedIndices, triangleComponents, componentVotes);
+        }
         if (m_logger)
         {
             m_logger->addEvent({fmt::format(
-                                  "Winding repair: triangles={}, components={}, flippedTriangles={}, globalFlip={}, inconsistency={} (constraints={})",
+                                  "Winding repair: triangles={}, components={}, flippedTriangles={}, globalFlip={}, sdfComponentFlips={}, inconsistency={} (constraints={})",
                                   repairStats.triangleCount,
                                   repairStats.components,
                                   repairStats.flippedTriangles,
                                   repairStats.flippedGlobalOrientation ? 1 : 0,
+                                  sdfOrientedComponents,
                                   repairStats.hadInconsistency ? 1 : 0,
                                   repairStats.adjacencyConstraints),
                                 events::Severity::Info});
