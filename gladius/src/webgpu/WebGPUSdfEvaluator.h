@@ -26,6 +26,8 @@ namespace gladius::webgpu
         using PositionBatchSource =
           std::function<void(std::size_t, std::size_t, std::vector<std::array<float, 3>> &)>;
         using ValueBatchSink = std::function<void(std::size_t, std::vector<float> &&)>;
+        using ColorBatchSink =
+          std::function<void(std::size_t, std::vector<std::array<float, 3>> &&)>;
         using CancellationPredicate = std::function<bool()>;
 
         WebGPUSdfEvaluator();
@@ -42,7 +44,25 @@ namespace gladius::webgpu
                      ValueBatchSink valueSink,
                      CancellationPredicate shouldCancel = {}) const;
 
+        /// @brief Evaluate generated positions and return the model RGB output in bounded batches.
+        [[nodiscard]] bool evaluateColorsGenerated(
+          compute::SdfEvaluationRequest const & request,
+          std::size_t pointCount,
+          PositionBatchSource positionSource,
+          ColorBatchSink colorSink,
+          CancellationPredicate shouldCancel = {}) const;
+
       private:
+        using RawValueBatchSink = std::function<void(std::size_t, std::vector<float> &&)>;
+
+        [[nodiscard]] bool evaluateGeneratedImpl(
+          compute::SdfEvaluationRequest const & request,
+          std::size_t pointCount,
+          std::size_t outputComponents,
+          PositionBatchSource positionSource,
+          RawValueBatchSink valueSink,
+          CancellationPredicate shouldCancel) const;
+
         std::shared_ptr<WebGPUComputeContext> m_context;
     };
 }

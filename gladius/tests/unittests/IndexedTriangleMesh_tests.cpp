@@ -8,9 +8,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -354,6 +356,32 @@ namespace gladius::io::tests
         ASSERT_NO_THROW(writeIndexedMeshToBinaryStl(filePath, mesh));
         ASSERT_TRUE(std::filesystem::exists(filePath));
         EXPECT_EQ(std::filesystem::file_size(filePath), 84U + 50U);
+
+        std::error_code error;
+        std::filesystem::remove(filePath, error);
+    }
+
+    TEST(IndexedTriangleMeshWriter, WriteBinaryStl_InvalidMesh_PreservesExistingDestination)
+    {
+        auto mesh = makeSingleTriangle();
+        mesh.indices[2] = 3U;
+        auto const uniqueSuffix = std::chrono::steady_clock::now().time_since_epoch().count();
+        auto const filePath = std::filesystem::temp_directory_path() /
+                              ("gladius_indexed_mesh_existing_" + std::to_string(uniqueSuffix) +
+                               ".stl");
+        constexpr std::string_view existingContent{"previous export"};
+        {
+            std::ofstream output(filePath, std::ios::binary);
+            ASSERT_TRUE(output);
+            output << existingContent;
+        }
+
+        EXPECT_THROW(writeIndexedMeshToBinaryStl(filePath, mesh), std::invalid_argument);
+        std::ifstream input(filePath, std::ios::binary);
+        ASSERT_TRUE(input);
+        std::string const actualContent{std::istreambuf_iterator<char>{input},
+                                        std::istreambuf_iterator<char>{}};
+        EXPECT_EQ(actualContent, existingContent);
 
         std::error_code error;
         std::filesystem::remove(filePath, error);

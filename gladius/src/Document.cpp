@@ -1,6 +1,8 @@
 #include "Document.h"
 
 #include "io/3mf/Lib3mfLoader.h"
+#include "io/CancellationToken.h"
+#include "io/MeshExportJob.h"
 
 #include "BackupManager.h"
 #include "ContourExtractor.h"
@@ -17,16 +19,27 @@
 #include "io/ManifoldDualContouringStlExporter.h"
 #if defined(GLADIUS_ENABLE_OPENVDB)
 #include "io/MeshExporter.h"
+#include "io/MeshExporter3mf.h"
 #endif
+#include "io/ShellExporter.h"
 #endif
 #include "compute/ApplicationComputeRuntime.h"
 #if defined(GLADIUS_ENABLE_WEBGPU)
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
 #include "compute/IBoundsService.h"
 #include "compute/RenderBackendSession.h"
+#include "io/3mf/ColorCompatibilityPlanner.h"
+#include "io/3mf/ColorQuantizer.h"
+#include "io/3mf/ColorRegionizer.h"
+#include "io/3mf/FaceColorSampler.h"
+#include "io/3mf/IndexedTriangleMesh3mfWriter.h"
+#include "io/3mf/MmuSegmentationWriter.h"
+#include "io/IndexedTriangleMeshWriter.h"
 #include "webgpu/WebGPUContourGenerator.h"
 #include "webgpu/WebGPUDualContouringExporter.h"
+#include "webgpu/WebGPULayeredMarchingCubesExporter.h"
 #include "webgpu/WebGPUManifoldDualContouringExporter.h"
+#include "webgpu/WebGPUMeshColorSampler.h"
 #include "webgpu/WebGPUSdfEvaluationRequest.h"
 #include "webgpu/WebGPUThumbnailRenderer.h"
 #endif
@@ -57,6 +70,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
+#include <thread>
 #include <tracy/Tracy.hpp>
 #include <utility>
 
@@ -1188,19 +1202,26 @@ namespace gladius
     }
 
 #if defined(GLADIUS_ENABLE_WEBGPU)
-    void Document::exportWebGpuMesh(std::filesystem::path const & filename,
-                                    io::StlExportOptions const & options,
-                                    WebGpuMeshExportFormat format)
+    void Document::exportWebGpuMesh(io::MeshExportRequest const & request,
+                                    io::MeshExportCancellationPredicate shouldCancel,
+                                    io::MeshExportProgressCallback reportProgress)
     {
-        auto const formatName = format == WebGpuMeshExportFormat::Stl ? "STL" : "3MF";
-                if (options.method != io::SurfaceExtractionMethod::DualContouring &&
-                        options.method != io::SurfaceExtractionMethod::ManifoldDualContouring)
+        auto const isStl = request.format == io::MeshExportFormat::Stl;
+        auto const formatName = isStl ? "STL" : "3MF";
+        auto const report = [&reportProgress](double const progress, std::string_view const phase)
         {
-            throw std::runtime_error(
-                            fmt::format("WebGPU {} export currently supports dual contouring only",
-                          formatName));
-        }
-
+            if (reportProgress)
+            {
+                reportProgress(progress, phase);
+            }
+        };
+        auto const throwIfCancelled = [&shouldCancel]() {
+            if (shouldCancel && shouldCancel())
+            {
+                throw io::MeshExportCancelled{};
+            }
+        };
+        throwIfCancelled();
         if (m_backendRuntime == nullptr ||
             m_backendRuntime->getBackendKind() != compute::ComputeBackendKind::WebGPU)
         {
@@ -1224,12 +1245,19 @@ namespace gladius
             throw std::runtime_error(
               "Selected WebGPU runtime cannot determine authoritative model bounds");
         }
+        if (request.shell.has_value())
+        {
+            throw std::runtime_error("WebGPU shell export is not implemented yet");
+        }
 
         std::shared_ptr<const compute::RenderSceneSnapshot> exportSnapshot;
+        bool hasVolumetricColor = false;
         {
             auto assemblyToken = waitForAssemblyToken();
+            throwIfCancelled();
             auto const previousFlatAssembly = getFlatAssembly();
             updateFlatAssembly();
+            throwIfCancelled();
             auto const flatAssembly = getFlatAssembly();
             if (!flatAssembly || flatAssembly == previousFlatAssembly ||
                 flatAssembly->assemblyModel() == nullptr)
@@ -1239,8 +1267,11 @@ namespace gladius
 
             auto const generation =
               m_webGpuExportSceneGeneration.fetch_add(1u, std::memory_order_relaxed);
+                        hasVolumetricColor = io::FaceColorSampler::hasVolumetricColor(
+                            *flatAssembly->assemblyModel());
             auto snapshot = compute::AnalyticRenderSceneSnapshotFactory::create(
               *flatAssembly->assemblyModel(), generation, getResourceManager());
+                        throwIfCancelled();
             if (!snapshot.isValid())
             {
                 throw std::runtime_error(
@@ -1254,6 +1285,7 @@ namespace gladius
         boundsService->setSceneSnapshot(exportSnapshot);
         try
         {
+            report(0.05, "Calculating model bounds");
             compute::BoundsRequest boundsRequest;
             boundsRequest.freshness = {.sceneGeneration = exportSnapshot->sceneGeneration,
                                        .viewGeneration = 0u,
@@ -1269,7 +1301,20 @@ namespace gladius
             {
                 throw std::runtime_error("WebGPU bounds service rejected the export request");
             }
+            bool cancellationRequested = false;
+            while (submission->getStatus() == compute::BoundsSubmissionStatus::Pending)
+            {
+                submission->progress();
+                if (!cancellationRequested && shouldCancel && shouldCancel())
+                {
+                    submission->requestCancellation();
+                    cancellationRequested = true;
+                }
+                report(0.15, "Calculating model bounds");
+                std::this_thread::yield();
+            }
             submission->wait();
+            throwIfCancelled();
             auto const bounds = submission->takeResult();
             if (!bounds.has_value() || !bounds->isUsable())
             {
@@ -1282,40 +1327,142 @@ namespace gladius
                               message));
             }
 
-            if (format == WebGpuMeshExportFormat::Stl)
+            throwIfCancelled();
+            report(0.3, "Generating mesh");
+            io::IndexedTriangleMesh mesh;
+            switch (request.extraction.method)
             {
-                if (options.method == io::SurfaceExtractionMethod::ManifoldDualContouring)
-                {
-                    webgpu::WebGPUManifoldDualContouringExporter::exportStl(
-                        filename, context, *exportSnapshot, *bounds,
-                        options.manifoldDualContouring);
-                }
-                else
-                {
-                    webgpu::WebGPUDualContouringExporter::exportStl(filename,
-                                                                     context,
-                                                                     *exportSnapshot,
-                                                                     *bounds,
-                                                                     options.dualContouring);
-                }
+            case io::SurfaceExtractionMethod::DualContouring:
+                mesh = webgpu::WebGPUDualContouringExporter::generateMesh(
+                  context, *exportSnapshot, *bounds, request.extraction.dualContouring, shouldCancel);
+                break;
+            case io::SurfaceExtractionMethod::ManifoldDualContouring:
+                mesh = webgpu::WebGPUManifoldDualContouringExporter::generateMesh(
+                  context,
+                  *exportSnapshot,
+                  *bounds,
+                  request.extraction.manifoldDualContouring,
+                  shouldCancel);
+                break;
+            case io::SurfaceExtractionMethod::LayeredMarchingCubes:
+                                mesh = webgpu::WebGPULayeredMarchingCubesExporter::generateMesh(
+                                    context,
+                                    *exportSnapshot,
+                                    *bounds,
+                                    request.extraction.marchingCubesQualityLevel,
+                                    shouldCancel,
+                                    report);
+                                break;
+            default:
+                throw std::runtime_error("Unsupported WebGPU surface extraction method");
+            }
+
+            throwIfCancelled();
+            if (isStl)
+            {
+                report(0.9, "Writing STL");
+                io::writeIndexedMeshToBinaryStl(request.filename, mesh);
             }
             else
             {
-                if (options.method == io::SurfaceExtractionMethod::ManifoldDualContouring)
+                io::IndexedTriangleMesh3mfWriter writer{getSharedLogger()};
+                auto const meshName = request.filename.stem().string();
+                if (!request.color.exportWithColors || !hasVolumetricColor)
                 {
-                    webgpu::WebGPUManifoldDualContouringExporter::export3mf(
-                        filename, context, *exportSnapshot, *bounds,
-                        options.manifoldDualContouring);
+                    if (request.color.exportWithColors && !hasVolumetricColor && m_logger)
+                    {
+                        m_logger->addEvent(
+                          {"Model has no volumetric color output; exporting geometry only",
+                           events::Severity::Warning});
+                    }
+                    report(0.9, "Writing geometry-only 3MF");
+                    writer.exportMesh(request.filename, mesh, meshName);
                 }
                 else
                 {
-                    webgpu::WebGPUDualContouringExporter::export3mf(filename,
-                                                                     context,
-                                                                     *exportSnapshot,
-                                                                     *bounds,
-                                                                     options.dualContouring);
+                    report(0.65, "Sampling model colors");
+                    auto const wantsMmuSamples =
+                      request.color.targetApplication != io::TargetApplication::None;
+                    std::vector<io::FaceColors> sampleSets;
+                    io::FaceColors faceColors;
+                    if (wantsMmuSamples)
+                    {
+                        sampleSets = webgpu::WebGPUMeshColorSampler::sampleFaceColorsMultipoint(
+                          context,
+                          *exportSnapshot,
+                          mesh,
+                          request.color.convertToSrgb,
+                          shouldCancel);
+                        faceColors = sampleSets.front();
+                    }
+                    else
+                    {
+                        faceColors = webgpu::WebGPUMeshColorSampler::sampleFaceColors(
+                          context,
+                          *exportSnapshot,
+                          mesh,
+                          request.color.convertToSrgb,
+                          shouldCancel);
+                    }
+
+                    auto const uniqueColorCount =
+                      io::ColorQuantizer::countUniqueOpaqueColors(faceColors);
+                    bool const hasTransparency = io::ColorQuantizer::hasTransparency(faceColors);
+                    auto const decision =
+                      io::ColorCompatibilityPlanner::decide(request.color,
+                                                            uniqueColorCount,
+                                                            hasTransparency);
+                    if (m_logger)
+                    {
+                        for (auto const & warning : decision.warnings)
+                        {
+                            m_logger->addEvent({warning, events::Severity::Warning});
+                        }
+                    }
+
+                    if (decision.finalRepresentation == io::ExportRepresentation::StandardTriangleColor ||
+                        decision.finalRepresentation == io::ExportRepresentation::StandardVertexColor)
+                    {
+                        writer.exportMeshWithColors(request.filename, mesh, meshName, faceColors);
+                    }
+                    else
+                    {
+                        auto const mmu = decision.finalRepresentation ==
+                                         io::ExportRepresentation::ProprietaryMmuSegmentation;
+                        std::uint32_t const defaultLimit = static_cast<std::uint32_t>(
+                          std::min(uniqueColorCount,
+                                   mmu ? static_cast<std::size_t>(io::MmuSegmentationWriter::MAX_EXTRUDERS)
+                                       : std::size_t{256u}));
+                        auto const maxPalette = request.color.maxPaletteSize.value_or(defaultLimit);
+                        auto palette = mmu && !sampleSets.empty()
+                                         ? io::ColorQuantizer::quantizeOversampled(sampleSets, maxPalette)
+                                         : io::ColorQuantizer::quantize(faceColors, maxPalette);
+                        if (mmu)
+                        {
+                            writer.exportMeshWithMmuSegmentation(
+                              request.filename, mesh, meshName, palette);
+                        }
+                        else
+                        {
+                            auto regionKind = io::PrintableRegionKind::Component;
+                            if (decision.finalRepresentation ==
+                                io::ExportRepresentation::StandardDiscreteObjects)
+                            {
+                                regionKind = io::PrintableRegionKind::Object;
+                            }
+                            else if (decision.finalRepresentation ==
+                                     io::ExportRepresentation::StandardBuildItems)
+                            {
+                                regionKind = io::PrintableRegionKind::BuildItem;
+                            }
+                            auto const regions = io::ColorRegionizer::regionize(palette, regionKind);
+                            writer.exportMeshWithRegions(
+                              request.filename, mesh, meshName, palette, regions);
+                        }
+                    }
                 }
             }
+            report(1.0, "Export complete");
         }
         catch (...)
         {
@@ -1326,9 +1473,9 @@ namespace gladius
 
         if (m_logger)
         {
-            m_logger->addEvent({fmt::format("WebGPU dual contouring {} export completed: {}",
+            m_logger->addEvent({fmt::format("WebGPU {} mesh export completed: {}",
                                             formatName,
-                                            filename.string()),
+                                            request.filename.string()),
                                 events::Severity::Info});
         }
     }
@@ -1340,13 +1487,19 @@ namespace gladius
     }
 
     void Document::exportAsStl(std::filesystem::path const & filename,
-                               io::StlExportOptions const & options)
+                               io::StlExportOptions const & options,
+                               io::MeshExportCancellationPredicate shouldCancel)
     {
 #if defined(GLADIUS_ENABLE_WEBGPU)
         if (m_backendRuntime != nullptr &&
             m_backendRuntime->getBackendKind() == compute::ComputeBackendKind::WebGPU)
         {
-            exportWebGpuMesh(filename, options, WebGpuMeshExportFormat::Stl);
+            io::MeshExportRequest request;
+            request.filename = filename;
+            request.format = io::MeshExportFormat::Stl;
+            request.extraction = options;
+            request.color.exportWithColors = false;
+            exportWebGpuMesh(request, std::move(shouldCancel));
             return;
         }
 #endif
@@ -1354,9 +1507,25 @@ namespace gladius
 #if !defined(GLADIUS_ENABLE_OPENCL)
         (void) filename;
         (void) options;
+        (void) shouldCancel;
         throw std::runtime_error("STL export is unavailable for the selected backend");
 #else
+        auto throwIfCancelled = [&shouldCancel]() {
+            if (shouldCancel && shouldCancel())
+            {
+                throw io::MeshExportCancelled{};
+            }
+        };
+        io::CancellationToken cancellationToken;
+        auto updateCancellation = [&]() {
+            if (shouldCancel && shouldCancel())
+            {
+                cancellationToken.requestCancellation();
+            }
+        };
+        throwIfCancelled();
         refreshModelBlocking();
+        throwIfCancelled();
 
         auto logger = getSharedLogger();
 
@@ -1374,12 +1543,23 @@ namespace gladius
             exporter.beginExport(filename, *m_core);
             while (exporter.advanceExport(*m_core))
             {
+                updateCancellation();
+                if (cancellationToken.isCancelled())
+                {
+                    break;
+                }
                 if (logger)
                 {
                     logger->addEvent(
                       {fmt::format("Processing layer with z = {}", m_core->getSliceHeight()),
                        events::Severity::Info});
                 }
+            }
+            updateCancellation();
+            if (cancellationToken.isCancelled())
+            {
+                exporter.finalize();
+                throw io::MeshExportCancelled{};
             }
             exporter.finalizeExportSTL(*m_core);
 #endif
@@ -1390,11 +1570,22 @@ namespace gladius
             io::DualContouringOptions dualOptions = options.dualContouring;
             io::DualContouringStlExporter exporter(logger);
             exporter.setOptions(std::move(dualOptions));
+            exporter.setCancellationToken(&cancellationToken);
             exporter.beginExport(filename, *m_core);
-            while (exporter.advanceExport(*m_core)) {}
+            while (exporter.advanceExport(*m_core))
+            {
+                updateCancellation();
+            }
+            updateCancellation();
             bool const failed = exporter.hasError();
+            bool const completed = exporter.getProgress() >= 1.0 && !failed;
+            bool const wasCancelled = cancellationToken.isCancelled() && !completed && !failed;
             auto const errorText = exporter.errorMessage();
             exporter.finalize();
+            if (wasCancelled)
+            {
+                throw io::MeshExportCancelled{};
+            }
             if (failed)
             {
                 throw std::runtime_error(errorText.empty() ? "Dual contouring STL export failed"
@@ -1413,11 +1604,22 @@ namespace gladius
             io::ManifoldDualContouringOptions manifoldOptions = options.manifoldDualContouring;
             io::ManifoldDualContouringStlExporter exporter(logger);
             exporter.setOptions(std::move(manifoldOptions));
+            exporter.setCancellationToken(&cancellationToken);
             exporter.beginExport(filename, *m_core);
-            while (exporter.advanceExport(*m_core)) {}
+            while (exporter.advanceExport(*m_core))
+            {
+                updateCancellation();
+            }
+            updateCancellation();
             bool const failed = exporter.hasError();
+            bool const completed = exporter.getProgress() >= 1.0 && !failed;
+            bool const wasCancelled = cancellationToken.isCancelled() && !completed && !failed;
             auto const errorText = exporter.errorMessage();
             exporter.finalize();
+            if (wasCancelled)
+            {
+                throw io::MeshExportCancelled{};
+            }
             if (failed)
             {
                 throw std::runtime_error(
@@ -1438,20 +1640,259 @@ namespace gladius
     }
 
     void Document::exportAs3mf(std::filesystem::path const & filename,
-                               io::StlExportOptions const & options)
+                               io::StlExportOptions const & options,
+                               io::MeshExportCancellationPredicate shouldCancel)
     {
 #if defined(GLADIUS_ENABLE_WEBGPU)
         if (m_backendRuntime != nullptr &&
             m_backendRuntime->getBackendKind() == compute::ComputeBackendKind::WebGPU)
         {
-            exportWebGpuMesh(filename, options, WebGpuMeshExportFormat::ThreeMf);
+            io::MeshExportRequest request;
+            request.filename = filename;
+            request.format = io::MeshExportFormat::ThreeMf;
+            request.extraction = options;
+            request.color.exportWithColors = false;
+            exportWebGpuMesh(request, std::move(shouldCancel));
             return;
         }
 #endif
         (void) filename;
         (void) options;
+        (void) shouldCancel;
         throw std::runtime_error(
           "Geometry-only 3MF mesh export through Document is currently available only for WebGPU");
+    }
+
+    void Document::exportMesh(io::MeshExportRequest const & request,
+                              io::MeshExportCancellationPredicate shouldCancel,
+                              io::MeshExportProgressCallback reportProgress)
+    {
+        if (request.filename.empty())
+        {
+            throw std::invalid_argument("Mesh export requires an output filename");
+        }
+        if (request.shell.has_value() && request.format != io::MeshExportFormat::ThreeMf)
+        {
+            throw std::invalid_argument("Shell export requires the 3MF output format");
+        }
+
+        auto report = [&reportProgress](double progress, std::string_view phase) {
+            if (reportProgress)
+            {
+                reportProgress(progress, phase);
+            }
+        };
+        auto throwIfCancelled = [&shouldCancel]() {
+            if (shouldCancel && shouldCancel())
+            {
+                throw io::MeshExportCancelled{};
+            }
+        };
+        throwIfCancelled();
+        report(0.0, "Preparing mesh export");
+
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        if (m_backendRuntime != nullptr &&
+            m_backendRuntime->getBackendKind() == compute::ComputeBackendKind::WebGPU)
+        {
+            exportWebGpuMesh(request, std::move(shouldCancel), std::move(reportProgress));
+            return;
+        }
+#endif
+
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        throw std::runtime_error("Mesh export is unavailable for the selected backend");
+#else
+        if (m_core == nullptr)
+        {
+            throw std::runtime_error("OpenCL mesh export requires an active compute core");
+        }
+
+        auto stagingFilename = request.filename;
+        stagingFilename.replace_filename(
+          request.filename.stem().string() + ".tmp." +
+          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+          request.filename.extension().string());
+        struct StagingFileCleanup
+        {
+            std::filesystem::path filename;
+
+            ~StagingFileCleanup()
+            {
+                if (!filename.empty())
+                {
+                    std::error_code error;
+                    std::filesystem::remove(filename, error);
+                }
+            }
+        } stagingCleanup{stagingFilename};
+        auto publishOutput = [&]()
+        {
+            std::error_code error;
+            std::filesystem::rename(stagingFilename, request.filename, error);
+            if (error)
+            {
+                throw std::runtime_error("Could not finalize mesh export: " + error.message());
+            }
+            stagingCleanup.filename.clear();
+        };
+        refreshModelBlocking();
+        throwIfCancelled();
+        io::CancellationToken cancellationToken;
+        auto requestCancellation = [&]() {
+            if (shouldCancel && shouldCancel())
+            {
+                cancellationToken.requestCancellation();
+            }
+        };
+        auto runExporter = [&](io::IExporter & exporter, std::string_view phase) {
+            exporter.setCancellationToken(&cancellationToken);
+            exporter.beginExport(stagingFilename, *m_core);
+            bool hasMoreWork = true;
+            while (hasMoreWork)
+            {
+                requestCancellation();
+                hasMoreWork = exporter.advanceExport(*m_core);
+                report(exporter.getProgress(), phase);
+                if (hasMoreWork && cancellationToken.isCancelled())
+                {
+                    break;
+                }
+            }
+            return cancellationToken.isCancelled() && exporter.getProgress() < 1.0;
+        };
+        auto const isThreeMf = request.format == io::MeshExportFormat::ThreeMf;
+
+        if (request.shell.has_value())
+        {
+            io::ShellExporter exporter(getSharedLogger());
+            exporter.setConfig(*request.shell);
+            exporter.setDocument(this);
+            exporter.setCancellationToken(&cancellationToken);
+            bool const cancelled = runExporter(exporter, "Generating colored shells");
+            bool const failed = exporter.hasError();
+            auto const errorMessage = exporter.errorMessage();
+            auto const statusMessage = exporter.getStatusMessage();
+            exporter.finalize();
+            if (cancelled)
+            {
+                throw io::MeshExportCancelled{};
+            }
+            if (failed)
+            {
+                throw std::runtime_error(errorMessage.empty() ? statusMessage : errorMessage);
+            }
+            throwIfCancelled();
+            publishOutput();
+            report(1.0, "Export complete");
+            return;
+        }
+
+        switch (request.extraction.method)
+        {
+        case io::SurfaceExtractionMethod::LayeredMarchingCubes:
+        {
+#if defined(GLADIUS_ENABLE_OPENVDB)
+            if (isThreeMf)
+            {
+                vdb::MeshExporter3mf exporter(getSharedLogger());
+                exporter.setQualityLevel(request.extraction.marchingCubesQualityLevel);
+                exporter.setExportWithColors(request.color.exportWithColors);
+                exporter.setConvertToSrgb(request.color.convertToSrgb);
+                exporter.setColorMode(request.color.preferredColorMode);
+                exporter.setQuantizationMode(request.color.quantizationMode);
+                exporter.setMaxPaletteSize(request.color.maxPaletteSize);
+                exporter.setTargetApplication(request.color.targetApplication);
+                bool const cancelled = runExporter(exporter, "Sampling layered mesh");
+                if (cancelled)
+                {
+                    exporter.finalize();
+                    throw io::MeshExportCancelled{};
+                }
+                report(0.95, "Writing 3MF and color data");
+                exporter.finalize();
+            }
+            else
+            {
+                vdb::MeshExporter exporter;
+                exporter.setQualityLevel(request.extraction.marchingCubesQualityLevel);
+                bool const cancelled = runExporter(exporter, "Sampling layered mesh");
+                if (cancelled)
+                {
+                    exporter.finalize();
+                    throw io::MeshExportCancelled{};
+                }
+                report(0.95, "Building STL mesh");
+                exporter.finalizeExportSTL(*m_core);
+            }
+#else
+            throw std::runtime_error(
+              "Layered marching cubes export requires a build with GLADIUS_ENABLE_OPENVDB");
+#endif
+            break;
+        }
+        case io::SurfaceExtractionMethod::DualContouring:
+        {
+            if (isThreeMf)
+            {
+                throw std::runtime_error("Dual contouring 3MF export is not supported");
+            }
+            io::DualContouringStlExporter exporter(getSharedLogger());
+            exporter.setOptions(request.extraction.dualContouring);
+            bool const cancelled = runExporter(exporter, "Generating dual-contouring mesh");
+            bool const failed = exporter.hasError();
+            auto const errorMessage = exporter.errorMessage();
+            exporter.finalize();
+            if (cancelled)
+            {
+                throw io::MeshExportCancelled{};
+            }
+            if (failed)
+            {
+                throw std::runtime_error(errorMessage.empty()
+                                           ? "Dual contouring STL export failed"
+                                           : errorMessage);
+            }
+            break;
+        }
+        case io::SurfaceExtractionMethod::ManifoldDualContouring:
+        {
+            io::ManifoldDualContouringStlExporter exporter(getSharedLogger());
+            exporter.setOptions(request.extraction.manifoldDualContouring);
+            exporter.setOutputFormat(isThreeMf ? io::MeshOutputFileFormat::ThreeMF
+                                               : io::MeshOutputFileFormat::STL);
+            exporter.setDocument(this);
+            bool const exportColors = isThreeMf && request.color.exportWithColors;
+            exporter.setExportWithColors(exportColors);
+            exporter.setConvertToSrgb(request.color.convertToSrgb);
+            exporter.setColorMode(request.color.preferredColorMode);
+            exporter.setQuantizationMode(request.color.quantizationMode);
+            exporter.setMaxPaletteSize(request.color.maxPaletteSize);
+            exporter.setTargetApplication(request.color.targetApplication);
+            bool const cancelled = runExporter(exporter, "Generating manifold mesh");
+            bool const failed = exporter.hasError();
+            auto const errorMessage = exporter.errorMessage();
+            exporter.finalize();
+            if (cancelled)
+            {
+                throw io::MeshExportCancelled{};
+            }
+            if (failed)
+            {
+                throw std::runtime_error(errorMessage.empty()
+                                           ? "Manifold dual contouring export failed"
+                                           : errorMessage);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported surface extraction method");
+        }
+
+        throwIfCancelled();
+        publishOutput();
+        report(1.0, "Export complete");
+#endif
     }
 
     void Document::markFileAsChanged()

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "../IndexedTriangleMesh.h"
+#include "ColorQuantizer.h"
+#include "ColorRegionizer.h"
+#include "FaceColors.h"
 #include "Writer3mfBase.h"
 
 #include <filesystem>
@@ -19,5 +22,21 @@ namespace gladius::io
             IndexedTriangleMesh const & mesh,
             std::string const & meshName = "Gladius Mesh",
             IndexedTriangleMeshValidationPolicy policy = IndexedTriangleMeshValidationPolicy::Strict);
+
+        void exportMeshWithColors(std::filesystem::path const & filePath,
+                      IndexedTriangleMesh const & mesh,
+                      std::string const & meshName,
+                      FaceColors const & faceColors);
+
+        void exportMeshWithRegions(std::filesystem::path const & filePath,
+                       IndexedTriangleMesh const & mesh,
+                       std::string const & meshName,
+                       QuantizedPalette const & palette,
+                       std::vector<PrintableRegion> const & regions);
+
+        void exportMeshWithMmuSegmentation(std::filesystem::path const & filePath,
+                           IndexedTriangleMesh const & mesh,
+                           std::string const & meshName,
+                           QuantizedPalette const & palette);
     };
 } // namespace gladius::io

@@ -14,6 +14,7 @@ namespace gladius::compute
     {
         std::vector<std::array<float, 3>> positions;
         float isoValue{};
+        bool returnColor{false};
         std::string shaderSource;
         std::vector<float> parameterValues;
         /// Mesh payloads indexed by mesh resource id (empty slots = no mesh).

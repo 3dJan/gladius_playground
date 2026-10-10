@@ -322,7 +322,8 @@ namespace gladius
 
     void SlicerProgram::adoptVertexOfMeshToSurface(Primitives const & lines,
                                                    VertexBuffer & input,
-                                                   VertexBuffer & output)
+                                                   VertexBuffer & output,
+                                                   float isoValue)
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         ProfileFunction;
@@ -345,6 +346,7 @@ namespace gladius
                             range,
                             input.getBuffer(),
                             output.getBuffer(),
+                            isoValue,
                             PAYLOAD_ARGUMENTS);
         output.read();
     }

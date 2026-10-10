@@ -541,7 +541,10 @@ void kernel movePointsToSurface(__global float4 * in, __global float4 * out, PAY
     out[index] = (float4)(pos, sdf);
 }
 
-void kernel adoptVertexOfMeshToSurface(__global float4 * in, __global float4 * out, PAYLOAD_ARGS)
+void kernel adoptVertexOfMeshToSurface(__global float4 * in,
+                                       __global float4 * out,
+                                       const float isoValue,
+                                       PAYLOAD_ARGS)
 {
     int const index = get_global_id(0);
     float3 pos = in[index].xyz;
@@ -552,7 +555,7 @@ void kernel adoptVertexOfMeshToSurface(__global float4 * in, __global float4 * o
     for (int i = 0; i < 100; ++i)
     {
         float3 const normal = surfaceNormalModelOnly(pos, PASS_PAYLOAD_ARGS).xyz;
-        sdf = model(pos, PASS_PAYLOAD_ARGS).w;
+        sdf = model(pos, PASS_PAYLOAD_ARGS).w - isoValue;
         if (fabs(sdf) < minDist)
         {
             minDist = fabs(sdf);

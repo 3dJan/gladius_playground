@@ -84,11 +84,11 @@ namespace gladius::io
             Failed
         };
 
-        void performExport(ComputeCore & generator);
-        void writeMeshToFile(ComputeCore & generator,
-                             std::vector<Eigen::Vector3f> const & positions,
-                             std::vector<std::uint32_t> const & indices,
-                             std::vector<Eigen::Vector3f> const & normals);
+        [[nodiscard]] bool performExport(ComputeCore & generator);
+        [[nodiscard]] bool writeMeshToFile(ComputeCore & generator,
+                           std::vector<Eigen::Vector3f> const & positions,
+                           std::vector<std::uint32_t> const & indices,
+                           std::vector<Eigen::Vector3f> const & normals);
 
         events::SharedLogger m_logger;
         ManifoldDualContouringOptions m_options{};

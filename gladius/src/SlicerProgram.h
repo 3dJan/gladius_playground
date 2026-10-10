@@ -55,7 +55,8 @@ namespace gladius
          */
         void adoptVertexOfMeshToSurface(Primitives const & lines,
                                         VertexBuffer & input,
-                                        VertexBuffer & output);
+                                        VertexBuffer & output,
+                                        float isoValue = 0.0F);
 
         void computeMarchingSquareState(const Primitives & lines, cl_float z_mm);
 

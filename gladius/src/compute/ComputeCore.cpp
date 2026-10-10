@@ -513,7 +513,7 @@ namespace gladius
         return successCount;
     }
 
-    void ComputeCore::adoptVertexOfMeshToSurface(VertexBuffer & vertices)
+    void ComputeCore::adoptVertexOfMeshToSurface(VertexBuffer & vertices, float isoValue)
     {
         ProfileFunction
 
@@ -523,7 +523,7 @@ namespace gladius
 
         auto inputVertices = vertices;
         m_programs->getSlicerProgram()->adoptVertexOfMeshToSurface(
-          *m_primitives, inputVertices, vertices);
+                    *m_primitives, inputVertices, vertices, isoValue);
     }
 
     void ComputeCore::setAutoUpdateBoundingBox(bool autoUpdateBoundingBox)

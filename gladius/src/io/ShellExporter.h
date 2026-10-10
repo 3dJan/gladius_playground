@@ -1,10 +1,7 @@
 #pragma once
 
 #include "IExporter.h"
-#include "3mf/FilamentOpticalProperties.h"
-#include "3mf/FrontlitThicknessSolver.h"
-#include "3mf/ShellThicknessPartition.h"
-#include "SurfaceExtractionOptions.h"
+#include "3mf/ShellExportOptions.h"
 #include "../EventLogger.h"
 
 #include <atomic>
@@ -22,18 +19,6 @@ namespace gladius
 
 namespace gladius::io
 {
-    /// @brief Configuration for shell-based color export
-    struct ShellExportConfig
-    {
-        ShellGenerationMode generationMode = ShellGenerationMode::LegacyManifoldDualContouring;
-        FilamentStack filamentStack;                      ///< Ordered materials (bottom to top)
-        std::vector<std::vector<float>> precomputedLuts;  ///< Thickness LUTs per layer
-        int lutResolution = 16;                           ///< LUT grid resolution
-        ThicknessConstraints thicknessConstraints;        ///< Thickness limits
-        ManifoldDualContouringOptions mdcOptions;         ///< Mesh extraction options
-        bool useSurfaceColorSampling = false;             ///< Use surface colors instead of interior
-    };
-
     /// @brief Async exporter for shell-based color 3MF export
     ///
     /// Implements IExporter interface for background shell generation with

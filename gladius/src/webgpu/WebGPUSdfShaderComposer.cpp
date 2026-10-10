@@ -120,4 +120,29 @@ namespace gladius::webgpu
                 }
         return insertEvaluator("src/webgpu/shaders/sdf_evaluate.wgsl", modelEvaluator, modules);
     }
+
+        std::string WebGPUSdfShaderComposer::composeColorWithResourceSupport(
+            std::string_view const modelEvaluator,
+            bool const includeMesh,
+            bool const includeBeam,
+            bool const includeImage)
+        {
+                std::vector<std::string> modules;
+                if (includeMesh)
+                {
+                        modules.push_back(
+                            loadEmbeddedModule("src/webgpu/shaders/mesh_sdf.wgsl", "// GLADIUS_MESH_SDF_MODULE"));
+                }
+                if (includeBeam)
+                {
+                        modules.push_back(
+                            loadEmbeddedModule("src/webgpu/shaders/beam_sdf.wgsl", "// GLADIUS_BEAM_SDF_MODULE"));
+                }
+                if (includeImage)
+                {
+                        modules.push_back(loadEmbeddedModule(
+                            "src/webgpu/shaders/image_sampling.wgsl", "// GLADIUS_IMAGE_SAMPLING_MODULE"));
+                }
+                return insertEvaluator("src/webgpu/shaders/sdf_evaluate_color.wgsl", modelEvaluator, modules);
+        }
 }

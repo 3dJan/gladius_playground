@@ -39,13 +39,18 @@ namespace gladius::webgpu
             void create(wgpu::Device const & device,
                         std::size_t const pointCount,
                         std::size_t const parameterCount,
+                        std::size_t const outputComponents,
                         std::vector<std::vector<float>> const & meshPayloadTable,
                         std::vector<std::vector<float>> const & beamPayloadTable,
                         std::vector<std::vector<float>> const & imagePayloadTable)
             {
                 auto const parameterSize = std::max(sizeof(float), parameterCount * sizeof(float));
                 auto const positionSize = pointCount * sizeof(EvaluationPosition);
-                auto const outputSize = pointCount * sizeof(float);
+                if (outputComponents != 1u && outputComponents != 4u)
+                {
+                    throw std::invalid_argument("Unsupported WebGPU SDF evaluation output width");
+                }
+                auto const outputSize = pointCount * outputComponents * sizeof(float);
                 if (positionSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE ||
                     outputSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE ||
                     parameterSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE)
@@ -391,6 +396,10 @@ namespace gladius::webgpu
         {
             return {};
         }
+        if (request.returnColor)
+        {
+            throw std::invalid_argument("Color evaluation requires evaluateColorsGenerated");
+        }
 
         auto inputPositions = std::move(request.positions);
         compute::SdfEvaluationResult result;
@@ -423,6 +432,63 @@ namespace gladius::webgpu
                                                PositionBatchSource positionSource,
                                                ValueBatchSink valueSink,
                                                CancellationPredicate shouldCancel) const
+    {
+        if (request.returnColor)
+        {
+            throw std::invalid_argument("Color evaluation requires evaluateColorsGenerated");
+        }
+        return evaluateGeneratedImpl(request,
+                                     pointCount,
+                                     1u,
+                                     std::move(positionSource),
+                                     std::move(valueSink),
+                                     std::move(shouldCancel));
+    }
+
+    bool WebGPUSdfEvaluator::evaluateColorsGenerated(
+      compute::SdfEvaluationRequest const & request,
+      std::size_t const pointCount,
+      PositionBatchSource positionSource,
+      ColorBatchSink colorSink,
+      CancellationPredicate shouldCancel) const
+    {
+        if (!request.returnColor)
+        {
+            throw std::invalid_argument("Color evaluation request must enable returnColor");
+        }
+        if (!colorSink)
+        {
+            throw std::invalid_argument("Generated WebGPU color sink must be provided");
+        }
+
+        return evaluateGeneratedImpl(
+          request,
+          pointCount,
+          4u,
+          std::move(positionSource),
+          [sink = std::move(colorSink)](std::size_t const offset, std::vector<float> && values)
+          {
+              if (values.size() % 4u != 0u)
+              {
+                  throw std::runtime_error("WebGPU color evaluation returned an invalid batch size");
+              }
+              std::vector<std::array<float, 3>> colors(values.size() / 4u);
+              for (std::size_t index = 0u; index < colors.size(); ++index)
+              {
+                  colors[index] = {values[index * 4u], values[index * 4u + 1u], values[index * 4u + 2u]};
+              }
+              sink(offset, std::move(colors));
+          },
+          std::move(shouldCancel));
+    }
+
+    bool WebGPUSdfEvaluator::evaluateGeneratedImpl(
+      compute::SdfEvaluationRequest const & request,
+      std::size_t const pointCount,
+      std::size_t const outputComponents,
+      PositionBatchSource positionSource,
+      RawValueBatchSink valueSink,
+      CancellationPredicate shouldCancel) const
     {
         if (pointCount == 0u)
         {
@@ -466,6 +532,7 @@ namespace gladius::webgpu
         buffers.create(m_context->getDevice(),
                        batchCapacity,
                        request.parameterValues.size(),
+                       outputComponents,
                        request.meshPayloadTable,
                        request.beamPayloadTable,
                        request.imagePayloadTable);
@@ -701,7 +768,7 @@ namespace gladius::webgpu
 
             auto const batchPointCount = static_cast<std::uint32_t>(batchCount);
             auto const dispatchPlan = makeSdfEvaluationDispatchPlan(batchPointCount);
-            auto const batchOutputSize = batchCount * sizeof(float);
+            auto const batchOutputSize = batchCount * outputComponents * sizeof(float);
             buffers.write(m_context->getQueue(),
                           EvaluationUniforms{request.isoValue,
                                              batchPointCount,
@@ -725,7 +792,7 @@ namespace gladius::webgpu
             auto const commandBuffer = encoder.Finish();
             m_context->getQueue().Submit(1u, &commandBuffer);
 
-            std::vector<float> batchValues(batchCount);
+            std::vector<float> batchValues(batchCount * outputComponents);
             bool complete = false;
             std::string errorMessage;
             buffers.staging().MapAsync(

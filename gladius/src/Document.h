@@ -27,6 +27,8 @@ namespace gladius::compute
 #include "io/3mf/ImageStackCreator.h"
 #include "io/3mf/ResourceDependencyGraph.h"
 #include "io/3mf/SaveSnapshot.h"
+#include "io/MeshExportJob.h"
+#include "io/MeshExportRequest.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "nodes/Assembly.h"
 #include "nodes/BuildItem.h"
@@ -246,10 +248,15 @@ namespace gladius
 
         void exportAsStl(std::filesystem::path const & filename);
         void exportAsStl(std::filesystem::path const & filename,
-                         io::StlExportOptions const & options);
+                         io::StlExportOptions const & options,
+                         io::MeshExportCancellationPredicate shouldCancel = {});
         /// @brief Export a geometry-only 3MF mesh through the selected WebGPU backend.
         void exportAs3mf(std::filesystem::path const & filename,
-                 io::StlExportOptions const & options);
+                         io::StlExportOptions const & options,
+                         io::MeshExportCancellationPredicate shouldCancel = {});
+        void exportMesh(io::MeshExportRequest const & request,
+                io::MeshExportCancellationPredicate shouldCancel = {},
+                io::MeshExportProgressCallback reportProgress = {});
 
         void markFileAsChanged();
 
@@ -542,15 +549,9 @@ namespace gladius
 
       private:
 #if defined(GLADIUS_ENABLE_WEBGPU)
-        enum class WebGpuMeshExportFormat
-        {
-            Stl,
-            ThreeMf
-        };
-
-        void exportWebGpuMesh(std::filesystem::path const & filename,
-                              io::StlExportOptions const & options,
-                              WebGpuMeshExportFormat format);
+        void exportWebGpuMesh(io::MeshExportRequest const & request,
+                              io::MeshExportCancellationPredicate shouldCancel = {},
+                              io::MeshExportProgressCallback reportProgress = {});
 #endif
 
         enum class RefreshMode

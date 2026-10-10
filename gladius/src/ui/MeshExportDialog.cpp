@@ -2,9 +2,12 @@
 #include "Document.h"
 #include "FileDialogService.h"
 #include "ColorToThicknessDialog.h"
+#if defined(GLADIUS_ENABLE_OPENCL)
 #include "io/3mf/PaletteExtractor.h"
-#include "Mesh.h"
-#include "io/3mf/ShellGenerator.h"
+#include "compute/ComputeCore.h"
+#endif
+#include "nodes/Model.h"
+#include "nodes/nodesfwd.h"
 
 #include "imgui.h"
 
@@ -16,8 +19,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
-#include <compute/ManifoldDualContouringGpu.h>
-#include <DualContouringSamplingProgram.h>
 #include <fmt/format.h>
 #include <set>
 #include <stdexcept>
@@ -124,24 +125,17 @@ namespace gladius::ui
                 ? "OpenVDB color-thickness shells"
                 : "Legacy manifold dual contouring shells";
         }
-    }
 
-    template <typename Exporter>
-    void MeshExportDialog::applyColorSettings(Exporter& exporter, bool exportColors)
-    {
-        exporter.setExportWithColors(exportColors);
-        exporter.setConvertToSrgb(m_convertToSrgb);
-        exporter.setColorMode(m_colorMode);
-        exporter.setQuantizationMode(m_quantizationMode);
-        exporter.setTargetApplication(m_targetApplication);
-        if (m_overridePaletteSize)
+        [[nodiscard]] bool hasVolumetricColor(nodes::Model const & model)
         {
-            exporter.setMaxPaletteSize(
-                static_cast<std::uint32_t>(m_maxPaletteSize));
-        }
-        else
-        {
-            exporter.setMaxPaletteSize(std::nullopt);
+            auto * const endNode = const_cast<nodes::Model &>(model).getEndNode();
+            if (endNode == nullptr)
+            {
+                return false;
+            }
+            auto & parameters = endNode->parameter();
+            auto const color = parameters.find(nodes::FieldNames::Color);
+            return color != parameters.end() && color->second.getConstSource().has_value();
         }
     }
 
@@ -159,23 +153,15 @@ namespace gladius::ui
         }
     }
 
-    void MeshExportDialog::beginExport(std::filesystem::path const & stlFilename,
-                                       ComputeCore & core)
+    void MeshExportDialog::render(std::shared_ptr<Document> const & document)
     {
-        // Legacy method for backward compatibility
-        m_computeCore = &core;
-        show(stlFilename);
-    }
-
-    void MeshExportDialog::render(ComputeCore & core)
-    {
+        pollExportJob();
         if (!m_visible)
         {
             return;
         }
 
-        // Store compute core reference for export operations
-        m_computeCore = &core;
+        m_document = document;
 
         if (!m_paletteHandlerBound)
         {
@@ -207,233 +193,90 @@ namespace gladius::ui
         }
 
         // Always render the configuration dialog (it handles progress internally now)
-        renderConfiguration(core);
+        renderConfiguration(document);
 
         // Render auxiliary dialogs
         m_colorToThicknessDialog.render();
     }
 
-    std::string MeshExportDialog::getWindowTitle() const
+    void MeshExportDialog::pollExportJob()
     {
-        if (m_exportInProgress)
+        if (!m_exportInProgress || !m_exportJob)
         {
-            return m_outputFormat == MeshOutputFormat::ThreeMF ? "Exporting 3MF" : "Exporting STL";
-        }
-        return "Export Mesh";
-    }
-
-    std::string MeshExportDialog::getExportMessage() const
-    {
-        std::string const formatName = m_outputFormat == MeshOutputFormat::ThreeMF ? "3MF" : "STL";
-        switch (m_selectedMethod)
-        {
-        case io::SurfaceExtractionMethod::LayeredMarchingCubes:
-            return "Exporting " + formatName + " using layered marching cubes";
-        case io::SurfaceExtractionMethod::DualContouring:
-            return "Exporting " + formatName + " using dual contouring";
-        case io::SurfaceExtractionMethod::ManifoldDualContouring:
-            return "Exporting " + formatName + " using manifold dual contouring";
-        default:
-            return "Exporting " + formatName;
-        }
-    }
-
-    io::IExporter & MeshExportDialog::getExporter()
-    {
-        if (m_activeExporter == nullptr)
-        {
-            throw std::runtime_error("Exporter requested before export was started");
-        }
-        return *m_activeExporter;
-    }
-
-    void MeshExportDialog::finalizeExport()
-    {        
-        if (m_activeExporter == &m_layeredExporter && m_computeCore != nullptr)
-        {
-            m_layeredExporter.finalizeExportSTL(*m_computeCore);
-        }
-        else if (m_activeExporter == &m_layeredExporter3mf)
-        {
-            m_layeredExporter3mf.finalize();
-        }
-        else if (m_activeExporter == &m_dualExporter)
-        {
-            m_dualExporter.finalize();
-        }
-        else if (m_activeExporter == &m_manifoldExporter)
-        {
-            m_manifoldExporter.finalize();
-        }
-        else if (m_activeExporter == &m_shellExporter)
-        {
-            m_shellExporter.finalize();
-        }
-        else
-        {
-            BaseExportDialog::finalizeExport();
+            return;
         }
 
-        // Only reset the exporter, not the whole dialog state
-        m_activeExporter = nullptr;
-    }
-
-    void MeshExportDialog::onExportCancelled()
-    {
-        // Signal cancellation to the export worker - don't block!
-        // The export loop will check isCancellationRequested() and exit early.
-        // Cleanup happens when the export finishes (via finalizeExport/resetState).
-        m_cancellationToken.requestCancellation();
-        
-        // Update ExportState to show "Cancelling..." phase in UI
-        if (m_exportState != nullptr)
+        m_exportJob->poll();
+        auto const status = m_exportJob->getStatus();
+        if (status.state != io::MeshExportJobState::Completed &&
+            status.state != io::MeshExportJobState::Cancelled &&
+            status.state != io::MeshExportJobState::Failed)
         {
-            m_exportState->requestCancellation();
+            return;
         }
-    }
 
-    void MeshExportDialog::onExportCompleted()
-    {
-        m_exportCompleted = true;
         m_exportInProgress = false;
-        m_statusMessage = "Export completed successfully!";
-        m_statusIsError = false;
-        
-        // Unlock UI modifications
+        m_exportJob.reset();
         if (m_exportState != nullptr)
         {
             m_exportState->endExport();
         }
-        // Dialog stays open - user can close manually or start another export
+
+        if (status.state == io::MeshExportJobState::Cancelled)
+        {
+            m_exportCompleted = false;
+            m_statusMessage = "Export cancelled";
+            m_statusIsError = false;
+            m_errorMessage.clear();
+        }
+        else if (status.state == io::MeshExportJobState::Failed)
+        {
+            m_exportCompleted = false;
+            m_statusMessage = "Export failed";
+            m_statusIsError = true;
+            m_errorMessage = status.errorMessage.empty()
+                               ? "Export failed (no additional error information)"
+                               : status.errorMessage;
+        }
+        else
+        {
+            std::error_code error;
+            bool const exists = std::filesystem::exists(m_targetFile, error);
+            auto const size = exists && !error
+                                ? std::filesystem::file_size(m_targetFile, error)
+                                : 0U;
+            if (error || !exists || size == 0U)
+            {
+                m_exportCompleted = false;
+                m_statusMessage = "Export failed";
+                m_statusIsError = true;
+                m_errorMessage = fmt::format(
+                  "Export finished without a valid output file: {}", m_targetFile.string());
+            }
+            else
+            {
+                m_exportCompleted = true;
+                m_statusMessage = "Export completed successfully!";
+                m_statusIsError = false;
+                m_errorMessage.clear();
+            }
+        }
     }
 
-    void MeshExportDialog::renderConfiguration(ComputeCore & core)
+    void MeshExportDialog::renderConfiguration(std::shared_ptr<Document> const & document)
     {
         if (!m_visible)
         {
             return;
         }
 
-        // Check if export is in progress and handle it
-        if (m_exportInProgress && m_activeExporter != nullptr)
-        {
-            if (isExportFinished(core))
-            {
-                // IMPORTANT: some exporters reset their internal state in finalize().
-                // Capture the error information BEFORE finalizeExport() runs.
-                io::IExporter * const finishedExporter = m_activeExporter;
-
-                bool failed = false;
-                std::string failureMessage;
-                if (finishedExporter == &m_dualExporter)
-                {
-                    failed = m_dualExporter.hasError();
-                    failureMessage = m_dualExporter.errorMessage();
-                }
-                else if (finishedExporter == &m_manifoldExporter)
-                {
-                    failed = m_manifoldExporter.hasError();
-                    failureMessage = m_manifoldExporter.errorMessage();
-                }
-                else if (finishedExporter == &m_shellExporter)
-                {
-                    failed = m_shellExporter.hasError();
-                    failureMessage = m_shellExporter.errorMessage();
-                }
-
-                try
-                {
-                    finalizeExport();
-                }
-                catch (std::exception const & ex)
-                {
-                    failed = true;
-                    if (failureMessage.empty())
-                    {
-                        failureMessage = ex.what();
-                    }
-                }
-
-                // Final safety net: don't claim success unless the output exists.
-                if (!failed && !m_targetFile.empty())
-                {
-                    std::error_code ec;
-                    bool const exists = std::filesystem::exists(m_targetFile, ec);
-                    if (ec || !exists)
-                    {
-                        failed = true;
-                        failureMessage = fmt::format(
-                          "Export finished but output file does not exist: {}",
-                          m_targetFile.string());
-                    }
-                    else
-                    {
-                        auto const size = std::filesystem::file_size(m_targetFile, ec);
-                        if (ec || size == 0U)
-                        {
-                            failed = true;
-                            failureMessage = fmt::format(
-                              "Export finished but output file is empty: {}",
-                              m_targetFile.string());
-                        }
-                    }
-                }
-
-                // Check if export was cancelled - treat as distinct from failure
-                bool const wasCancelled = m_cancellationToken.isCancelled();
-
-                if (wasCancelled)
-                {
-                    // Export was cancelled by user - show cancellation message
-                    m_exportInProgress = false;
-                    m_exportCompleted = false;
-                    m_statusMessage = "Export cancelled";
-                    m_statusIsError = false;
-                    m_errorMessage.clear();
-                    if (m_exportState != nullptr)
-                    {
-                        m_exportState->endExport();
-                    }
-                    // Clean up any partial output file
-                    if (!m_targetFile.empty())
-                    {
-                        std::error_code ec;
-                        if (std::filesystem::exists(m_targetFile, ec))
-                        {
-                            std::filesystem::remove(m_targetFile, ec);
-                            if (ec)
-                            {
-                                // Log warning but don't fail - the cancel itself succeeded
-                                std::cerr << "Warning: Failed to delete partial export file: "
-                                          << m_targetFile.string() << " (" << ec.message() << ")"
-                                          << std::endl;
-                            }
-                        }
-                    }
-                }
-                else if (failed)
-                {
-                    m_exportInProgress = false;
-                    m_exportCompleted = false;
-                    m_statusMessage = "Export failed";
-                    m_statusIsError = true;
-                    m_errorMessage =
-                      failureMessage.empty() ? "Export failed (no additional error information)"
-                                            : failureMessage;
-                    if (m_exportState != nullptr)
-                    {
-                        m_exportState->endExport();
-                    }
-                }
-                else
-                {
-                    onExportCompleted();
-                }
-            }
-        }
-
         ImGui::SetNextWindowSize(ImVec2(550.0F, 0.0F), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin(getWindowTitle().c_str(), &m_visible))
+        auto const windowTitle = m_exportInProgress
+                                   ? (m_outputFormat == MeshOutputFormat::ThreeMF
+                                        ? "Exporting 3MF"
+                                        : "Exporting STL")
+                                   : "Export Mesh";
+        if (ImGui::Begin(windowTitle, &m_visible))
         {
             // During export: show only progress and cancel button
             if (m_exportInProgress)
@@ -442,8 +285,8 @@ namespace gladius::ui
                 
                 ImGui::Spacing();
                 
-                // Check if cancellation is already requested
-                bool const isCancelling = m_cancellationToken.isCancelled();
+                auto const status = m_exportJob->getStatus();
+                bool const isCancelling = status.state == io::MeshExportJobState::Cancelling;
                 
                 if (isCancelling)
                 {
@@ -454,7 +297,11 @@ namespace gladius::ui
                 }
                 else if (ImGui::Button("Cancel Export"))
                 {
-                    onExportCancelled();
+                    m_exportJob->requestCancellation();
+                    if (m_exportState != nullptr)
+                    {
+                        m_exportState->requestCancellation();
+                    }
                     m_statusMessage = "Cancelling export...";
                     m_statusIsError = false;
                 }
@@ -501,7 +348,7 @@ namespace gladius::ui
             ImGui::Spacing();
 
             // Buttons section
-            bool const canExport = !m_targetFile.empty();
+            bool const canExport = !m_targetFile.empty() && document != nullptr;
             
             ImGui::BeginDisabled(!canExport);
             if (ImGui::Button("Start Export"))
@@ -514,7 +361,7 @@ namespace gladius::ui
                 
                 try
                 {
-                    startExport(core);
+                    startExport(document);
                 }
                 catch (std::exception const & ex)
                 {
@@ -714,15 +561,15 @@ namespace gladius::ui
         ImGui::Spacing();
         
         // Check model for volumetric color output when document is available
-        if (m_document != nullptr)
+        if (auto document = m_document.lock())
         {
-            auto assembly = m_document->getAssembly();
+            auto assembly = document->getAssembly();
             if (assembly != nullptr)
             {
                 auto& model = assembly->assemblyModel();
                 if (model != nullptr)
                 {
-                    m_modelHasVolumetricColor = io::FaceColorSampler::hasVolumetricColor(*model);
+                    m_modelHasVolumetricColor = hasVolumetricColor(*model);
                 }
             }
         }
@@ -1081,11 +928,11 @@ namespace gladius::ui
     void MeshExportDialog::renderStatusArea()
     {
         // Progress bar during export
-        if (m_exportInProgress && m_activeExporter != nullptr)
+        if (m_exportInProgress && m_exportJob != nullptr)
         {
-            float const progress = static_cast<float>(m_activeExporter->getProgress());
-            ImGui::ProgressBar(progress, ImVec2(-1.0F, 0.0F));
-            ImGui::TextUnformatted(getExportMessage().c_str());
+            auto const status = m_exportJob->getStatus();
+            ImGui::ProgressBar(static_cast<float>(status.progress), ImVec2(-1.0F, 0.0F));
+            ImGui::TextUnformatted(status.phase.c_str());
         }
         // Success message after export
         else if (m_exportCompleted)
@@ -1119,7 +966,7 @@ namespace gladius::ui
     {
         bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
         bool const colorExportAvailable = is3mf && m_modelHasVolumetricColor;
-        if (!colorExportAvailable || m_computeCore == nullptr)
+        if (!colorExportAvailable)
         {
             return;
         }
@@ -1129,46 +976,44 @@ namespace gladius::ui
             return;
         }
 
-                if (m_selectedMethod == io::SurfaceExtractionMethod::DualContouring)
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        std::string const error =
+          "Palette derivation is not implemented for the selected WebGPU backend.";
+        m_colorToThicknessDialog.notifyPaletteDeriveFailed(error);
+        m_statusMessage = error;
+        m_statusIsError = true;
+        return;
+#else
+        auto document = m_document.lock();
+        auto core = document ? document->getCore() : nullptr;
+        if (!core)
         {
-            m_colorToThicknessDialog.notifyPaletteDeriveFailed(
-                            "Palette derivation is not implemented for dual contouring.");
-                        m_statusMessage =
-                            "Palette derivation currently supports OpenVDB and manifold dual contouring.";
+            std::string const error =
+              "Palette derivation requires the OpenCL mesh sampling backend.";
+            m_colorToThicknessDialog.notifyPaletteDeriveFailed(error);
+            m_statusMessage = error;
+            m_statusIsError = true;
+            return;
+        }
+        if (m_selectedMethod == io::SurfaceExtractionMethod::DualContouring)
+        {
+            std::string const error = "Palette derivation is not implemented for dual contouring.";
+            m_colorToThicknessDialog.notifyPaletteDeriveFailed(error);
+            m_statusMessage = error;
             m_statusIsError = true;
             return;
         }
 
-        io::ManifoldDualContouringOptions options{};
-        options.qualityPreset = m_manifoldQualityPreset;
-        options.applyPreset();
-        options.enableGpu = m_manifoldEnableGpu;
-        options.enableCpuFallback = m_manifoldAllowCpuFallback;
-        options.enableCaching = m_manifoldEnableCaching;
-        options.minFeatureSize = m_manifoldMinFeatureSize;
-        options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
-        options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
-        options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
-        options.subdivisionIterations = m_manifoldSubdivisionIterations;
-        options.projectToSurface = m_manifoldProjectToSurface;
-        options.simplificationMethod = m_manifoldEnableSimplification
-            ? io::SimplificationMethod::QemFast
-            : io::SimplificationMethod::None;
-        options.enableSimplification = m_manifoldEnableSimplification;
-        options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
-        options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
-
-        auto * core = m_computeCore;
         io::PaletteExtractionOptions paletteOptions{};
         paletteOptions.method = m_selectedMethod;
         paletteOptions.marchingCubesQualityLevel = m_marchingCubesQuality;
-        paletteOptions.manifoldOptions = options;
+        paletteOptions.manifoldOptions = makeManifoldOptions();
         paletteOptions.convertToSrgb = true;
 
         m_paletteDeriveInProgress = true;
         m_colorToThicknessDialog.notifyPaletteDeriveStarted();
 
-        m_paletteFuture = std::async(std::launch::async, [core, paletteOptions]() {
+        m_paletteFuture = std::async(std::launch::async, [core = std::move(core), paletteOptions]() {
             PaletteDeriveResult result;
             try
             {
@@ -1183,34 +1028,11 @@ namespace gladius::ui
             }
             return result;
         });
+#endif
     }
 
-    void MeshExportDialog::exportShellsTo3mf(ComputeCore & core)
+    io::ManifoldDualContouringOptions MeshExportDialog::makeManifoldOptions() const
     {
-        if (m_document == nullptr)
-        {
-            throw std::runtime_error("Document is required for shell export");
-        }
-
-        auto stack = m_colorToThicknessDialog.getFilamentStack();
-        if (stack.empty())
-        {
-            throw std::runtime_error("No materials defined for shell export");
-        }
-
-        int const lutResolution = m_colorToThicknessDialog.getLutResolution();
-        if (lutResolution <= 1)
-        {
-            throw std::runtime_error("LUT resolution must be greater than 1 for shell export");
-        }
-
-        auto const & precomputedLuts = m_colorToThicknessDialog.getPrecomputedLuts();
-        if (precomputedLuts.empty())
-        {
-            throw std::runtime_error("No precomputed LUTs available for shell export");
-        }
-
-        // Build MDC options from current settings
         io::ManifoldDualContouringOptions options{};
         options.qualityPreset = m_manifoldQualityPreset;
         options.applyPreset();
@@ -1224,181 +1046,116 @@ namespace gladius::ui
         options.subdivisionIterations = m_manifoldSubdivisionIterations;
         options.projectToSurface = m_manifoldProjectToSurface;
         options.simplificationMethod = m_manifoldEnableSimplification
-            ? io::SimplificationMethod::QemFast
-            : io::SimplificationMethod::None;
+                                         ? io::SimplificationMethod::QemFast
+                                         : io::SimplificationMethod::None;
         options.enableSimplification = m_manifoldEnableSimplification;
         options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
-        options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
-
-        // Build shell export config
-        io::ShellExportConfig config;
-        config.generationMode = shellGenerationModeFor(m_selectedMethod);
-        config.filamentStack = std::move(stack);
-        config.precomputedLuts = precomputedLuts;
-        config.lutResolution = lutResolution;
-        config.thicknessConstraints = m_colorToThicknessDialog.getConstraints();
-        config.mdcOptions = std::move(options);
-        config.useSurfaceColorSampling = m_useSurfaceColorSampling;
-
-        // Reset cancellation token for the new export
-        m_cancellationToken.reset();
-
-        // Configure and start async shell export
-        m_shellExporter.setConfig(std::move(config));
-        m_shellExporter.setDocument(m_document);
-        m_shellExporter.setCancellationToken(&m_cancellationToken);
-        m_shellExporter.beginExport(m_targetFile, core);
-        m_activeExporter = &m_shellExporter;
-
-        // Enable progress tracking and UI lock
-        m_exportInProgress = true;
-        if (m_exportState != nullptr)
-        {
-            m_exportState->beginExport("3MF shell export");
-        }
+        options.simplificationMaxError = m_manifoldSimplificationTolerance *
+                                         m_manifoldSimplificationTolerance;
+        return options;
     }
 
-    void MeshExportDialog::startExport(ComputeCore & core)
+    void MeshExportDialog::startExport(std::shared_ptr<Document> const & document)
     {
+        if (!document)
+        {
+            throw std::runtime_error("No active document is available for mesh export");
+        }
         if (m_targetFile.empty())
         {
             throw std::runtime_error("No target filename specified for mesh export");
         }
 
-                bool const is3mf = (m_outputFormat == MeshOutputFormat::ThreeMF);
-                bool const wantsShellExport =
-                    is3mf && m_enableShellBasedExport && supportsShellExport(m_selectedMethod);
-
-                if (wantsShellExport && !m_colorToThicknessDialog.hasPrecomputedLuts())
-                {
-                        if (!m_colorToThicknessDialog.ensurePrecomputedLuts())
-                        {
-                                m_statusMessage = m_colorToThicknessDialog.getLutStatus();
-                                if (m_statusMessage.empty())
-                                {
-                                        m_statusMessage =
-                                            "Shell export requires materials and a generated LUT. "
-                                            "Open the Color -> Shell Thickness dialog to define materials.";
-                                }
-                                m_statusIsError = true;
-                                throw std::runtime_error(m_statusMessage);
-                        }
-                }
-
-                bool const is3mfMethodAllowed =
-                    m_selectedMethod == io::SurfaceExtractionMethod::LayeredMarchingCubes ||
-                    m_selectedMethod == io::SurfaceExtractionMethod::ManifoldDualContouring;
-
-                if (is3mf && !is3mfMethodAllowed)
-                {
-                        throw std::runtime_error(
-                            "3MF export is currently only supported with layered marching cubes, "
-                            "manifold dual contouring, or shell-based export when a shell-capable extraction "
-                            "method is selected.");
-                }
-
-        if (wantsShellExport)
+        bool const is3mf = m_outputFormat == MeshOutputFormat::ThreeMF;
+        bool const wantsShellExport =
+          is3mf && m_enableShellBasedExport && supportsShellExport(m_selectedMethod);
+        if (wantsShellExport && !m_colorToThicknessDialog.hasPrecomputedLuts() &&
+            !m_colorToThicknessDialog.ensurePrecomputedLuts())
         {
-            exportShellsTo3mf(core);
-            return;
+            m_statusMessage = m_colorToThicknessDialog.getLutStatus();
+            if (m_statusMessage.empty())
+            {
+                m_statusMessage =
+                  "Shell export requires materials and a generated LUT. Open the Color -> Shell "
+                  "Thickness dialog to define materials.";
+            }
+            m_statusIsError = true;
+            throw std::runtime_error(m_statusMessage);
         }
 
-        switch (m_selectedMethod)
+        if (is3mf && !supportsShellExport(m_selectedMethod))
         {
-        case io::SurfaceExtractionMethod::LayeredMarchingCubes:
-        {
-            std::size_t const quality = std::min<std::size_t>(m_marchingCubesQuality, QUALITY_LABELS.size() - 1);
-            if (is3mf)
-            {
-                m_layeredExporter3mf.setQualityLevel(quality);
-                // Enable color export if checkbox is checked and model has color
-                bool const exportColors = m_exportWithColors && m_modelHasVolumetricColor;
-                applyColorSettings(m_layeredExporter3mf, exportColors);
-                m_layeredExporter3mf.beginExport(m_targetFile, core, m_document);
-                m_activeExporter = &m_layeredExporter3mf;
-            }
-            else
-            {
-                m_layeredExporter.setQualityLevel(quality);
-                m_layeredExporter.beginExport(m_targetFile, core);
-                m_activeExporter = &m_layeredExporter;
-            }
-            break;
+            throw std::runtime_error(
+              "3MF export is currently supported with layered marching cubes or manifold dual "
+              "contouring.");
         }
-        case io::SurfaceExtractionMethod::DualContouring:
+
+        io::MeshExportRequest request;
+        request.filename = m_targetFile;
+        request.format = is3mf ? io::MeshExportFormat::ThreeMf : io::MeshExportFormat::Stl;
+        request.extraction.method = m_selectedMethod;
+        request.extraction.marchingCubesQualityLevel =
+          std::min<std::size_t>(m_marchingCubesQuality, QUALITY_LABELS.size() - 1U);
+        request.extraction.manifoldDualContouring = makeManifoldOptions();
+        request.color.exportWithColors = is3mf && m_exportWithColors && m_modelHasVolumetricColor;
+        request.color.convertToSrgb = m_convertToSrgb;
+        request.color.preferredColorMode = m_colorMode;
+        request.color.quantizationMode = m_quantizationMode;
+        request.color.targetApplication = m_targetApplication;
+        if (m_overridePaletteSize)
         {
-            io::DualContouringOptions options{};
-            options.qualityPreset = m_dualQualityPreset;
-            
-            // Apply preset to set all quality parameters (resolution, depth, curvature, etc.)
-            options.applyPreset();
-            
-            // Override with user selections
-            options.forceUniform = m_dualForceUniform;
-            
-            if (options.forceUniform && !std::has_single_bit(options.sdfResolution - 1U))
+            request.color.maxPaletteSize = static_cast<std::uint32_t>(m_maxPaletteSize);
+        }
+
+        if (m_selectedMethod == io::SurfaceExtractionMethod::DualContouring)
+        {
+            request.extraction.dualContouring.qualityPreset = m_dualQualityPreset;
+            request.extraction.dualContouring.applyPreset();
+            request.extraction.dualContouring.forceUniform = m_dualForceUniform;
+            auto const resolution = request.extraction.dualContouring.sdfResolution;
+            if (m_dualForceUniform &&
+                (resolution < 2U || !std::has_single_bit(resolution - 1U)))
             {
                 throw std::runtime_error(
                   "Uniform dual contouring requires resolution - 1 to be a power of two");
             }
-            m_dualExporter.setOptions(options);
-            m_dualExporter.beginExport(m_targetFile, core);
-            m_activeExporter = &m_dualExporter;
-            break;
         }
-        case io::SurfaceExtractionMethod::ManifoldDualContouring:
+
+        if (wantsShellExport)
         {
-            io::ManifoldDualContouringOptions options{};
-            options.qualityPreset = m_manifoldQualityPreset;
-            options.applyPreset();
-            options.enableGpu = m_manifoldEnableGpu;
-            options.enableCpuFallback = m_manifoldAllowCpuFallback;
-            options.enableCaching = m_manifoldEnableCaching;
-            // Minimum feature size and chunking
-            options.minFeatureSize = m_manifoldMinFeatureSize;
-            options.enableHierarchicalOctree = m_manifoldEnableHierarchicalOctree;
-            // Sharp feature post-processing options
-            options.enableSharpFeaturePostProcess = m_manifoldEnableSharpFeaturePostProcess;
-            options.sharpFeatureAngleThreshold = m_manifoldSharpFeatureAngleThreshold;
-            options.subdivisionIterations = m_manifoldSubdivisionIterations;
-            options.projectToSurface = m_manifoldProjectToSurface;
-            // Mesh simplification options
-            options.simplificationMethod = m_manifoldEnableSimplification
-                ? io::SimplificationMethod::QemFast
-                : io::SimplificationMethod::None;
-            options.enableSimplification = m_manifoldEnableSimplification;
-            options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
-            options.simplificationMaxError = m_manifoldSimplificationTolerance * m_manifoldSimplificationTolerance;
+            auto stack = m_colorToThicknessDialog.getFilamentStack();
+            if (stack.empty())
+            {
+                throw std::runtime_error("No materials defined for shell export");
+            }
+            auto const & precomputedLuts = m_colorToThicknessDialog.getPrecomputedLuts();
+            auto const lutResolution = m_colorToThicknessDialog.getLutResolution();
+            if (lutResolution <= 1 || precomputedLuts.empty())
+            {
+                throw std::runtime_error("Shell export requires valid precomputed thickness LUTs");
+            }
 
-            m_manifoldExporter.setOptions(options);
-            // Set output format and document for 3MF support
-            m_manifoldExporter.setOutputFormat(is3mf ? io::MeshOutputFileFormat::ThreeMF 
-                                                      : io::MeshOutputFileFormat::STL);
-            m_manifoldExporter.setDocument(m_document);
-            // Enable color export if checkbox is checked and model has color (3MF only)
-            bool const exportColors = is3mf && m_exportWithColors && m_modelHasVolumetricColor;
-            applyColorSettings(m_manifoldExporter, exportColors);
-            m_manifoldExporter.beginExport(m_targetFile, core);
-            m_activeExporter = &m_manifoldExporter;
-            break;
-        }
-        default:
-            throw std::runtime_error("Unsupported surface extraction method");
+            io::ShellExportConfig config;
+            config.generationMode = shellGenerationModeFor(m_selectedMethod);
+            config.filamentStack = std::move(stack);
+            config.precomputedLuts = precomputedLuts;
+            config.lutResolution = lutResolution;
+            config.thicknessConstraints = m_colorToThicknessDialog.getConstraints();
+            config.mdcOptions = request.extraction.manifoldDualContouring;
+            config.useSurfaceColorSampling = m_useSurfaceColorSampling;
+            request.shell = std::move(config);
         }
 
-        // Reset cancellation token for the new export and pass it to the exporter
-        m_cancellationToken.reset();
-        if (m_activeExporter != nullptr)
-        {
-            m_activeExporter->setCancellationToken(&m_cancellationToken);
-        }
-
+        std::string const formatName = is3mf ? "3MF" : "STL";
+        m_exportJob = std::make_unique<io::AsyncMeshExportJob>(
+          [document, request = std::move(request)](auto const & shouldCancel,
+                                                   auto const & reportProgress) {
+              document->exportMesh(request, shouldCancel, reportProgress);
+          });
         m_exportInProgress = true;
-        
-        // Lock UI modifications during export
+        m_exportCompleted = false;
         if (m_exportState != nullptr)
         {
-            std::string const formatName = is3mf ? "3MF" : "STL";
             m_exportState->beginExport(formatName + " mesh export");
         }
     }
@@ -1411,13 +1168,18 @@ namespace gladius::ui
             m_exportState->endExport();
         }
         
-        m_activeExporter = nullptr;
+        if (m_exportJob)
+        {
+            m_exportJob->requestCancellation();
+            m_exportJob.reset();
+        }
         m_exportInProgress = false;
         m_exportCompleted = false;
         m_errorMessage.clear();
         m_statusMessage.clear();
         m_statusIsError = false;
         m_targetFile.clear();
+        m_document.reset();
     }
     
     void MeshExportDialog::resetExportState()
@@ -1428,7 +1190,7 @@ namespace gladius::ui
             m_exportState->endExport();
         }
         
-        m_activeExporter = nullptr;
+        m_exportJob.reset();
         m_exportInProgress = false;
         m_exportCompleted = false;
         m_errorMessage.clear();

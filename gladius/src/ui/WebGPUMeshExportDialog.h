@@ -1,9 +1,9 @@
 #pragma once
 
 #include "FileDialogService.h"
+#include "io/MeshExportJob.h"
 
 #include <filesystem>
-#include <future>
 #include <memory>
 #include <string>
 
@@ -36,7 +36,7 @@ namespace gladius::ui
         void pollExport();
 
         AsyncFileDialog m_fileDialog;
-        std::future<void> m_exportFuture;
+        std::unique_ptr<io::AsyncMeshExportJob> m_exportJob;
         std::filesystem::path m_suggestedFilename;
         std::filesystem::path m_targetFilename;
         std::string m_statusMessage;

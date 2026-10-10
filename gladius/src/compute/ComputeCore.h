@@ -661,7 +661,7 @@ namespace gladius
         /// @return Number of sign-cache build steps successfully queued
         size_t buildMeshSignCaches(std::vector<MeshSignCacheBuildParams> const & buildParams);
 
-        void adoptVertexOfMeshToSurface(VertexBuffer & vertices);
+        void adoptVertexOfMeshToSurface(VertexBuffer & vertices, float isoValue = 0.0F);
 
         void setAutoUpdateBoundingBox(bool autoUpdateBoundingBox);
         [[nodiscard]] bool isAutoUpdateBoundingBoxEnabled() const;

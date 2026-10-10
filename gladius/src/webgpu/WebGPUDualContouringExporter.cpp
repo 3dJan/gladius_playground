@@ -2,6 +2,7 @@
 
 #include "io/DualContouringMeshBuilder.h"
 #include "io/IndexedTriangleMeshWriter.h"
+#include "io/MeshExportJob.h"
 #include "io/3mf/IndexedTriangleMesh3mfWriter.h"
 #include "webgpu/WebGPUSdfEvaluationRequest.h"
 
@@ -158,10 +159,10 @@ namespace gladius::webgpu
                         batchValues.end(),
                         samples.begin() + static_cast<std::ptrdiff_t>(offset));
           },
-          std::move(shouldCancel));
+                    shouldCancel);
         if (!completed)
         {
-            throw std::runtime_error("WebGPU dual contouring export was cancelled");
+                        throw io::MeshExportCancelled{};
         }
 
         dual_contouring::OctreeBuildConfig config{};
@@ -195,7 +196,11 @@ namespace gladius::webgpu
                                  snapshot,
                                  bounds,
                                  options,
-                                 std::move(shouldCancel));
+                                                                 shouldCancel);
+                if (shouldCancel && shouldCancel())
+                {
+                        throw io::MeshExportCancelled{};
+                }
         io::writeIndexedMeshToBinaryStl(filePath, mesh);
     }
 
@@ -211,7 +216,11 @@ namespace gladius::webgpu
                                  snapshot,
                                  bounds,
                                  options,
-                                 std::move(shouldCancel));
+                                                                 shouldCancel);
+                if (shouldCancel && shouldCancel())
+                {
+                        throw io::MeshExportCancelled{};
+                }
         io::IndexedTriangleMesh3mfWriter writer;
         writer.exportMesh(filePath, mesh, filePath.stem().string());
     }

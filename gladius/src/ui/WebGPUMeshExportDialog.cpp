@@ -7,7 +7,6 @@
 #include <imgui.h>
 
 #include <algorithm>
-#include <chrono>
 #include <exception>
 #include <utility>
 
@@ -15,16 +14,10 @@ namespace gladius::ui
 {
     WebGPUMeshExportDialog::~WebGPUMeshExportDialog()
     {
-        if (m_exportFuture.valid())
+        if (m_exportJob)
         {
-            m_exportFuture.wait();
-            try
-            {
-                m_exportFuture.get();
-            }
-            catch (...)
-            {
-            }
+            m_exportJob->requestCancellation();
+            m_exportJob->wait();
         }
 
         if (m_exportInProgress && m_exportState != nullptr)
@@ -85,9 +78,28 @@ namespace gladius::ui
 
         if (m_exportInProgress)
         {
+            auto const status = m_exportJob->getStatus();
             ImGui::TextWrapped(
               "Generating the mesh on WebGPU and meshing on the CPU. Model editing is disabled "
               "until export completes.");
+            if (!status.phase.empty())
+            {
+                ImGui::TextDisabled("%s", status.phase.c_str());
+            }
+            if (status.state == io::MeshExportJobState::Cancelling)
+            {
+                ImGui::BeginDisabled();
+                ImGui::Button("Cancelling...");
+                ImGui::EndDisabled();
+            }
+            else if (ImGui::Button("Cancel Export"))
+            {
+                m_exportJob->requestCancellation();
+                if (m_exportState != nullptr)
+                {
+                    m_exportState->requestCancellation();
+                }
+            }
         }
         else if (m_fileDialog.isActive())
         {
@@ -183,20 +195,25 @@ namespace gladius::ui
 
         try
         {
-            m_exportFuture = std::async(
-              std::launch::async,
+            m_exportJob = std::make_unique<io::AsyncMeshExportJob>(
               [document = std::move(document),
                filename = std::move(filename),
                options,
-               exportThreeMf]()
+               exportThreeMf](auto const& shouldCancel, auto const& reportProgress)
               {
+                  reportProgress(0.0, "Preparing WebGPU export");
+                  if (shouldCancel())
+                  {
+                      throw io::MeshExportCancelled{};
+                  }
+                  reportProgress(0.0, "Sampling and meshing the model");
                   if (exportThreeMf)
                   {
-                      document->exportAs3mf(filename, options);
+                      document->exportAs3mf(filename, options, shouldCancel);
                   }
                   else
                   {
-                      document->exportAsStl(filename, options);
+                      document->exportAsStl(filename, options, shouldCancel);
                   }
               });
             m_exportInProgress = true;
@@ -214,30 +231,39 @@ namespace gladius::ui
 
     void WebGPUMeshExportDialog::pollExport()
     {
-        if (!m_exportInProgress || !m_exportFuture.valid() ||
-            m_exportFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        if (!m_exportInProgress || !m_exportJob)
         {
             return;
         }
 
-        try
+        m_exportJob->poll();
+        auto const status = m_exportJob->getStatus();
+        if (status.state == io::MeshExportJobState::Running ||
+            status.state == io::MeshExportJobState::Cancelling)
         {
-            m_exportFuture.get();
+            return;
+        }
+
+        if (status.state == io::MeshExportJobState::Completed)
+        {
             m_statusMessage = "Export completed: " + m_targetFilename.string();
             m_errorMessage.clear();
         }
-        catch (std::exception const & error)
+        else if (status.state == io::MeshExportJobState::Cancelled)
         {
-            m_statusMessage.clear();
-            m_errorMessage = error.what();
+            m_statusMessage = "Export cancelled";
+            m_errorMessage.clear();
         }
-        catch (...)
+        else
         {
             m_statusMessage.clear();
-            m_errorMessage = "Unknown error while exporting the WebGPU STL mesh.";
+            m_errorMessage = status.errorMessage.empty()
+                               ? "Unknown error while exporting the WebGPU mesh."
+                               : status.errorMessage;
         }
 
         m_exportInProgress = false;
+        m_exportJob.reset();
         if (m_exportState != nullptr)
         {
             m_exportState->endExport();

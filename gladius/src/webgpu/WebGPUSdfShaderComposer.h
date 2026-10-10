@@ -32,5 +32,12 @@ namespace gladius::webgpu
                                                                     bool includeMesh,
                                                                     bool includeBeam,
                                                                     bool includeImage);
+
+        /// Compose a color-output evaluation shader with the required resource modules.
+        [[nodiscard]] static std::string composeColorWithResourceSupport(
+          std::string_view modelEvaluator,
+          bool includeMesh,
+          bool includeBeam,
+          bool includeImage);
     };
 }

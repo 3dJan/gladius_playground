@@ -115,9 +115,15 @@ namespace gladius::io
         m_exportFuture = std::async(std::launch::async, [this, &generator]() {
             try
             {
-                performExport(generator);
-                m_state = State::Completed;
-                m_progress = 1.0;
+                if (performExport(generator))
+                {
+                    m_state = State::Completed;
+                    m_progress = 1.0;
+                }
+                else
+                {
+                    m_state = State::Idle;
+                }
             }
             catch (std::exception const & ex)
             {
@@ -192,7 +198,7 @@ namespace gladius::io
         return m_errorMessage;
     }
 
-    void ManifoldDualContouringStlExporter::performExport(ComputeCore & generator)
+    bool ManifoldDualContouringStlExporter::performExport(ComputeCore & generator)
     {
         if (m_targetFile.empty())
         {
@@ -215,7 +221,7 @@ namespace gladius::io
         if (isCancellationRequested())
         {
             m_state = State::Idle;
-            return;
+            return false;
         }
 
         m_progress = 0.05;
@@ -298,7 +304,7 @@ namespace gladius::io
         if (isCancellationRequested())
         {
             m_state = State::Idle;
-            return;
+            return false;
         }
 
         auto const & mesh = gpuPipeline.getMesh();
@@ -313,10 +319,14 @@ namespace gladius::io
         if (isCancellationRequested())
         {
             m_state = State::Idle;
-            return;
+            return false;
         }
 
-        writeMeshToFile(generator, mesh.positions, mesh.indices, mesh.normals);
+        if (!writeMeshToFile(generator, mesh.positions, mesh.indices, mesh.normals))
+        {
+            m_state = State::Idle;
+            return false;
+        }
 
         if (m_logger)
         {
@@ -325,14 +335,19 @@ namespace gladius::io
                            m_targetFile.string()),
                events::Severity::Info});
         }
+         return true;
     }
 
-    void ManifoldDualContouringStlExporter::writeMeshToFile(
+    bool ManifoldDualContouringStlExporter::writeMeshToFile(
       ComputeCore & generator,
       std::vector<Eigen::Vector3f> const & positions,
       std::vector<std::uint32_t> const & indices,
       std::vector<Eigen::Vector3f> const & normals)
     {
+        if (isCancellationRequested())
+        {
+            return false;
+        }
         if (indices.size() % 3U != 0U)
         {
             throw std::runtime_error("Manifold dual contouring mesh has incomplete triangles");
@@ -357,6 +372,10 @@ namespace gladius::io
         std::vector<std::uint32_t> triangleComponents;
         WindingRepairStats const repairStats =
             repairTriangleWindingConsistency(positions, repairedIndices, &triangleComponents);
+        if (isCancellationRequested())
+        {
+            return false;
+        }
         std::size_t sdfOrientedComponents = 0U;
         auto const orientationSamples = makeTriangleOrientationSamples(
             positions, repairedIndices, triangleComponents, 128U);
@@ -398,6 +417,11 @@ namespace gladius::io
                 sdfValues,
                 gradients,
                 callbacks);
+            if (status == compute::ManifoldSdfSamplingStatus::Cancelled &&
+                isCancellationRequested())
+            {
+                return false;
+            }
             if (status != compute::ManifoldSdfSamplingStatus::Completed ||
                 sdfValues.size() != orientationSamples.size() ||
                 gradients.size() != orientationSamples.size())
@@ -423,6 +447,10 @@ namespace gladius::io
             }
             sdfOrientedComponents = orientTriangleComponentsByVotes(
                 repairedIndices, triangleComponents, componentVotes);
+        }
+        if (isCancellationRequested())
+        {
+            return false;
         }
         if (m_logger)
         {
@@ -513,6 +541,10 @@ namespace gladius::io
         {
             throw std::runtime_error("Manifold dual contouring produced no valid faces");
         }
+        if (isCancellationRequested())
+        {
+            return false;
+        }
 
         // Write to the appropriate format
         if (m_outputFormat == MeshOutputFileFormat::ThreeMF)
@@ -555,5 +587,6 @@ namespace gladius::io
             vdb::exportMeshToSTL(convertedMesh, m_targetFile);
             m_progress.store(1.0, std::memory_order_relaxed);
         }
+        return true;
     }
 }

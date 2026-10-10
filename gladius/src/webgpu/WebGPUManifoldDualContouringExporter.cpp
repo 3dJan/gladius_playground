@@ -5,6 +5,7 @@
 #include "compute/GlobalMortonOctree.h"
 #include "io/3mf/IndexedTriangleMesh3mfWriter.h"
 #include "io/IndexedTriangleMeshWriter.h"
+#include "io/MeshExportJob.h"
 #include "io/WindingRepair.h"
 #include "webgpu/WebGPUSdfEvaluationRequest.h"
 
@@ -42,7 +43,7 @@ namespace gladius::webgpu
         {
             if (isCancelled(shouldCancel))
             {
-                throw std::runtime_error("WebGPU manifold mesh export was cancelled");
+                throw io::MeshExportCancelled{};
             }
         }
 
@@ -55,7 +56,7 @@ namespace gladius::webgpu
             }
             if (status == compute::ManifoldSdfSamplingStatus::Cancelled || isCancelled(shouldCancel))
             {
-                throw std::runtime_error("WebGPU manifold mesh export was cancelled");
+                throw io::MeshExportCancelled{};
             }
             throw std::runtime_error("WebGPU manifold SDF sampling is unavailable or incomplete"); 
         }
@@ -91,6 +92,7 @@ namespace gladius::webgpu
         void adoptVerticesToSurface(
             WebGPUManifoldSdfSampler const& sampler,
             std::vector<Eigen::Vector3f>& positions,
+            float const isoValue,
             WebGPUSdfEvaluator::CancellationPredicate const& shouldCancel)
         {
             if (positions.empty())
@@ -133,7 +135,7 @@ namespace gladius::webgpu
                 }
 
                 requireCompleted(
-                    sampler.evaluateSdfBatch(queryPositions, 0.0F, values, callbacks),
+                    sampler.evaluateSdfBatch(queryPositions, isoValue, values, callbacks),
                     shouldCancel);
                 if (values.size() != queryPositions.size())
                 {
@@ -201,7 +203,8 @@ namespace gladius::webgpu
         {
             throw std::invalid_argument("WebGPU manifold export requires authoritative model bounds");
         }
-        if (!std::isfinite(options.isoValue) || options.initialDepth == 0U ||
+        if (!std::isfinite(options.isoValue) || !std::isfinite(options.minFeatureSize) ||
+            options.minFeatureSize < 0.0F || options.initialDepth == 0U ||
             options.initialDepth > options.maxDepth || options.maxDepth > kMaximumManifoldDepth)
         {
             throw std::invalid_argument("WebGPU manifold export received unsupported depth or iso settings");
@@ -210,11 +213,6 @@ namespace gladius::webgpu
         {
             throw std::invalid_argument(
                 "WebGPU manifold export currently requires the shared hierarchical extraction path");
-        }
-        if (options.minFeatureSize > 0.0F)
-        {
-            throw std::invalid_argument(
-                "WebGPU manifold export does not yet support minimum-feature chunking");
         }
         if (options.enableSharpFeaturePostProcess)
         {
@@ -231,6 +229,33 @@ namespace gladius::webgpu
                 "WebGPU manifold export does not yet support SDF-aware QEM simplification");
         }
 
+                std::size_t effectiveMaxDepth = options.maxDepth;
+                if (options.enableChunking && options.minFeatureSize > 0.0F)
+                {
+                        auto const & modelBounds = *bounds.modelBounds;
+                        Eigen::Vector3f const boundsSize{
+                            modelBounds.max[0] - modelBounds.min[0],
+                            modelBounds.max[1] - modelBounds.min[1],
+                            modelBounds.max[2] - modelBounds.min[2]};
+                        float const maxExtent = boundsSize.maxCoeff();
+                        float const depthRatio = maxExtent / options.minFeatureSize;
+                        if (!std::isfinite(maxExtent) || maxExtent <= 0.0F || !std::isfinite(depthRatio))
+                        {
+                                throw std::invalid_argument(
+                                    "WebGPU manifold export received invalid minimum-feature bounds");
+                        }
+                        if (depthRatio > 1.0F)
+                        {
+                                auto const requiredDepth = static_cast<std::size_t>(std::ceil(std::log2(depthRatio)));
+                                effectiveMaxDepth = std::max(effectiveMaxDepth, requiredDepth);
+                        }
+                        if (effectiveMaxDepth > kMaximumManifoldDepth)
+                        {
+                                throw std::invalid_argument(
+                                    "Requested minimum feature size exceeds WebGPU manifold depth capacity");
+                        }
+                }
+
         throwIfCancelled(shouldCancel);
         auto sdfRequest = makeSdfEvaluationRequest(snapshot, options.isoValue);
         WebGPUManifoldSdfSampler sampler{std::move(context), std::move(sdfRequest)};
@@ -242,11 +267,11 @@ namespace gladius::webgpu
 
         compute::GlobalMortonOctreeConfig config;
         config.initialDepth = options.initialDepth;
-        config.maxDepth = options.maxDepth;
+        config.maxDepth = effectiveMaxDepth;
         config.isoValue = options.isoValue;
         config.minFeatureSize = options.minFeatureSize;
         config.enableAdaptiveRefinement = false;
-        setPaddedBounds(config, bounds, options.maxDepth);
+        setPaddedBounds(config, bounds, effectiveMaxDepth);
         octree.build(config);
         throwIfCancelled(shouldCancel);
         if (octree.hasSamplingError())
@@ -298,7 +323,7 @@ namespace gladius::webgpu
         // neighboring iso-surface branch, and the QEM threshold is not a strict distance bound.
         if (options.projectToSurface && !hasBoundedFastQem)
         {
-            adoptVerticesToSurface(sampler, mesh.positions, shouldCancel);
+            adoptVerticesToSurface(sampler, mesh.positions, options.isoValue, shouldCancel);
         }
 
         std::vector<std::uint32_t> triangleComponents;
@@ -324,7 +349,7 @@ namespace gladius::webgpu
                  Eigen::Vector3f(bounds.modelBounds->min[0], bounds.modelBounds->min[1],
                                  bounds.modelBounds->min[2]))
                     .maxCoeff();
-            float const cellWidth = maxExtent / std::exp2(static_cast<float>(options.maxDepth));
+            float const cellWidth = maxExtent / std::exp2(static_cast<float>(effectiveMaxDepth));
             float const sdfDistanceTolerance = std::max(1.0e-4F, cellWidth * 0.5F);
             float const gradientEpsilon = std::max(1.0e-5F, cellWidth * 0.01F);
             auto const status = sampler.evaluateSdfGradientBatch(
@@ -384,7 +409,11 @@ namespace gladius::webgpu
         io::ManifoldDualContouringOptions const& options,
         WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
     {
-        auto mesh = generateMesh(std::move(context), snapshot, bounds, options, std::move(shouldCancel));
+        auto mesh = generateMesh(std::move(context), snapshot, bounds, options, shouldCancel);
+        if (shouldCancel && shouldCancel())
+        {
+            throw io::MeshExportCancelled{};
+        }
         io::writeIndexedMeshToBinaryStl(filePath, mesh, kWebGpuOutputValidationPolicy);
     }
 
@@ -396,7 +425,11 @@ namespace gladius::webgpu
         io::ManifoldDualContouringOptions const& options,
         WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
     {
-        auto mesh = generateMesh(std::move(context), snapshot, bounds, options, std::move(shouldCancel));
+        auto mesh = generateMesh(std::move(context), snapshot, bounds, options, shouldCancel);
+        if (shouldCancel && shouldCancel())
+        {
+            throw io::MeshExportCancelled{};
+        }
         io::IndexedTriangleMesh3mfWriter writer;
         writer.exportMesh(filePath,
                           mesh,

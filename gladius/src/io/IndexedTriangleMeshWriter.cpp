@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <ostream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -134,10 +136,14 @@ namespace gladius::io
         IndexedTriangleMeshValidationPolicy policy)
     {
         auto const triangleCount = getValidatedTriangleCount(mesh, policy);
-        std::ofstream output(filePath, std::ios::binary | std::ios::trunc);
+        auto temporaryPath = filePath;
+        temporaryPath += ".tmp." + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count());
+        std::ofstream output(temporaryPath, std::ios::binary | std::ios::trunc);
         if (!output)
         {
-            throw std::runtime_error("Could not open STL output file: " + filePath.string());
+            throw std::runtime_error("Could not open temporary STL output file: " +
+                                     temporaryPath.string());
         }
 
         try
@@ -146,13 +152,21 @@ namespace gladius::io
             output.flush();
             if (!output)
             {
-                throw std::runtime_error("Failed to flush STL output file: " + filePath.string());
+                throw std::runtime_error("Failed to flush temporary STL output file: " +
+                                         temporaryPath.string());
             }
 
             output.close();
             if (!output)
             {
-                throw std::runtime_error("Failed to close STL output file: " + filePath.string());
+                throw std::runtime_error("Failed to close temporary STL output file: " +
+                                         temporaryPath.string());
+            }
+            std::error_code error;
+            std::filesystem::rename(temporaryPath, filePath, error);
+            if (error)
+            {
+                throw std::runtime_error("Could not finalize STL output file: " + error.message());
             }
         }
         catch (...)
@@ -162,7 +176,7 @@ namespace gladius::io
                 output.close();
             }
             std::error_code error;
-            std::filesystem::remove(filePath, error);
+            std::filesystem::remove(temporaryPath, error);
             throw;
         }
     }

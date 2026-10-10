@@ -90,4 +90,84 @@ namespace gladius::io::tests
         EXPECT_THROW(writer.exportMesh(filePath, mesh), std::invalid_argument);
         EXPECT_FALSE(std::filesystem::exists(filePath));
     }
+
+    TEST(IndexedTriangleMesh3mfWriter, ExportWithColors_RoundTripsTriangleProperties)
+    {
+        auto const mesh = makeTetrahedron();
+        auto const filePath = makeTemporaryPath();
+        FaceColors colors(4u);
+        colors[0] = Color8{255u, 0u, 0u};
+        colors[1] = Color8{0u, 255u, 0u};
+        colors[2] = Color8{0u, 0u, 255u};
+        colors[3] = Color8{255u, 0u, 0u};
+        IndexedTriangleMesh3mfWriter writer;
+
+        ASSERT_NO_THROW(writer.exportMeshWithColors(filePath, mesh, "Colored tetrahedron", colors));
+        auto const wrapper = loadLib3mfScoped();
+        auto const model = wrapper->CreateModel();
+        model->QueryReader("3mf")->ReadFromFile(filePath.string());
+
+        auto const meshes = model->GetMeshObjects();
+        ASSERT_TRUE(meshes->MoveNext());
+        auto const exportedMesh = meshes->GetCurrentMeshObject();
+        std::vector<Lib3MF::sTriangleProperties> properties;
+        exportedMesh->GetAllTriangleProperties(properties);
+        ASSERT_EQ(properties.size(), 4u);
+        EXPECT_EQ(properties[0].m_PropertyIDs[0], properties[0].m_PropertyIDs[1]);
+        EXPECT_EQ(properties[0].m_PropertyIDs[1], properties[0].m_PropertyIDs[2]);
+
+        auto const colorGroups = model->GetColorGroups();
+        ASSERT_TRUE(colorGroups->MoveNext());
+        EXPECT_EQ(colorGroups->GetCurrentColorGroup()->GetCount(), 4u);
+        EXPECT_EQ(model->GetBuildItems()->Count(), 1u);
+        std::error_code cleanupError;
+        std::filesystem::remove(filePath, cleanupError);
+    }
+
+    TEST(IndexedTriangleMesh3mfWriter, ExportWithRegions_CreatesOneBuildItemPerPaletteColor)
+    {
+        auto const mesh = makeTetrahedron();
+        auto const filePath = makeTemporaryPath();
+        FaceColors colors(4u);
+        colors[0] = Color8{255u, 0u, 0u};
+        colors[1] = Color8{0u, 255u, 0u};
+        colors[2] = Color8{255u, 0u, 0u};
+        colors[3] = Color8{0u, 255u, 0u};
+        auto const palette = ColorQuantizer::quantize(colors, 2u);
+        auto const regions = ColorRegionizer::regionize(palette, PrintableRegionKind::Component);
+        IndexedTriangleMesh3mfWriter writer;
+
+        ASSERT_EQ(regions.size(), 2u);
+        ASSERT_NO_THROW(writer.exportMeshWithRegions(
+          filePath, mesh, "Region tetrahedron", palette, regions));
+        auto const wrapper = loadLib3mfScoped();
+        auto const model = wrapper->CreateModel();
+        model->QueryReader("3mf")->ReadFromFile(filePath.string());
+
+        EXPECT_EQ(model->GetMeshObjects()->Count(), 2u);
+        EXPECT_EQ(model->GetBuildItems()->Count(), 2u);
+        std::error_code cleanupError;
+        std::filesystem::remove(filePath, cleanupError);
+    }
+
+    TEST(IndexedTriangleMesh3mfWriter, ExportWithMmuSegmentation_ProducesReadable3mf)
+    {
+        auto const mesh = makeTetrahedron();
+        auto const filePath = makeTemporaryPath();
+        FaceColors colors(4u);
+        colors[0] = Color8{255u, 0u, 0u};
+        colors[1] = Color8{0u, 255u, 0u};
+        colors[2] = Color8{0u, 0u, 255u};
+        colors[3] = Color8{255u, 255u, 0u};
+        auto const palette = ColorQuantizer::quantize(colors, 4u);
+        IndexedTriangleMesh3mfWriter writer;
+
+        ASSERT_NO_THROW(writer.exportMeshWithMmuSegmentation(
+          filePath, mesh, "MMU tetrahedron", palette));
+        auto const wrapper = loadLib3mfScoped();
+        auto const model = wrapper->CreateModel();
+        EXPECT_NO_THROW(model->QueryReader("3mf")->ReadFromFile(filePath.string()));
+        std::error_code cleanupError;
+        std::filesystem::remove(filePath, cleanupError);
+    }
 } // namespace gladius::io::tests

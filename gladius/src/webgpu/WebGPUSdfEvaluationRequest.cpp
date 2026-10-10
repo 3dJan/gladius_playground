@@ -10,7 +10,8 @@ namespace gladius::webgpu
 {
     compute::SdfEvaluationRequest makeSdfEvaluationRequest(
       compute::RenderSceneSnapshot const & snapshot,
-      float const isoValue)
+            float const isoValue,
+            bool const returnColor)
     {
         if (!snapshot.isValid())
         {
@@ -27,8 +28,17 @@ namespace gladius::webgpu
 
         compute::SdfEvaluationRequest request;
         request.isoValue = isoValue;
-        request.shaderSource = WebGPUSdfShaderComposer::composeWithResourceSupport(
-          snapshot.analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+                request.returnColor = returnColor;
+                if (returnColor)
+                {
+                        request.shaderSource = WebGPUSdfShaderComposer::composeColorWithResourceSupport(
+                            snapshot.analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+                }
+                else
+                {
+                        request.shaderSource = WebGPUSdfShaderComposer::composeWithResourceSupport(
+                            snapshot.analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+                }
         request.parameterValues = snapshot.parameterValues;
 
         request.meshPayloadTable.reserve(snapshot.meshResources.size());

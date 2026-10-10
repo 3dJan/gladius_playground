@@ -22,11 +22,8 @@
 #include "GLView.h"
 #include "LibraryExportDialog.h"
 #include "LogView.h"
-#if defined(GLADIUS_ENABLE_OPENCL)
+#if defined(GLADIUS_ENABLE_OPENCL) || defined(GLADIUS_ENABLE_WEBGPU)
 #include "MeshExportDialog.h"
-#endif
-#if defined(GLADIUS_ENABLE_WEBGPU)
-#include "WebGPUMeshExportDialog.h"
 #endif
 #include "ModelEditor.h"
 #include "Outline.h"
@@ -342,12 +339,11 @@ namespace gladius::ui
         bool m_showAuthoringTools{true};
         // Keep the state alive longer than either export dialog.
         ExportState m_exportState;
-    #if defined(GLADIUS_ENABLE_OPENCL)
+    #if defined(GLADIUS_ENABLE_OPENCL) || defined(GLADIUS_ENABLE_WEBGPU)
         MeshExportDialog m_meshExporterDialog;
+#endif
+    #if defined(GLADIUS_ENABLE_OPENCL)
         CliExportDialog m_cliExportDialog;
-    #endif
-    #if defined(GLADIUS_ENABLE_WEBGPU)
-        WebGPUMeshExportDialog m_webGpuMeshExportDialog;
     #endif
         LibraryExportDialog m_libraryExportDialog;
         SliceView m_sliceView;

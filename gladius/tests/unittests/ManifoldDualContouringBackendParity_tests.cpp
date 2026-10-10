@@ -551,6 +551,8 @@ namespace gladius::tests
         std::size_t maxDepth;
         std::size_t expectedComponentCount;
         bool useDialogDefaults;
+        float isoValue{0.0F};
+        bool useBoundedFastQem{true};
     };
 
     class ManifoldDualContouringBackendParity
@@ -622,14 +624,16 @@ namespace gladius::tests
         options.enableGpu = true;
         options.enableCpuFallback = true;
         options.enableCaching = true;
-        options.isoValue = 0.0F;
+        options.isoValue = settings.isoValue;
         options.minFeatureSize = 0.0F;
         options.enableChunking = true;
         options.enableHierarchicalOctree = true;
         options.enableSharpFeaturePostProcess = false;
         options.projectToSurface = true;
-        options.simplificationMethod = io::SimplificationMethod::QemFast;
-        options.enableSimplification = true;
+                options.simplificationMethod =
+                    settings.useBoundedFastQem ? io::SimplificationMethod::QemFast
+                                                                         : io::SimplificationMethod::None;
+        options.enableSimplification = settings.useBoundedFastQem;
         options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
         options.simplificationMaxError = 0.05F * 0.05F;
 
@@ -967,6 +971,29 @@ namespace gladius::tests
         ASSERT_TRUE(std::filesystem::exists(webGpuStl.path()));
 
         io::IndexedTriangleMesh const webGpuMesh = readBinaryStlAsTriangleSoup(webGpuStl.path());
+        if (settings.isoValue != 0.0F && !settings.useBoundedFastQem)
+        {
+            auto const openClVertexSdf = openClProgram->evaluateSdfBatch(
+                openClMesh.positions, *primitives, options.isoValue);
+            ASSERT_EQ(openClVertexSdf.size(), openClMesh.positions.size());
+            for (float const sdf : openClVertexSdf)
+            {
+                EXPECT_NEAR(sdf, 0.0F, 2.0e-4F)
+                    << "OpenCL projected vertex must lie on the requested iso-surface";
+            }
+
+            std::vector<float> webGpuVertexSdf;
+            ASSERT_EQ(webGpuSampler.evaluateSdfBatch(
+                          webGpuMesh.positions, options.isoValue, webGpuVertexSdf, samplingCallbacks),
+                      compute::ManifoldSdfSamplingStatus::Completed);
+            ASSERT_EQ(webGpuVertexSdf.size(), webGpuMesh.positions.size());
+            for (float const sdf : webGpuVertexSdf)
+            {
+                EXPECT_NEAR(sdf, 0.0F, 2.0e-4F)
+                    << "WebGPU projected vertex must lie on the requested iso-surface";
+            }
+        }
+
         auto const validationPolicy =
             io::IndexedTriangleMeshValidationPolicy::AllowGeometricDegenerates;
         ASSERT_FALSE(openClMesh.validationError(validationPolicy).has_value())
@@ -1005,7 +1032,7 @@ namespace gladius::tests
         // Backend-specific float32 deltas can select different valid QemFast collapses.
         // Bound the comparison by both the finest-cell resolution and configured QEM distance.
         float const qemDistanceTolerance =
-            options.simplificationMaxError > 0.0F
+            settings.useBoundedFastQem && options.simplificationMaxError > 0.0F
                 ? std::sqrt(options.simplificationMaxError)
                 : 0.0F;
         float const surfaceDistanceTolerance =
@@ -1028,7 +1055,8 @@ namespace gladius::tests
                   << " initialDepth=" << options.initialDepth
                   << " maxDepth=" << options.maxDepth
                   << " branchSampleDepth=" << branchSampleDepth
-                  << " simplification=QemFast_ErrorBounded"
+                  << " simplification="
+                  << (settings.useBoundedFastQem ? "QemFast_ErrorBounded" : "None")
                   << " branchSamples=" << branchSamples.size()
                   << " signDisagreements=" << signDisagreements
                   << " maxSdfError=" << maximumSdfError
@@ -1071,7 +1099,15 @@ namespace gladius::tests
         ManifoldDualContouringBackendParity,
         ::testing::Values(ParitySettings{"SphereCoarse", "SphereInACage.3mf", 4U, 6U, 2U, false},
                           ParitySettings{"SphereDialogDefaults", "SphereInACage.3mf", 7U, 9U, 2U, true},
-                          ParitySettings{"SimpleGyroidCoarse", "SimpleGyroid.3mf", 4U, 6U, 0U, false}),
+                          ParitySettings{"SimpleGyroidCoarse", "SimpleGyroid.3mf", 4U, 6U, 0U, false},
+                          ParitySettings{"SphereNonzeroIsoProjection",
+                                         "SphereInACage.3mf",
+                                         4U,
+                                         6U,
+                                         2U,
+                                         false,
+                                         0.05F,
+                                         false}),
         [](auto const& info) { return info.param.name; });
 }
 

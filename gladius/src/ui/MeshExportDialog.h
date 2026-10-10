@@ -1,22 +1,16 @@
 #pragma once
-#include "BaseExportDialog.h"
 #include "ExportState.h"
 #include "FileDialogService.h"
-#include "io/3mf/FaceColorSampler.h"
+#include "io/MeshExportJob.h"
+#include "io/MeshExportRequest.h"
 #include "ColorToThicknessDialog.h"
-#include "io/CancellationToken.h"
-#include "io/DualContouringStlExporter.h"
-#include "io/ManifoldDualContouringStlExporter.h"
-#include "io/MeshExporter.h"
-#include "io/MeshExporter3mf.h"
-#include "io/ShellExporter.h"
-#include "io/SurfaceExtractionOptions.h"
 
 #include <cstddef>
 #include <filesystem>
+#include <future>
+#include <memory>
 #include <string>
 #include <atomic>
-#include <future>
 #include <vector>
 
 // Forward declaration
@@ -34,7 +28,7 @@ namespace gladius::ui
         ThreeMF = 1
     };
 
-    class MeshExportDialog : public BaseExportDialog
+    class MeshExportDialog final
     {
       public:
         /// @brief Set the export state reference for blocking UI during export
@@ -46,52 +40,33 @@ namespace gladius::ui
 
         /// @brief Set the document for 3MF thumbnail generation
         /// @param doc Pointer to the document (must remain valid during export)
-        void setDocument(Document const * doc)
-        {
-            m_document = doc;
-        }
-
         /// @brief Show the dialog with optional suggested filename
         /// @param suggestedFilename Optional initial filename to suggest
         void show(std::filesystem::path suggestedFilename = {});
-        
-        /// @brief Legacy beginExport - calls show() for backward compatibility
-        void beginExport(std::filesystem::path const & stlFilename, ComputeCore & core) override;
-        void render(ComputeCore & core) override;
+        [[nodiscard]] bool isVisible() const noexcept
+        {
+            return m_visible;
+        }
 
-      protected:
-        [[nodiscard]] std::string getWindowTitle() const override;
-        [[nodiscard]] std::string getExportMessage() const override;
-        [[nodiscard]] io::IExporter & getExporter() override;
-
-        void finalizeExport() override;
-        void onExportCancelled() override;
-        void onExportCompleted() override;
+        void render(std::shared_ptr<Document> const & document);
 
       private:
-        void renderConfiguration(ComputeCore & core);
+        void pollExportJob();
+        void renderConfiguration(std::shared_ptr<Document> const & document);
         void renderFileSelection();
         void renderMeshExtractionTab();
         void renderColorMaterialTab();
         void renderStatusArea();
-          void derivePaletteFromMesh();
-        void exportShellsTo3mf(ComputeCore & core);
-        void startExport(ComputeCore & core);
+        void derivePaletteFromMesh();
+        void startExport(std::shared_ptr<Document> const & document);
         void resetState();
         void resetExportState();
-
-        template <typename Exporter>
-        void applyColorSettings(Exporter& exporter, bool exportColors);
+        [[nodiscard]] io::ManifoldDualContouringOptions makeManifoldOptions() const;
 
         std::filesystem::path m_targetFile;
-        vdb::MeshExporter m_layeredExporter;
-        vdb::MeshExporter3mf m_layeredExporter3mf;
-        io::DualContouringStlExporter m_dualExporter;
-        io::ManifoldDualContouringStlExporter m_manifoldExporter;
-        io::ShellExporter m_shellExporter;
-        io::IExporter * m_activeExporter = nullptr;
-        ComputeCore * m_computeCore = nullptr;
-        Document const * m_document = nullptr;
+        bool m_visible{false};
+        std::unique_ptr<io::AsyncMeshExportJob> m_exportJob;
+        std::weak_ptr<Document> m_document;
         MeshOutputFormat m_outputFormat = MeshOutputFormat::ThreeMF;
         io::SurfaceExtractionMethod m_selectedMethod =
           io::SurfaceExtractionMethod::ManifoldDualContouring;
@@ -156,7 +131,5 @@ namespace gladius::ui
         std::atomic<bool> m_paletteDeriveInProgress{false};
         bool m_paletteHandlerBound{false};
 
-        // Cooperative cancellation token for async export
-        io::CancellationToken m_cancellationToken;
     };
 } // namespace gladius::ui

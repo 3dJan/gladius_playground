@@ -251,11 +251,8 @@ namespace gladius::ui
     #endif
 
         // Wire up export state to dialogs and editors that need it
-    #if defined(GLADIUS_ENABLE_OPENCL)
+    #if defined(GLADIUS_ENABLE_OPENCL) || defined(GLADIUS_ENABLE_WEBGPU)
         m_meshExporterDialog.setExportState(&m_exportState);
-    #endif
-    #if defined(GLADIUS_ENABLE_WEBGPU)
-        m_webGpuMeshExportDialog.setExportState(&m_exportState);
     #endif
         m_modelEditor.setExportState(&m_exportState);
 
@@ -2096,17 +2093,28 @@ namespace gladius::ui
             showWelcomeScreen();
         }
 
+        // Disable export menu items if an asynchronous file dialog is active.
+        bool const dialogActive = m_asyncFileDialog.isActive();
+
     #if defined(GLADIUS_ENABLE_OPENCL)
         bool const openCLSelected =
           m_runtime && m_runtime->getBackendKind() == compute::ComputeBackendKind::OpenCL;
+    #else
+        bool const openCLSelected = false;
+    #endif
+    #if defined(GLADIUS_ENABLE_WEBGPU)
+        bool const webGPUSelected =
+          m_runtime && m_runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU;
+    #else
+        bool const webGPUSelected = false;
+    #endif
+
+        #if defined(GLADIUS_ENABLE_OPENCL)
         if (openCLSelected)
         {
             ImGui::Separator();
             ImGui::TextUnformatted("Export");
         }
-
-        // Disable export menu items if async dialog is active
-        bool const dialogActive = m_asyncFileDialog.isActive();
 
         if (m_computeAvailable && openCLSelected)
         {
@@ -2155,49 +2163,25 @@ namespace gladius::ui
                 m_asyncFileDialog.saveFile({"*.nvdb"});
             }
 
-            if (ImGui::MenuItem(
-                  reinterpret_cast<const char *>("\t" ICON_FA_FILE_CODE "\tMesh Export...")))
-            {
-                closeMenu();
-                // Open dialog with suggested filename based on current assembly
-                std::filesystem::path suggestedFilename;
-                if (m_currentAssemblyFileName.has_value())
-                {
-                    suggestedFilename = m_currentAssemblyFileName.value();
-                    // Strip .implicit or other compound extensions from stem
-                    auto stem = suggestedFilename.stem();
-                    while (stem.extension() == ".implicit" || stem.extension() == ".model")
-                    {
-                        stem = stem.stem();
-                    }
-                    suggestedFilename =
-                      suggestedFilename.parent_path() / (stem.string() + ".model.3mf");
-                }
-                else
-                {
-                    suggestedFilename = "part.model.3mf";
-                }
-                m_meshExporterDialog.setDocument(m_doc.get());
-                m_meshExporterDialog.show(suggestedFilename);
-            }
             ImGui::EndDisabled();
         }
     #endif
 
-    #if defined(GLADIUS_ENABLE_WEBGPU)
-        bool const webGPUSelected =
-          m_runtime && m_runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU;
-        if (webGPUSelected)
+        if (openCLSelected || webGPUSelected)
         {
-            ImGui::Separator();
-            ImGui::TextUnformatted("Export");
+            if (!openCLSelected)
+            {
+                ImGui::Separator();
+                ImGui::TextUnformatted("Export");
+            }
 
-            ImGui::BeginDisabled(!m_computeAvailable || !m_doc ||
-                                 loadingInProgress || m_webGpuMeshExportDialog.isBusy());
-            if (ImGui::MenuItem("Mesh Export..."))
+            ImGui::BeginDisabled(!m_computeAvailable || !m_doc || loadingInProgress ||
+                                 dialogActive || m_exportState.isExportInProgress());
+            if (ImGui::MenuItem(
+                  reinterpret_cast<const char *>("\t" ICON_FA_FILE_CODE "\tMesh Export...")))
             {
                 closeMenu();
-                std::filesystem::path suggestedFilename = "part.stl";
+                std::filesystem::path suggestedFilename = "part.model.3mf";
                 if (m_currentAssemblyFileName.has_value())
                 {
                     auto const sourceFilename = m_currentAssemblyFileName.value();
@@ -2207,16 +2191,12 @@ namespace gladius::ui
                         stem = stem.stem();
                     }
                     suggestedFilename =
-                      sourceFilename.parent_path() / (stem.string() + ".stl");
+                      sourceFilename.parent_path() / (stem.string() + ".model.3mf");
                 }
-                m_webGpuMeshExportDialog.show(std::move(suggestedFilename));
+                m_meshExporterDialog.show(std::move(suggestedFilename));
             }
             ImGui::EndDisabled();
-            ImGui::TextDisabled(
-                            "Standard dual contouring to STL or geometry-only 3MF; manifold, per-face "
-                            "color/material, and shell export are not yet supported.");
         }
-    #endif
 
         if (!m_computeAvailable || !m_runtime)
         {
@@ -2372,20 +2352,8 @@ namespace gladius::ui
 
     void MainWindow::meshExportDialog()
     {
-#if defined(GLADIUS_ENABLE_WEBGPU)
-        if (m_runtime && m_runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU)
-        {
-            if (m_webGpuMeshExportDialog.isVisible())
-            {
-                m_mainView.startAnimationMode();
-            }
-            m_webGpuMeshExportDialog.render(m_doc);
-            return;
-        }
-#endif
-
-#if defined(GLADIUS_ENABLE_OPENCL)
-        if (!m_core)
+#if defined(GLADIUS_ENABLE_OPENCL) || defined(GLADIUS_ENABLE_WEBGPU)
+        if (!m_doc)
         {
             return;
         }
@@ -2394,7 +2362,7 @@ namespace gladius::ui
         {
             m_mainView.startAnimationMode();
         }
-        m_meshExporterDialog.render(*m_core);
+        m_meshExporterDialog.render(m_doc);
 #endif
     }
 

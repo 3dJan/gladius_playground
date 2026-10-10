@@ -2030,7 +2030,7 @@ namespace gladius::compute
             vertexBuffer.write();
 
             // Use ComputeCore's adoptVertexOfMeshToSurface which handles primitives setup
-            m_core.adoptVertexOfMeshToSurface(vertexBuffer);
+            m_core.adoptVertexOfMeshToSurface(vertexBuffer, m_config.isoValue);
 
             // Read back projected positions
             vertexBuffer.read();
