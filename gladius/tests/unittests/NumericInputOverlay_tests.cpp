@@ -26,10 +26,30 @@ namespace gladius::ui::tests
     TEST(NumericInputOverlay, InitialStep_UsesDecimalPowersBasedOnValueMagnitude)
     {
         EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(0.f), 0.01f);
-        EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(12.5f), 0.1f);
-        EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(0.5f), 0.001f);
-        EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(0.003f), 0.00001f);
-        EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(-25.f), 0.1f);
+        EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(12.5f), 0.01f);
+        EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(0.5f), 0.0001f);
+        EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(0.003f), 0.000001f);
+        EXPECT_FLOAT_EQ(numeric_input_detail::initialStep(-25.f), 0.01f);
+    }
+
+    TEST(NumericInputOverlay, FormatInputValue_AddsTwoDecimalsAndTrimsFloatNoise)
+    {
+        EXPECT_EQ(numeric_input_detail::formatInputValue(12.5f), "12.50");
+        EXPECT_EQ(numeric_input_detail::formatInputValue(6.0190005f), "6.019");
+        EXPECT_EQ(numeric_input_detail::formatInputValue(100.f), "100.00");
+    }
+
+    TEST(NumericInputOverlay, FormatStep_PowersOfTen_HidesFloatRepresentationNoise)
+    {
+        EXPECT_EQ(numeric_input_detail::formatStep(0.000999999931f), "0.001");
+        EXPECT_EQ(numeric_input_detail::formatStep(0.00999999978f), "0.01");
+        EXPECT_EQ(numeric_input_detail::formatStep(0.100000001f), "0.1");
+        EXPECT_EQ(numeric_input_detail::formatStep(1.f), "1");
+    }
+
+    TEST(NumericInputOverlay, FormatRulerValue_PowerOfTenMajorStep_UsesExpectedDecimals)
+    {
+        EXPECT_EQ(numeric_input_detail::formatRulerValue(12.3f, 0.01f), "12.3");
     }
 
     TEST(NumericInputOverlay, RulerOffsetForValue_ValueBetweenMajorTicks_AlignsTicksToExactValues)
@@ -69,10 +89,26 @@ namespace gladius::ui::tests
         EXPECT_FLOAT_EQ(numeric_input_detail::scaleStepByDecade(0.01f, 1), 0.1f);
     }
 
+    TEST(NumericInputOverlay, WheelStepCount_NormalizesPlatformMagnitudeToOneStep)
+    {
+        EXPECT_EQ(numeric_input_detail::wheelStepCount(120.f), 1);
+        EXPECT_EQ(numeric_input_detail::wheelStepCount(-120.f), -1);
+        EXPECT_EQ(numeric_input_detail::wheelStepCount(0.f), 0);
+        EXPECT_EQ(numeric_input_detail::wheelStepCount(
+                    std::numeric_limits<float>::infinity()),
+                  0);
+    }
+
     TEST(NumericInputOverlay, NudgeValue_PositiveAndNegativeDirection_AppliesStep)
     {
         EXPECT_FLOAT_EQ(numeric_input_detail::nudgeValue(1.f, 0.25f, 1), 1.25f);
         EXPECT_FLOAT_EQ(numeric_input_detail::nudgeValue(1.f, 0.25f, -1), 0.75f);
+    }
+
+    TEST(NumericInputOverlay, NudgeValue_MultipleSteps_AppliesStepCount)
+    {
+        EXPECT_FLOAT_EQ(numeric_input_detail::nudgeValue(1.f, 0.25f, 3), 1.75f);
+        EXPECT_FLOAT_EQ(numeric_input_detail::nudgeValue(1.f, 0.25f, -3), 0.25f);
     }
 
     TEST(NumericInputOverlay, NudgeValue_AtFloatLimit_DoesNotOverflow)

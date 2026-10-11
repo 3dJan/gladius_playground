@@ -108,6 +108,10 @@ namespace gladius::ui
         bool m_focusInputOnOpen{false};
         std::string m_label;
         std::string m_inputText;
+        std::string m_calculatorExpression;
+        std::string m_calculatorResultText;
+        std::string m_calculatorError;
+        std::optional<float> m_calculatorResult;
         float m_initialValue{0.f};
         float m_value{0.f};
         float m_step{0.01f};

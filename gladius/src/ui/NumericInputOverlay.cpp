@@ -1,4 +1,5 @@
 #include "NumericInputOverlay.h"
+#include "NumericExpressionEvaluator.h"
 
 #include <IconFontCppHeaders/IconsFontAwesome5.h>
 #include <imgui_stdlib.h>
@@ -220,6 +221,10 @@ namespace gladius::ui
         m_label = std::move(label);
         m_angleInDegrees = angleInDegrees;
         m_value = std::isfinite(value) ? value : 0.f;
+        m_calculatorExpression.clear();
+        m_calculatorResultText.clear();
+        m_calculatorError.clear();
+        m_calculatorResult.reset();
         m_step = numeric_input_detail::initialStep(m_value);
         m_inputText = numeric_input_detail::formatInputValue(m_value);
         m_hasValidValue = true;
@@ -292,13 +297,13 @@ namespace gladius::ui
         ImGui::SetNextWindowPos(position, ImGuiCond_Appearing);
         ImGui::SetNextWindowSize(ImVec2(width, 0.f), ImGuiCond_Appearing);
         ImGui::SetNextWindowSizeConstraints(
-                    ImVec2(width, std::min(300.f * layoutScale, maxHeight)),
+                                        ImVec2(width, std::min(300.f * layoutScale, maxHeight)),
           ImVec2(width, maxHeight));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.f * layoutScale);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
-                    ImVec2(20.f * layoutScale, 18.f * layoutScale));
+                                        ImVec2(20.f * layoutScale, 18.f * layoutScale));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
-                    ImVec2(10.f * layoutScale, 10.f * layoutScale));
+                                        ImVec2(10.f * layoutScale, 10.f * layoutScale));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f * layoutScale);
 
@@ -347,6 +352,7 @@ namespace gladius::ui
         float const actionButtonWidth = 82.f * touchScale;
         bool applyRequested = false;
         bool cancelRequested = false;
+        bool calculatorTabActive = false;
 
         std::string const headerLabel = m_label.empty() || m_label == "value"
                                           ? "Value"
@@ -746,121 +752,333 @@ namespace gladius::ui
             ImGui::Spacing();
             if (ImGui::CollapsingHeader(ICON_FA_KEYBOARD "  Input tools"))
             {
-                if (ImGui::BeginTable("NumericInputTools",
-                                      2,
-                                      ImGuiTableFlags_SizingStretchProp |
-                                        ImGuiTableFlags_NoPadOuterX,
-                                      ImVec2(footerWidth, 0.f)))
+                if (ImGui::BeginTabBar("NumericInputToolsTabs"))
                 {
-                    ImGui::TableSetupColumn("NumericKeypad",
-                                            ImGuiTableColumnFlags_WidthFixed,
-                                            220.f * layoutScale);
-                    ImGui::TableSetupColumn("NumericConstants",
-                                            ImGuiTableColumnFlags_WidthStretch,
-                                            1.f);
-
-                    float const keyWidth = 60.f * touchScale;
-                    float const keyHeight = 42.f * touchScale;
-                    constexpr char const * keypad[3][3] = { {"7", "8", "9"},
-                                                             {"4", "5", "6"},
-                                                             {"1", "2", "3"} };
-                    ImGui::TableNextColumn();
-                    ImGui::TextDisabled("KEYPAD");
-                    for (auto const & row : keypad)
+                    if (ImGui::BeginTabItem("Quick Entry"))
                     {
-                        for (int column = 0; column < 3; ++column)
+                        if (ImGui::BeginTable("NumericInputTools",
+                                              2,
+                                              ImGuiTableFlags_SizingStretchProp |
+                                                ImGuiTableFlags_NoPadOuterX,
+                                              ImVec2(footerWidth, 0.f)))
                         {
-                            char const * key = row[column];
-                            if (ImGui::Button(key, ImVec2(keyWidth, keyHeight)))
-                            {
-                                appendDigit(key[0]);
-                            }
-                            if (column < 2)
-                            {
-                                ImGui::SameLine(0.f, spacing);
-                            }
-                        }
-                    }
-                    if (ImGui::Button("0", ImVec2(keyWidth, keyHeight)))
-                    {
-                        appendDigit('0');
-                    }
-                    ImGui::SameLine(0.f, spacing);
-                    if (ImGui::Button(".", ImVec2(keyWidth, keyHeight)))
-                    {
-                        appendDecimal();
-                    }
-                    ImGui::SameLine(0.f, spacing);
-                    if (ImGui::Button("Del", ImVec2(keyWidth, keyHeight)))
-                    {
-                        eraseLastCharacter();
-                    }
-                    if (ImGui::Button("+/-",
-                                      ImVec2(keyWidth * 3.f + spacing * 2.f, keyHeight)))
-                    {
-                        toggleSign();
-                    }
+                            ImGui::TableSetupColumn("NumericKeypad",
+                                                    ImGuiTableColumnFlags_WidthFixed,
+                                                    220.f * layoutScale);
+                            ImGui::TableSetupColumn("NumericConstants",
+                                                    ImGuiTableColumnFlags_WidthStretch,
+                                                    1.f);
 
-                    ImGui::TableNextColumn();
-                    ImGui::TextDisabled("CONSTANTS");
-                    if (ImGui::BeginTable("NumericInputConstantGrid",
-                                          3,
-                                          ImGuiTableFlags_SizingStretchProp |
-                                            ImGuiTableFlags_NoPadOuterX))
-                    {
-                        auto addConstant = [this, keyHeight](char const * label,
-                                                             NumericConstant constant)
-                        {
+                            float const keyWidth = 60.f * touchScale;
+                            float const keyHeight = 42.f * touchScale;
+                            constexpr char const * keypad[3][3] = { {"7", "8", "9"},
+                                                                     {"4", "5", "6"},
+                                                                     {"1", "2", "3"} };
                             ImGui::TableNextColumn();
-                            if (ImGui::Button(label,
-                                              ImVec2(ImGui::GetContentRegionAvail().x, keyHeight)))
+                            ImGui::TextDisabled("KEYPAD");
+                            for (auto const & row : keypad)
                             {
-                                                                float const value = numeric_input_detail::constantValue(
-                                                                    constant, m_angleInDegrees);
-                                                                m_step = numeric_input_detail::initialStep(value);
-                                                                setValue(value);
+                                for (int column = 0; column < 3; ++column)
+                                {
+                                    char const * key = row[column];
+                                    if (ImGui::Button(key, ImVec2(keyWidth, keyHeight)))
+                                    {
+                                        appendDigit(key[0]);
+                                    }
+                                    if (column < 2)
+                                    {
+                                        ImGui::SameLine(0.f, spacing);
+                                    }
+                                }
                             }
-                        };
-                        constexpr std::pair<char const *, NumericConstant> constants[] = {
-                          {"pi", NumericConstant::Pi},
-                          {"e", NumericConstant::Euler},
-                          {"sqrt(2)", NumericConstant::SqrtTwo},
-                          {"tau", NumericConstant::Tau},
-                          {"phi", NumericConstant::GoldenRatio},
-                          {"sqrt(3)", NumericConstant::SqrtThree},
-                          {"ln(2)", NumericConstant::LnTwo},
-                          {"ln(10)", NumericConstant::LnTen}};
-                        for (auto const & [label, constant] : constants)
-                        {
-                            addConstant(label, constant);
+                            if (ImGui::Button("0", ImVec2(keyWidth, keyHeight)))
+                            {
+                                appendDigit('0');
+                            }
+                            ImGui::SameLine(0.f, spacing);
+                            if (ImGui::Button(".", ImVec2(keyWidth, keyHeight)))
+                            {
+                                appendDecimal();
+                            }
+                            ImGui::SameLine(0.f, spacing);
+                            if (ImGui::Button("Del", ImVec2(keyWidth, keyHeight)))
+                            {
+                                eraseLastCharacter();
+                            }
+                            if (ImGui::Button("+/-",
+                                              ImVec2(keyWidth * 3.f + spacing * 2.f, keyHeight)))
+                            {
+                                toggleSign();
+                            }
+
+                            ImGui::TableNextColumn();
+                            ImGui::TextDisabled("CONSTANTS");
+                            if (ImGui::BeginTable("NumericInputConstantGrid",
+                                                  3,
+                                                  ImGuiTableFlags_SizingStretchProp |
+                                                    ImGuiTableFlags_NoPadOuterX))
+                            {
+                                auto addConstant = [this, keyHeight](char const * label,
+                                                                     NumericConstant constant)
+                                {
+                                    ImGui::TableNextColumn();
+                                    if (ImGui::Button(
+                                          label,
+                                          ImVec2(ImGui::GetContentRegionAvail().x, keyHeight)))
+                                    {
+                                        float const value = numeric_input_detail::constantValue(
+                                          constant, m_angleInDegrees);
+                                        m_step = numeric_input_detail::initialStep(value);
+                                        setValue(value);
+                                    }
+                                };
+                                constexpr std::pair<char const *, NumericConstant> constants[] = {
+                                  {"pi", NumericConstant::Pi},
+                                  {"e", NumericConstant::Euler},
+                                  {"sqrt(2)", NumericConstant::SqrtTwo},
+                                  {"tau", NumericConstant::Tau},
+                                  {"phi", NumericConstant::GoldenRatio},
+                                  {"sqrt(3)", NumericConstant::SqrtThree},
+                                  {"ln(2)", NumericConstant::LnTwo},
+                                  {"ln(10)", NumericConstant::LnTen}};
+                                for (auto const & [label, constant] : constants)
+                                {
+                                    addConstant(label, constant);
+                                }
+                                ImGui::EndTable();
+                            }
+                            if (m_angleInDegrees)
+                            {
+                                ImGui::Spacing();
+                                ImGui::TextDisabled("ANGLE IN DEGREES");
+                                float const angleButtonWidth =
+                                  std::max(1.f,
+                                           (ImGui::GetContentRegionAvail().x - spacing * 3.f) /
+                                             4.f);
+                                constexpr std::pair<char const *, float> anglePresets[] = {
+                                  {"45", 45.f}, {"90", 90.f}, {"180", 180.f}, {"270", 270.f}};
+                                int angleIndex = 0;
+                                for (auto const & [label, value] : anglePresets)
+                                {
+                                    if (angleIndex++ > 0)
+                                    {
+                                        ImGui::SameLine(0.f, spacing);
+                                    }
+                                    if (ImGui::Button(label,
+                                                      ImVec2(angleButtonWidth, keyHeight)))
+                                    {
+                                        m_step = numeric_input_detail::initialStep(value);
+                                        setValue(value);
+                                    }
+                                }
+                            }
+                            ImGui::EndTable();
                         }
-                        ImGui::EndTable();
+                        ImGui::EndTabItem();
                     }
-                    if (m_angleInDegrees)
+
+                    if (ImGui::BeginTabItem("Calculator"))
                     {
-                        ImGui::Spacing();
-                        ImGui::TextDisabled("ANGLE IN DEGREES");
-                        float const angleButtonWidth =
-                          std::max(1.f,
-                                   (ImGui::GetContentRegionAvail().x - spacing * 3.f) / 4.f);
-                        constexpr std::pair<char const *, float> anglePresets[] = {
-                          {"45", 45.f}, {"90", 90.f}, {"180", 180.f}, {"270", 270.f}};
-                        int angleIndex = 0;
-                        for (auto const & [label, value] : anglePresets)
+                        calculatorTabActive = true;
+                        auto evaluateCalculator = [this]()
                         {
-                            if (angleIndex++ > 0)
+                            if (m_calculatorExpression.find_first_not_of(" \t\r\n") ==
+                                std::string::npos)
                             {
-                                ImGui::SameLine(0.f, spacing);
+                                m_calculatorResult.reset();
+                                m_calculatorResultText.clear();
+                                m_calculatorError.clear();
+                                return;
                             }
-                            if (ImGui::Button(label,
-                                              ImVec2(angleButtonWidth, keyHeight)))
-                            {
-                                m_step = numeric_input_detail::initialStep(value);
-                                setValue(value);
-                            }
+
+                            auto const evaluation = numeric_input_detail::evaluateNumericExpression(
+                              m_calculatorExpression, m_angleInDegrees);
+                            m_calculatorResult = evaluation.value;
+                            m_calculatorError = evaluation.error;
+                            m_calculatorResultText = m_calculatorResult
+                                                       ? numeric_input_detail::formatEngineeringValue(
+                                                           *m_calculatorResult)
+                                                       : std::string{};
+                        };
+                        auto appendCalculatorText = [this, &evaluateCalculator](
+                                                      std::string_view text)
+                        {
+                            m_calculatorExpression.append(text);
+                            evaluateCalculator();
+                        };
+
+                        ImGui::TextDisabled("EXPRESSION");
+                        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                        bool const expressionChanged = ImGui::InputTextWithHint(
+                          "##numeric_calculator_expression",
+                          "e.g. 2*(3+4)",
+                          &m_calculatorExpression);
+                        if (expressionChanged)
+                        {
+                            evaluateCalculator();
                         }
+
+                                                float const calculatorActionWidth =
+                                                    std::max(1.f, ImGui::GetContentRegionAvail().x);
+                        ImGui::BeginDisabled(!m_calculatorResult.has_value() || !targetAvailable);
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.40f, 0.78f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                              ImVec4(0.16f, 0.50f, 0.92f, 1.f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                                              ImVec4(0.08f, 0.32f, 0.68f, 1.f));
+                        bool const useResultRequested =
+                          ImGui::Button("Use result",
+                                        ImVec2(calculatorActionWidth, buttonHeight));
+                        ImGui::PopStyleColor(3);
+                        ImGui::EndDisabled();
+                        if (useResultRequested && m_calculatorResult)
+                        {
+                            m_step = numeric_input_detail::initialStep(*m_calculatorResult);
+                            setValue(*m_calculatorResult);
+                        }
+
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("RESULT");
+                        if (m_calculatorResult)
+                        {
+                            ImGui::SetWindowFontScale(1.25f);
+                            ImGui::Text("%s", m_calculatorResultText.c_str());
+                            ImGui::SetWindowFontScale(1.f);
+                        }
+                        else if (!m_calculatorError.empty())
+                        {
+                            ImGui::PushTextWrapPos(0.f);
+                            ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f),
+                                               "%s",
+                                               m_calculatorError.c_str());
+                            ImGui::PopTextWrapPos();
+                        }
+                        else
+                        {
+                            ImGui::TextDisabled("Type an expression to preview its result.");
+                        }
+
+                        ImGui::Spacing();
+                        float const calculatorWidth = ImGui::GetContentRegionAvail().x;
+                        float const calculatorKeyWidth =
+                          std::max(1.f, (calculatorWidth - spacing * 3.f) / 4.f);
+                        float const calculatorKeyHeight = 42.f * touchScale;
+                        struct CalculatorKey
+                        {
+                            char const * label;
+                            char const * insertion;
+                        };
+                        CalculatorKey const numberKeys[5][4] = {
+                          { {"7", "7"}, {"8", "8"}, {"9", "9"}, {"÷", "/"} },
+                          { {"4", "4"}, {"5", "5"}, {"6", "6"}, {"×", "*"} },
+                          { {"1", "1"}, {"2", "2"}, {"3", "3"}, {"−", "-"} },
+                          { {"0", "0"}, {".", "."}, {"(", "("}, {")", ")"} },
+                          { {"^", "^"}, {"+", "+"}, {"±", nullptr}, {"⌫", nullptr} },
+                        };
+                        if (ImGui::BeginTable("NumericCalculatorKeys",
+                                              4,
+                                              ImGuiTableFlags_SizingStretchSame |
+                                                ImGuiTableFlags_NoPadOuterX,
+                                              ImVec2(calculatorWidth, 0.f)))
+                        {
+                            for (auto const & row : numberKeys)
+                            {
+                                for (CalculatorKey const & key : row)
+                                {
+                                    ImGui::TableNextColumn();
+                                    if (!ImGui::Button(key.label,
+                                                       ImVec2(calculatorKeyWidth,
+                                                              calculatorKeyHeight)))
+                                    {
+                                        continue;
+                                    }
+
+                                    if (key.insertion != nullptr)
+                                    {
+                                        appendCalculatorText(key.insertion);
+                                    }
+                                    else if (std::string_view(key.label) == "⌫")
+                                    {
+                                        if (!m_calculatorExpression.empty())
+                                        {
+                                            m_calculatorExpression.pop_back();
+                                        }
+                                        evaluateCalculator();
+                                    }
+                                    else if (m_calculatorExpression.empty())
+                                    {
+                                        appendCalculatorText("-");
+                                    }
+                                    else if (m_calculatorExpression.starts_with("-(") &&
+                                             m_calculatorExpression.ends_with(')'))
+                                    {
+                                        m_calculatorExpression = m_calculatorExpression.substr(
+                                          2, m_calculatorExpression.size() - 3);
+                                                                                evaluateCalculator();
+                                    }
+                                    else
+                                    {
+                                        m_calculatorExpression =
+                                          "-(" + m_calculatorExpression + ")";
+                                                                                evaluateCalculator();
+                                    }
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                        if (ImGui::Button("Clear expression",
+                                          ImVec2(calculatorWidth, calculatorKeyHeight)))
+                        {
+                            m_calculatorExpression.clear();
+                            evaluateCalculator();
+                        }
+
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("FUNCTIONS & CONSTANTS");
+                        struct CalculatorFunctionKey
+                        {
+                            char const * label;
+                            char const * insertion;
+                        };
+                        CalculatorFunctionKey const functionKeys[4][4] = {
+                          { {"sqrt(", "sqrt("},
+                            {"pow(", "pow("},
+                            {m_angleInDegrees ? "sin°" : "sin", "sin("},
+                            {m_angleInDegrees ? "cos°" : "cos", "cos("} },
+                          { {m_angleInDegrees ? "tan°" : "tan", "tan("},
+                            {m_angleInDegrees ? "asin°" : "asin", "asin("},
+                            {m_angleInDegrees ? "acos°" : "acos", "acos("},
+                            {m_angleInDegrees ? "atan°" : "atan", "atan("} },
+                          { {m_angleInDegrees ? "atan2°" : "atan2", "atan2("},
+                            {"ln(", "ln("},
+                            {"log10(", "log10("},
+                            {"exp(", "exp("} },
+                          { {"abs(", "abs("}, {"pi", "pi"}, {"e", "e"}, {"tau", "tau"} },
+                        };
+                        if (ImGui::BeginTable("NumericCalculatorFunctions",
+                                              4,
+                                              ImGuiTableFlags_SizingStretchSame |
+                                                ImGuiTableFlags_NoPadOuterX,
+                                              ImVec2(calculatorWidth, 0.f)))
+                        {
+                            for (auto const & row : functionKeys)
+                            {
+                                for (CalculatorFunctionKey const & key : row)
+                                {
+                                    ImGui::TableNextColumn();
+                                    if (ImGui::Button(key.label,
+                                                      ImVec2(calculatorKeyWidth,
+                                                             calculatorKeyHeight)))
+                                    {
+                                        appendCalculatorText(key.insertion);
+                                    }
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                        ImGui::EndTabItem();
                     }
-                    ImGui::EndTable();
+                    ImGui::EndTabBar();
                 }
             }
 
@@ -877,7 +1095,8 @@ namespace gladius::ui
             update.action = NumericInputOverlayAction::Cancel;
             close();
         }
-        else if (applyRequested || (enterPressed && targetAvailable && m_hasValidValue))
+        else if (applyRequested ||
+             (enterPressed && !calculatorTabActive && targetAvailable && m_hasValidValue))
         {
             update.value = changedValue;
             update.action = NumericInputOverlayAction::Apply;
@@ -900,6 +1119,10 @@ namespace gladius::ui
         m_isActive = false;
         m_valueChangedThisFrame = false;
         m_focusInputOnOpen = false;
+        m_calculatorExpression.clear();
+        m_calculatorResultText.clear();
+        m_calculatorError.clear();
+        m_calculatorResult.reset();
         m_rulerTapValue.reset();
         m_rulerWasDragged = false;
         m_rulerOffsetTicks = 0.0;
