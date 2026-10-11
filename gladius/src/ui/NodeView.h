@@ -1,8 +1,9 @@
 #pragma once
 
-#include "../nodes/Model.h"
+#include "../nodes/Assembly.h"
 #include "FileDialogService.h"
 #include "LinkColors.h"
+#include "NumericInputOverlay.h"
 #include "Style.h"
 
 #include <imgui.h>
@@ -63,7 +64,9 @@ namespace gladius::ui
 
         [[nodiscard]] auto haveParameterChanged() const -> bool;
         [[nodiscard]] auto hasModelChanged() const -> bool;
+        [[nodiscard]] bool hasNumericInputEditChangedThisFrame() const;
         void clearPerFrameFlags();
+        void drawNumericInputOverlay();
 
         void setAssembly(nodes::SharedAssembly assembly);
         void reset();
@@ -221,6 +224,14 @@ namespace gladius::ui
                         nodes::ParameterMap::reference parameter,
                         nodes::VariantType & val);
 
+        bool editFloatWithNumericOverlay(nodes::NodeBase const & node,
+                                         nodes::ParameterMap::reference parameter,
+                                         char const * label,
+                                         float * value,
+                                         int componentIndex,
+                                         bool angleInDegrees);
+        void clearNumericInputTransaction();
+
         void viewFloat(nodes::NodeBase const & node,
                        nodes::ParameterMap::reference parameter,
                        nodes::VariantType & val);
@@ -297,8 +308,22 @@ namespace gladius::ui
         nodes::SharedAssembly m_assembly;
         nodes::SharedModel m_currentModel;
 
+        struct ActiveNumericInputTarget
+        {
+            nodes::NodeId nodeId{};
+            nodes::ParameterId parameterId{};
+            int componentIndex{0};
+            bool angleInDegrees{false};
+        };
+
         ModelEditor * m_modelEditor{nullptr};
         ExportState * m_exportState{nullptr};
+        std::optional<ActiveNumericInputTarget> m_numericInputTarget;
+        NumericInputOverlay m_numericInputOverlay;
+        std::optional<nodes::Assembly> m_numericInputInitialAssembly;
+        float m_numericInputInitialValue{0.f};
+        bool m_numericInputInitialParameterModifiable{true};
+        bool m_numericInputEditChangedThisFrame{false};
         bool m_showContextMenu{false};
 
         bool m_showLinkAssignmentMenu{false};

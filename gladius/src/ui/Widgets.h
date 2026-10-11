@@ -16,7 +16,10 @@ namespace gladius::ui
                                 int numberOfDots,
                                 float speed);
 
-    bool angleEdit(const char * label, float * const angleInRadians);
+    bool angleEdit(const char * label,
+                   float * const angleInRadians,
+                   bool showPresets = true,
+                   float inputWidth = 200.f);
 
     void hyperlink(std::string const & label, std::string const & url);
 

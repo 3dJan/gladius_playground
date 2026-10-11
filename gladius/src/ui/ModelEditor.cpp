@@ -2481,13 +2481,17 @@ namespace gladius::ui
                     }
                 } // end else (Graph view)
 
+                m_nodeViewVisitor.drawNumericInputOverlay();
+
                 // Export overlay is now rendered at MainWindow level to block entire UI
 
                 // Read per-frame flags before clearing them. clearPerFrameFlags() is called
                 // unconditionally BEFORE storeState() so that if storeState() throws, the
                 // flags are already cleared and won't re-trigger the same exception every
                 // subsequent frame (which would flood the ImGui log and cause a segfault).
-                bool const nodeViewParamChanged = m_nodeViewVisitor.haveParameterChanged();
+                                bool const nodeViewNumericInputChanged =
+                                    m_nodeViewVisitor.hasNumericInputEditChangedThisFrame();
+                                bool const nodeViewParamChanged = m_nodeViewVisitor.haveParameterChanged();
                 m_modelWasModified |= m_nodeViewVisitor.hasModelChanged();
                 m_nodeViewVisitor.clearPerFrameFlags();
 
@@ -2497,11 +2501,11 @@ namespace gladius::ui
                     parameterChanged = true;
                     m_currentModel->setLogger(m_doc->getSharedLogger());
                     m_currentModel->updateTypes();
-                    if (!m_stateApplyingUndo)
+                    if (!m_stateApplyingUndo && !nodeViewNumericInputChanged)
                     {
                         // Pass *m_assembly directly — storeState() takes by const&
                         // and copies into the undo stack only when the state differs.
-                        // Avoids creating an expensive intermediate Assembly copy.
+                        // Numeric overlay edits are committed separately when the user applies.
                         m_history.storeState(*m_assembly, "Parameter changed");
                     }
                 }

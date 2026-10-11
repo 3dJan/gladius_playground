@@ -440,6 +440,11 @@ namespace gladius::ui
         return m_parameterChanged;
     }
 
+    bool NodeView::hasNumericInputEditChangedThisFrame() const
+    {
+        return m_numericInputEditChangedThisFrame;
+    }
+
     bool NodeView::hasModelChanged() const
     {
         return m_modelChanged;
@@ -448,6 +453,7 @@ namespace gladius::ui
     void NodeView::clearPerFrameFlags()
     {
         m_parameterChanged = false;
+        m_numericInputEditChangedThisFrame = false;
         if (m_modelChanged)
         {
             m_nodeGroupsDirty = true;
@@ -460,6 +466,14 @@ namespace gladius::ui
     void NodeView::clearConnectionPreview()
     {
         m_connectionPreview.reset();
+    }
+
+    void NodeView::clearNumericInputTransaction()
+    {
+        m_numericInputTarget.reset();
+        m_numericInputInitialAssembly.reset();
+        m_numericInputInitialValue = 0.f;
+        m_numericInputInitialParameterModifiable = true;
     }
 
     void NodeView::setConnectionPreview(nodes::PortId sourcePortId,
@@ -520,6 +534,9 @@ namespace gladius::ui
 
     void NodeView::reset()
     {
+        m_numericInputOverlay.close();
+        clearNumericInputTransaction();
+        m_numericInputEditChangedThisFrame = false;
         m_currentLinkId = 0;
         clearConnectionPreview();
         m_parameterChanged = false;
@@ -540,10 +557,16 @@ namespace gladius::ui
         if (m_currentModel && model &&
             m_currentModel->getResourceId() == model->getResourceId())
         {
+            m_numericInputOverlay.close();
+            clearNumericInputTransaction();
+            m_numericInputEditChangedThisFrame = false;
             m_currentModel = std::move(model);
             return;
         }
 
+        m_numericInputOverlay.close();
+        clearNumericInputTransaction();
+        m_numericInputEditChangedThisFrame = false;
         m_currentModel = std::move(model);
         reset();
         m_columnWidths.clear();
@@ -1731,36 +1754,18 @@ namespace gladius::ui
 
         if (const auto pval = std::get_if<float>(&val))
         {
-            ImGui::SameLine();
-
-            // Check if this node should receive focus (keyboard-driven workflow)
             bool shouldFocus = m_modelEditor && m_modelEditor->shouldFocusNode(node.getId());
             if (shouldFocus && parameter.first == node.constParameter().begin()->first)
             {
-                // Focus on the first input field
                 ImGui::SetKeyboardFocusHere();
                 m_modelEditor->clearNodeFocus();
             }
 
-            bool changed = false;
-
-            switch (parameter.second.getContentType())
-            {
-            case ContentType::Angle:
-            {
-                changed = angleEdit(parameter.first.c_str(), pval);
-                break;
-            }
-            default:
-            {
-                changed = ui::adaptiveDragFloat(
-                  parameter.first.c_str(), pval, parameter.second.getContentType());
-                break;
-            }
-            }
+            bool const angleInDegrees = parameter.second.getContentType() == ContentType::Angle;
+            bool const changed = editFloatWithNumericOverlay(
+              node, parameter, parameter.first.c_str(), pval, 0, angleInDegrees);
 
             bool const modifiable = parameter.second.isModifiable();
-
             if (changed && !modifiable)
             {
                 parameter.second.setModifiable(true);
@@ -1872,10 +1877,9 @@ namespace gladius::ui
             }
             else
             {
-                auto const ct = parameter.second.getContentType();
-                changed |= ui::adaptiveDragFloat("x", &pval->x, ct);
-                changed |= ui::adaptiveDragFloat("y", &pval->y, ct);
-                changed |= ui::adaptiveDragFloat("z", &pval->z, ct);
+                changed |= editFloatWithNumericOverlay(node, parameter, "x", &pval->x, 0, false);
+                changed |= editFloatWithNumericOverlay(node, parameter, "y", &pval->y, 1, false);
+                changed |= editFloatWithNumericOverlay(node, parameter, "z", &pval->z, 2, false);
             }
 
             bool const modifiable = parameter.second.isModifiable();
@@ -1893,6 +1897,192 @@ namespace gladius::ui
         if (exportLocked)
         {
             ImGui::EndDisabled();
+        }
+    }
+
+    bool NodeView::editFloatWithNumericOverlay(nodes::NodeBase const & node,
+                                               nodes::ParameterMap::reference parameter,
+                                               char const * label,
+                                               float * value,
+                                               int componentIndex,
+                                               bool angleInDegrees)
+    {
+        if (value == nullptr)
+        {
+            return false;
+        }
+
+        float const scale = std::clamp(m_uiScale, 0.75f, 1.5f);
+        float const itemSpacing = ImGui::GetStyle().ItemInnerSpacing.x;
+        float const labelWidth = ImGui::CalcTextSize(label).x;
+        float const minFieldWidth = 100.f * scale;
+        float const minTotalWidth = labelWidth + minFieldWidth + 44.f * scale + 2.f * itemSpacing;
+        float const totalWidth = std::max(ImGui::CalcItemWidth(), minTotalWidth);
+        float const buttonWidth = std::min(44.f * scale,
+                           std::max(40.f * scale, (totalWidth - labelWidth) * 0.3f));
+        float const buttonHeight = std::max(40.f * scale, ImGui::GetFrameHeight());
+        float const fieldWidth = std::max(minFieldWidth,
+                          totalWidth - labelWidth - buttonWidth - 2.f * itemSpacing);
+        std::string const fieldLabel = fmt::format("##numeric_drag_{}_{}_{}",
+                                                    parameter.second.getId(),
+                                                    componentIndex,
+                                                    label);
+
+        bool changed = false;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(0.f, itemSpacing);
+        if (angleInDegrees)
+        {
+            changed = angleEdit(fieldLabel.c_str(), value, false, fieldWidth);
+        }
+        else
+        {
+            ImGui::PushItemWidth(fieldWidth);
+            changed = ui::adaptiveDragFloat(
+              fieldLabel.c_str(), value, parameter.second.getContentType());
+            ImGui::PopItemWidth();
+        }
+
+        ImGui::SameLine(0.f, itemSpacing);
+        std::string const buttonLabel = fmt::format("123##numeric_input_{}_{}",
+                                                     parameter.first,
+                                                     componentIndex);
+        if (ImGui::Button(buttonLabel.c_str(), ImVec2(buttonWidth, buttonHeight)))
+        {
+                        clearNumericInputTransaction();
+            m_numericInputTarget = ActiveNumericInputTarget{
+              node.getId(), parameter.second.getId(), componentIndex, angleInDegrees};
+                        m_numericInputInitialValue = *value;
+                        m_numericInputInitialParameterModifiable = parameter.second.isModifiable();
+                        if (m_assembly)
+                        {
+                                m_numericInputInitialAssembly.emplace(*m_assembly);
+                        }
+            float const displayValue = angleInDegrees
+                                         ? numeric_input_detail::radiansToDegrees(*value)
+                                         : *value;
+            m_numericInputOverlay.open(parameter.first,
+                                       displayValue,
+                                       angleInDegrees,
+                                       ImGui::GetItemRectMin(),
+                                       m_uiScale);
+        }
+        if (ImGui::IsItemHovered() && !m_numericInputOverlay.isActive())
+        {
+            ImGui::SetTooltip("Open numeric input");
+        }
+
+        return changed;
+    }
+
+    void NodeView::drawNumericInputOverlay()
+    {
+        if (!m_numericInputOverlay.isActive())
+        {
+            clearNumericInputTransaction();
+            static_cast<void>(m_numericInputOverlay.draw(false));
+            return;
+        }
+        if (!m_numericInputTarget)
+        {
+            m_numericInputOverlay.close();
+            clearNumericInputTransaction();
+            static_cast<void>(m_numericInputOverlay.draw(false));
+            return;
+        }
+
+        ActiveNumericInputTarget const target = *m_numericInputTarget;
+        nodes::ParameterMap::mapped_type * activeParameter = nullptr;
+        float * activeValue = nullptr;
+        if (auto * node = findNodeById(target.nodeId))
+        {
+            for (auto & parameterEntry : node->parameter())
+            {
+                auto & parameter = parameterEntry.second;
+                if (parameter.getId() != target.parameterId)
+                {
+                    continue;
+                }
+
+                activeParameter = &parameter;
+                auto & value = parameter.Value();
+                if (auto * scalarValue = std::get_if<float>(&value))
+                {
+                    activeValue = scalarValue;
+                }
+                else if (auto * vectorValue = std::get_if<float3>(&value))
+                {
+                    switch (target.componentIndex)
+                    {
+                    case 0:
+                        activeValue = &vectorValue->x;
+                        break;
+                    case 1:
+                        activeValue = &vectorValue->y;
+                        break;
+                    case 2:
+                        activeValue = &vectorValue->z;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        NumericInputOverlayUpdate const update = m_numericInputOverlay.draw(activeValue != nullptr);
+        if (update.value && activeValue && activeParameter)
+        {
+            bool const cancelling = update.action == NumericInputOverlayAction::Cancel;
+            float const value = cancelling
+                                  ? m_numericInputInitialValue
+                                  : (target.angleInDegrees
+                                       ? numeric_input_detail::degreesToRadians(*update.value)
+                                       : *update.value);
+            if (std::isfinite(value) && *activeValue != value)
+            {
+                *activeValue = value;
+                if (!activeParameter->isModifiable())
+                {
+                    activeParameter->setModifiable(true);
+                }
+                m_parameterChanged = true;
+                m_numericInputEditChangedThisFrame = true;
+            }
+
+            if (cancelling &&
+                activeParameter->isModifiable() != m_numericInputInitialParameterModifiable)
+            {
+                activeParameter->setModifiable(m_numericInputInitialParameterModifiable);
+                m_parameterChanged = true;
+                m_numericInputEditChangedThisFrame = true;
+            }
+        }
+
+        if (!m_numericInputOverlay.isActive())
+        {
+            if (update.action == NumericInputOverlayAction::Apply && activeValue && activeParameter)
+            {
+                bool const valueChanged = *activeValue != m_numericInputInitialValue;
+                bool const modifiableChanged =
+                  activeParameter->isModifiable() != m_numericInputInitialParameterModifiable;
+                if (valueChanged || modifiableChanged)
+                {
+                    if (m_modelEditor && m_numericInputInitialAssembly)
+                    {
+                        m_modelEditor->createUndoRestorePoint("Edit numeric value",
+                                                              *m_numericInputInitialAssembly);
+                    }
+                    if (m_modelEditor && !m_numericInputInitialParameterModifiable &&
+                        activeParameter->isModifiable())
+                    {
+                        m_modelEditor->markModelAsModified();
+                    }
+                }
+            }
+            clearNumericInputTransaction();
         }
     }
 
@@ -2074,10 +2264,9 @@ namespace gladius::ui
             else
             {
                 ImGui::PushItemWidth(140 * m_uiScale);
-                auto const ct = itX->second.getContentType();
-                changed |= ui::adaptiveDragFloat("x", xVal, ct);
-                changed |= ui::adaptiveDragFloat("y", yVal, ct);
-                changed |= ui::adaptiveDragFloat("z", zVal, ct);
+                changed |= editFloatWithNumericOverlay(node, *itX, "x", xVal, 0, false);
+                changed |= editFloatWithNumericOverlay(node, *itY, "y", yVal, 0, false);
+                changed |= editFloatWithNumericOverlay(node, *itZ, "z", zVal, 0, false);
                 ImGui::PopItemWidth();
             }
 
@@ -2375,6 +2564,7 @@ namespace gladius::ui
         // Track the desired width: CalcItemWidth gives the pushed ItemWidth
         // which is the true widget width even when the column clips it.
         float desiredW = 0.f;
+        float const controlStartX = ImGui::GetCursorScreenPos().x;
         if (parameter.first != FieldNames::Shape)
         {
             if (parameter.second.getTypeIndex() == ParameterTypeIndex::Int)
@@ -2399,7 +2589,9 @@ namespace gladius::ui
             }
             // Use the larger of the measured rect and the CalcItemWidth-based width
             float const itemRectW = std::ceil(ImGui::GetItemRectSize().x);
-            desiredW = std::max(itemRectW, ImGui::CalcItemWidth());
+                        float const renderedWidth =
+                            std::max(0.f, ImGui::GetItemRectMax().x - controlStartX);
+                        desiredW = std::max({itemRectW, ImGui::CalcItemWidth(), renderedWidth});
         }
 
         // update column width — add indent so the column is wide enough

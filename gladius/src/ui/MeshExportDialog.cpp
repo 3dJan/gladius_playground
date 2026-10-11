@@ -44,7 +44,7 @@ namespace gladius::ui
             ".model.3mf"};
 
         constexpr std::array<char const *, 2> METHOD_LABELS{
-            "Layered marching cubes (OpenVDB)",
+            "Layered marching cubes",
             "Manifold dual contouring (GPU)"};
 
         /// Maps UI method index to actual SurfaceExtractionMethod enum values

@@ -118,14 +118,20 @@
           stem.slice(0, 80) + '.3mf';
       }
 
+      function downloadExtension(fallback) {
+        var match = /\.[A-Za-z0-9]+$/.exec(String(fallback || ''));
+        return match ? match[0].toLowerCase() : '.3mf';
+      }
+
       function sanitizeDownloadFilename(candidate, fallback) {
+        var extension = downloadExtension(fallback);
         var name = String(candidate || '').replace(/\\/g, '/').split('/').pop();
         name = name.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
-        if (!name || name === '.3mf') {
-          name = String(fallback || 'gladius-model.3mf');
+        if (!name || name.toLowerCase() === extension.slice(1)) {
+          name = String(fallback || 'gladius-model' + extension);
         }
-        if (!/\.3mf$/i.test(name)) {
-          name += '.3mf';
+        if (name.slice(-extension.length).toLowerCase() !== extension) {
+          name += extension;
         }
         return name;
       }
@@ -234,7 +240,7 @@
         });
       }
 
-      window.gladiusDownloadBrowserFile = function (temporaryPath, sourcePath, fallbackName) {
+      window.gladiusDownloadBrowserFile = function (temporaryPath, sourcePath, fallbackName, mimeType) {
         var fs = getEmscriptenFileSystem();
         if (!fs || typeof fs.readFile !== 'function') {
           window.gladiusSetBrowserFileStatus(
@@ -245,14 +251,14 @@
         try {
           var bytes = fs.readFile(String(temporaryPath || ''));
           if (!bytes || bytes.length === 0) {
-            throw new Error('The generated 3MF file is empty.');
+            throw new Error('The generated file is empty.');
           }
 
           var originalName = browserImportNames[String(sourcePath || '')];
           var downloadName = sanitizeDownloadFilename(originalName || fallbackName,
                                                       fallbackName);
           var blob = new Blob([bytes], {
-            type: 'application/vnd.ms-package.3dmanufacturing-3mf'
+            type: mimeType || 'application/vnd.ms-package.3dmanufacturing-3mf'
           });
           var downloadUrl = URL.createObjectURL(blob);
           var anchor = document.createElement('a');
@@ -267,7 +273,7 @@
           return true;
         } catch (error) {
           window.gladiusSetBrowserFileStatus(
-            'Could not download the edited 3MF file.', true);
+            'Could not download the generated file.', true);
           return false;
         }
       };

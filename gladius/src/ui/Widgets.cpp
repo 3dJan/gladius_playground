@@ -68,14 +68,17 @@ namespace gladius::ui
         ImGui::TextUnformatted(label);
     }
 
-    bool angleEdit(const char * label, float * const angleInRadians)
+    bool angleEdit(const char * label,
+                   float * const angleInRadians,
+                   bool showPresets,
+                   float inputWidth)
     {
         auto constexpr increment = 1.f;
         bool changed = false;
-        static float const pi = static_cast<float>(M_PI);
+        constexpr float pi = 3.14159265358979323846f;
         float angleInDegree = *angleInRadians * 180.f / pi;
 
-        ImGui::SetNextItemWidth(200.f);
+        ImGui::SetNextItemWidth(inputWidth);
         changed |= ImGui::DragFloat(
           label,
           &angleInDegree,
@@ -86,28 +89,31 @@ namespace gladius::ui
 
         *angleInRadians = angleInDegree * pi / 180.f;
 
-        if (ImGui::Button("45°"))
+        if (showPresets)
         {
-            *angleInRadians = static_cast<float>(M_PI_4);
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("90°"))
-        {
-            *angleInRadians = static_cast<float>(M_PI_2);
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("180°"))
-        {
-            *angleInRadians = static_cast<float>(M_PI);
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("270°"))
-        {
-            *angleInRadians = static_cast<float>(M_PI + M_PI_2);
-            changed = true;
+            if (ImGui::Button("45°"))
+            {
+                *angleInRadians = pi / 4.f;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("90°"))
+            {
+                *angleInRadians = pi / 2.f;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("180°"))
+            {
+                *angleInRadians = pi;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("270°"))
+            {
+                *angleInRadians = pi + pi / 2.f;
+                changed = true;
+            }
         }
 
         return changed;

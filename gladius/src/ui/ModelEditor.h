@@ -112,6 +112,8 @@ namespace gladius::ui
         void setVisibility(bool visible);
         [[nodiscard]] bool isVisible() const;
         void createUndoRestorePoint(const std::string & description);
+        void createUndoRestorePoint(const std::string & description,
+                        nodes::Assembly const & assembly);
         void resetUndo();
 
         [[nodiscard]] bool primitveDataNeedsUpdate() const;
@@ -213,9 +215,6 @@ namespace gladius::ui
                                         nodes::PortId sourcePortId,
                                         CreateNodeChoice const & choice,
                                         ImVec2 canvasPosition);
-        void createUndoRestorePoint(std::string const & description,
-                                                                        nodes::Assembly const & assembly);
-
       public:
         // Gamepad dispatcher helpers (public for GamepadActionDispatcher)
         void undo();
