@@ -42,11 +42,20 @@ namespace gladius::ui
         /// Format a value compactly while retaining enough precision for float edits.
         [[nodiscard]] std::string formatFloat(float value);
 
+        /// Format an editable value compactly, padding ordinary values to two decimal places.
+        [[nodiscard]] std::string formatInputValue(float value);
+
+        /// Format a ruler step compactly without exposing float representation noise.
+        [[nodiscard]] std::string formatStep(float step);
+
         /// Choose an initial minor ruler step by value magnitude, favoring powers of ten.
         [[nodiscard]] float initialStep(float value);
 
         /// Align a ruler's major ticks to the nearest absolute multiple of ten minor steps.
         [[nodiscard]] double rulerOffsetForValue(float value, float step);
+
+        /// Format a ruler label using precision appropriate for its major interval.
+        [[nodiscard]] std::string formatRulerValue(float value, float step);
 
         /// Scale a finite value by a number of decimal decades, clamping at float limits.
         [[nodiscard]] float scaleValueByDecade(float value, int decadeDelta);
@@ -54,8 +63,11 @@ namespace gladius::ui
         /// Change a positive ruler step by a number of decimal decades.
         [[nodiscard]] float scaleStepByDecade(float step, int decadeDelta);
 
-        /// Apply one signed nudge without overflowing the finite float range.
-        [[nodiscard]] float nudgeValue(float value, float step, int direction);
+        /// Normalize non-zero platform wheel input to one discrete ruler step.
+        [[nodiscard]] int wheelStepCount(float wheelDelta);
+
+        /// Apply a signed number of steps without overflowing the finite float range.
+        [[nodiscard]] float nudgeValue(float value, float step, int stepCount);
 
         /// Return a constant in display units; angle values are displayed in degrees.
         [[nodiscard]] float constantValue(NumericConstant constant, bool angleInDegrees);
@@ -94,7 +106,6 @@ namespace gladius::ui
         bool m_hasValidValue{false};
         bool m_valueChangedThisFrame{false};
         bool m_focusInputOnOpen{false};
-        bool m_moreMenuOpen{false};
         std::string m_label;
         std::string m_inputText;
         float m_initialValue{0.f};
