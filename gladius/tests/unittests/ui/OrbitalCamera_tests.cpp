@@ -97,4 +97,34 @@ namespace gladius::ui::tests
         float const xOffsetAfter = camera.getEyePosition().x - camera.getLookAt().x;
         EXPECT_LT(xOffsetAfter, xOffsetBefore);
     }
+
+    TEST(OrbitalCamera_Update, WithLongFrame_SnapsLookAtButContinuesOtherAnimations)
+    {
+        OrbitalCamera camera;
+        camera.snapToTarget();
+
+        auto const initialDistance = distance(camera.getEyePosition(), camera.getLookAt());
+        float const initialYaw = std::atan2(camera.getEyePosition().y - camera.getLookAt().y,
+                                            camera.getEyePosition().x - camera.getLookAt().x);
+
+        camera.setLookAt({100.0f, 20.0f, 30.0f});
+        camera.zoom(-0.5f);
+        camera.rotate(0.0f, 0.5f);
+
+        EXPECT_TRUE(camera.update(51.f));
+
+        auto const lookAt = camera.getLookAt();
+        EXPECT_FLOAT_EQ(lookAt.x, 100.0f);
+        EXPECT_FLOAT_EQ(lookAt.y, 20.0f);
+        EXPECT_FLOAT_EQ(lookAt.z, 30.0f);
+
+        auto const distanceAfterUpdate = distance(camera.getEyePosition(), lookAt);
+        EXPECT_GT(distanceAfterUpdate, initialDistance * 0.5f);
+        EXPECT_LT(distanceAfterUpdate, initialDistance);
+
+        auto const yawAfterUpdate = std::atan2(camera.getEyePosition().y - lookAt.y,
+                                               camera.getEyePosition().x - lookAt.x);
+        EXPECT_GT(yawAfterUpdate, initialYaw);
+        EXPECT_LT(yawAfterUpdate, initialYaw + 0.5f);
+    }
 }
