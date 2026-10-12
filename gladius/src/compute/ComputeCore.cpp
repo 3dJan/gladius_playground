@@ -1939,14 +1939,29 @@ namespace gladius
         std::lock_guard<std::recursive_mutex> lock(m_computeMutex, std::adopt_lock);
 
         auto const latestImage = m_lowResPreviewImage.load(std::memory_order_acquire);
-        if (latestImage && (width == latestImage->getWidth()) &&
-            (height == latestImage->getHeight()))
+        if (!latestImage)
+        {
+            return false;
+        }
+        if ((width == latestImage->getWidth()) && (height == latestImage->getHeight()))
         {
             return false;
         }
 
-        auto lowResPreviewImage = std::make_shared<GLImageBuffer>(*m_ComputeContext, width, height);
+        if (width <= latestImage->getCapacityWidth() && height <= latestImage->getCapacityHeight())
+        {
+            latestImage->setWidth(width);
+            latestImage->setHeight(height);
+            return true;
+        }
+
+        auto const capacityWidth = std::max(width, latestImage->getCapacityWidth());
+        auto const capacityHeight = std::max(height, latestImage->getCapacityHeight());
+        auto lowResPreviewImage =
+          std::make_shared<GLImageBuffer>(*m_ComputeContext, capacityWidth, capacityHeight);
         lowResPreviewImage->allocateOnDevice();
+        lowResPreviewImage->setWidth(width);
+        lowResPreviewImage->setHeight(height);
         m_lowResPreviewImage.store(lowResPreviewImage, std::memory_order_release);
         return true;
     }

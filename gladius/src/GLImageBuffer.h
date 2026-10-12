@@ -32,6 +32,9 @@ namespace gladius
 
         [[nodiscard]] GLuint GetTextureId() const;
 
+        [[nodiscard]] size_t getCapacityWidth() const noexcept { return m_allocatedWidth; }
+        [[nodiscard]] size_t getCapacityHeight() const noexcept { return m_allocatedHeight; }
+
         void transferPixelInReadPixelMode();
 
         void invalidateContent();
@@ -46,6 +49,8 @@ namespace gladius
         void transferPixels();
 
         GLuint m_textureID = 0;
+        size_t m_allocatedWidth{0};
+        size_t m_allocatedHeight{0};
         bool m_dirty{true};
     };
 }

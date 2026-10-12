@@ -51,8 +51,6 @@ namespace gladius::ui
         size_t currentLine = 0;
         size_t renderingStepSize = 100; ///< Lines rendered per frame during progressive rendering
 
-        float fpsPreviousError = 0.0f;
-        float fpsIntegral = 0.0f;
     };
 
     class RenderWindow
@@ -457,8 +455,7 @@ namespace gladius::ui
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
         compute::RenderSettingsSnapshot m_neutralRenderSettings{
-          .flags = RF_SHOW_BUILDPLATE | RF_SHOW_FIELD | RF_CUT_OFF_OBJECT |
-                   RF_SHOW_COORDINATE_SYSTEM,
+          .flags = RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM,
           .normalOffset = 0.0001f,
           .maxRaySteps = 2000u,
           .maxTravelDistance = 100000.0f};

@@ -1,29 +1,36 @@
 
-void kernel resample(__write_only image2d_t result, __read_only image2d_t source)
+void kernel resample(__write_only image2d_t result,
+                     __read_only image2d_t source,
+                     int activeSourceWidth,
+                     int activeSourceHeight)
 {
     const int2 coords = {get_global_id(0), get_global_id(1)};
-    // map source into result
-    int2 imageSize = (int2)(get_image_width(result), get_image_height(result));
+    int2 const targetSize = (int2)(get_image_width(result), get_image_height(result));
+    int2 const sourceCapacity = (int2)(get_image_width(source), get_image_height(source));
 
-    // Normalized position
-    float2 pos =
-      (float2)((float) coords.x / (imageSize.x - 1), (float) coords.y / (imageSize.y - 1));
+    float2 const targetPos =
+      (float2)((float) coords.x / max(targetSize.x - 1, 1),
+               (float) coords.y / max(targetSize.y - 1, 1));
+    int2 const activeSourceSize = (int2)(activeSourceWidth, activeSourceHeight);
+    float2 const activeLastPixel = convert_float2(max(activeSourceSize - 1, (int2)(0)));
+    float2 const sourcePos =
+      (targetPos * activeLastPixel + 0.5f) / convert_float2(sourceCapacity);
 
-    float4 srcValue = read_imagef(source, samplerLinearPos, pos);
+    float4 const srcValue = read_imagef(source, samplerLinearPos, sourcePos);
     write_imagef(result, coords, srcValue);
 };
 
-void kernel renderScene(__write_only image2d_t result,  
-                        PAYLOAD_ARGS,                   
-                        float3 eyePosition,             
-                        float16 modelViewPerspectiveMat 
-)
+void kernel renderScene(__write_only image2d_t result,
+                        PAYLOAD_ARGS,
+                        float3 eyePosition,
+                        float16 modelViewPerspectiveMat,
+                        int activeWidth,
+                        int activeHeight)
 {
     int2 const coord = {get_global_id(0), get_global_id(1)};
 
-    int2 const imageSize = (int2)(get_image_width(result), get_image_height(result));
-    float const aspectRatio =
-      (float) (get_image_width(result)) / (float) (get_image_height(result));
+    int2 const imageSize = (int2)(activeWidth, activeHeight);
+    float const aspectRatio = (float) activeWidth / (float) activeHeight;
     // Normalized position
     float2 screenPos =
       (float2)((float) coord.x / (imageSize.x - 1), 1.f - (float) coord.y / (imageSize.y - 1)) +
@@ -57,13 +64,14 @@ void kernel renderSceneWithDistanceOutput(__write_only image2d_t result,
                                           __write_only image2d_t distanceOutput,
                                           PAYLOAD_ARGS,
                                           float3 eyePosition,
-                                          float16 modelViewPerspectiveMat)
+                                          float16 modelViewPerspectiveMat,
+                                          int activeWidth,
+                                          int activeHeight)
 {
     int2 const coord = {get_global_id(0), get_global_id(1)};
 
-    int2 const imageSize = (int2)(get_image_width(result), get_image_height(result));
-    float const aspectRatio =
-      (float) (get_image_width(result)) / (float) (get_image_height(result));
+    int2 const imageSize = (int2)(activeWidth, activeHeight);
+    float const aspectRatio = (float) activeWidth / (float) activeHeight;
     // Normalized position
     float2 screenPos =
       (float2)((float) coord.x / (imageSize.x - 1), 1.f - (float) coord.y / (imageSize.y - 1)) +

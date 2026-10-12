@@ -125,7 +125,9 @@ namespace gladius::ui
         bool changed = false;
         auto constexpr tolerance = 0.001f;
         auto const speedFactor = 15.E-3f;
-        deltaTime_ms = std::min(deltaTime_ms, 50.f);
+        constexpr float MAX_DELTA_TIME_MS = 50.f;
+        bool const slowFrame = deltaTime_ms > MAX_DELTA_TIME_MS;
+        deltaTime_ms = std::min(deltaTime_ms, MAX_DELTA_TIME_MS);
 
         // Interpolate angles along the shortest arc so wrapped targets (see fmod in
         // mouseMotionHandler) are approached directly instead of spinning the long way round.
@@ -161,7 +163,12 @@ namespace gladius::ui
         }
 
         Position const lookAtDelta = m_lookAtTarget - m_lookAt;
-        if (lookAtDelta.norm() > tolerance)
+        if (slowFrame && lookAtDelta.squaredNorm() > 0.0f)
+        {
+            changed = true;
+            m_lookAt = m_lookAtTarget;
+        }
+        else if (lookAtDelta.norm() > tolerance)
         {
             changed = true;
             m_lookAt = m_lookAt + lookAtDelta * deltaTime_ms * speedFactor;

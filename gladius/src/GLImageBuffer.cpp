@@ -6,6 +6,8 @@ namespace gladius
     {
         m_width = std::max(static_cast<size_t>(1), m_width);
         m_height = std::max(static_cast<size_t>(1), m_height);
+        m_allocatedWidth = m_width;
+        m_allocatedHeight = m_height;
 
         m_data.resize(m_width * m_height);
         std::fill(m_data.begin(), m_data.end(), cl_float4());
@@ -99,17 +101,17 @@ namespace gladius
         cl_float4 const clearColor = {r, g, b, a};
         std::fill(m_data.begin(), m_data.end(), clearColor);
 
-        // Upload to GL texture
+        // Upload to the existing allocation without redefining its storage.
         glBindTexture(GL_TEXTURE_2D, m_textureID);
-        glTexImage2D(GL_TEXTURE_2D,
-                     0,
-                     GL_RGBA32F,
-                     static_cast<GLsizei>(m_width),
-                     static_cast<GLsizei>(m_height),
-                     0,
-                     GL_RGBA,
-                     GL_FLOAT,
-                     m_data.data());
+        glTexSubImage2D(GL_TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        static_cast<GLsizei>(m_allocatedWidth),
+                        static_cast<GLsizei>(m_allocatedHeight),
+                        GL_RGBA,
+                        GL_FLOAT,
+                        m_data.data());
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 
@@ -134,20 +136,21 @@ namespace gladius
             return;
         }
 
+        std::vector<cl_float4> activePixels(m_width * m_height);
         m_ComputeContext.GetQueue().enqueueReadImage(
-          *m_buffer, CL_TRUE, {}, {m_width, m_height, 1u}, 0, 0, m_data.data());
+          *m_buffer, CL_TRUE, {}, {m_width, m_height, 1u}, 0, 0, activePixels.data());
         CL_ERROR(m_ComputeContext.GetQueue().finish());
 
         glBindTexture(GL_TEXTURE_2D, m_textureID);
-        glTexImage2D(GL_TEXTURE_2D,
-                     0,
-                     GL_RGBA32F,
-                     static_cast<GLsizei>(m_width),
-                     static_cast<GLsizei>(m_height),
-                     0,
-                     GL_RGBA,
-                     GL_FLOAT,
-                     m_data.data());
+        glTexSubImage2D(GL_TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        static_cast<GLsizei>(m_width),
+                        static_cast<GLsizei>(m_height),
+                        GL_RGBA,
+                        GL_FLOAT,
+                        activePixels.data());
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 }

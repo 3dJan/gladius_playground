@@ -90,13 +90,14 @@ namespace gladius
 
         void setWidth(size_t width)
         {
-
             m_width = std::max(static_cast<size_t>(1), width);
+            m_size = m_width * m_height * m_depth;
         }
 
         void setHeight(size_t height)
         {
             m_height = std::max(static_cast<size_t>(1), height);
+            m_size = m_width * m_height * m_depth;
         }
 
         void read()

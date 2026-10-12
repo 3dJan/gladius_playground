@@ -211,7 +211,9 @@ namespace gladius
               cl_int(m_resources->getCommandBuffer().getData().size()),
               m_resources->getPreCompSdfBBox(),
               inputs.eyePosition,
-              inputs.modelViewPerspectiveMat);
+              inputs.modelViewPerspectiveMat,
+              cl_int(targetImage.getWidth()),
+              cl_int(targetImage.getHeight()));
             gpuAccess.complete(kernelEvent);
         }
         catch (std::exception const & e)
@@ -253,8 +255,13 @@ namespace gladius
         }
         cl::NDRange const origin = {0, startHeight, 0};
         cl::NDRange const range = {targetImage.getWidth(), endHeight, 1};
-        m_programFront->run(
-          "resample", origin, range, targetImage.getBuffer(), sourceImage.getBuffer());
+        m_programFront->run("resample",
+                            origin,
+                            range,
+                            targetImage.getBuffer(),
+                            sourceImage.getBuffer(),
+                            cl_int(sourceImage.getWidth()),
+                            cl_int(sourceImage.getHeight()));
     }
 
     void RenderProgram::resampleAsync(cl::CommandQueue const & queue,
@@ -295,7 +302,9 @@ namespace gladius
                                                                            range,
                                                                            gpuAccess.waitEvents(),
                                                                            targetImage.getBuffer(),
-                                                                           sourceImage.getBuffer());
+                                                                           sourceImage.getBuffer(),
+                                                                           cl_int(sourceImage.getWidth()),
+                                                                           cl_int(sourceImage.getHeight()));
         gpuAccess.complete(event);
         if (completionEvent)
         {
@@ -386,7 +395,9 @@ namespace gladius
               cl_int(m_resources->getCommandBuffer().getData().size()),
               m_resources->getPreCompSdfBBox(),
               inputs.eyePosition,
-              inputs.modelViewPerspectiveMat);
+              inputs.modelViewPerspectiveMat,
+              cl_int(targetImage.getWidth()),
+              cl_int(targetImage.getHeight()));
             gpuAccess.complete(kernelEvent);
         }
         catch (std::exception const & e)

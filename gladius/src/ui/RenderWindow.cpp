@@ -28,6 +28,7 @@
 #include "compute/ComputeRendererFactory.h"
 #include "compute/OpenCLRenderRequestFactory.h"
 #include "imgui.h"
+#include "render/AdaptivePreviewQuality.h"
 #include "render/DisplayFrameSelector.h"
 #include "render/OpenGLFramePresenter.h"
 #include "render/ProgressiveBufferPolicy.h"
@@ -161,15 +162,10 @@ namespace gladius::ui
 
         constexpr size_t kInitialProgressiveStepSize = 8;
         constexpr float kAdaptivePreviewTargetFrameTimeMs = 25.0f;
-        constexpr float kAdaptivePreviewMinErrorMs = 0.5f;
-        constexpr float kAdaptivePreviewIntegralDecay = 0.8f;
-        constexpr float kAdaptivePreviewProportionalGain = 0.001f;
-        constexpr float kAdaptivePreviewIntegralGain = 0.00001f;
-        constexpr float kAdaptivePreviewDerivativeGain = 0.000001f;
         constexpr float kAdaptivePreviewMinQuality = 0.05f;
-        constexpr float kAdaptivePreviewMinDimension = 1.0f;
+        constexpr float kAdaptivePreviewMinDimension = 2.0f;
         constexpr float kAdaptivePreviewMaxDimension = 16000.0f;
-        constexpr float kAdaptivePreviewResizeThresholdPercent = 20.0f;
+        constexpr float kAdaptivePreviewResizeThresholdPercent = 5.0f;
 
         [[nodiscard]] bool isRenderableBoundingBox(std::optional<BoundingBox> const & boundingBox)
         {
@@ -206,10 +202,25 @@ namespace gladius::ui
             switch (backend)
             {
             case async_rendering::PreviewBackend::PrecomputedSdfWithDistanceInit:
-                launch.event =
-                  core.renderLowResPreviewWithDistanceOutputAsync(commandQueue, lowResImage);
-                launch.producedDistanceInit = launch.event();
+            {
+                auto * distanceBuffer = core.getResourceContext()->getDistanceInitBuffer();
+                bool const distanceBufferMatchesActiveSize =
+                  distanceBuffer != nullptr &&
+                  distanceBuffer->getWidth() == lowResImage.getWidth() &&
+                  distanceBuffer->getHeight() == lowResImage.getHeight();
+                if (distanceBufferMatchesActiveSize)
+                {
+                    launch.event =
+                      core.renderLowResPreviewWithDistanceOutputAsync(commandQueue, lowResImage);
+                    launch.producedDistanceInit = launch.event();
+                }
+                else
+                {
+                    core.invalidateDistanceInitBuffer();
+                    launch.event = core.renderLowResPreviewAsync(commandQueue, lowResImage);
+                }
                 return launch;
+            }
 
             case async_rendering::PreviewBackend::DynamicFullModel:
             {
@@ -4890,25 +4901,16 @@ namespace gladius::ui
             {
                 float const executionDurationMs =
                   static_cast<float>(static_cast<double>(meta.latencyNs) / 1'000'000.0);
-                float const error = kAdaptivePreviewTargetFrameTimeMs - executionDurationMs;
-
-                if (executionDurationMs > 0.0f && std::abs(error) > kAdaptivePreviewMinErrorMs)
+                if (executionDurationMs > 0.0f)
                 {
                     auto & state = m_renderWindowState;
-                    state.fpsIntegral *= kAdaptivePreviewIntegralDecay;
-                    state.fpsIntegral += error;
-
-                    float const derivative = error - state.fpsPreviousError;
-                    float const adjustment = kAdaptivePreviewProportionalGain * error +
-                                             kAdaptivePreviewIntegralGain * state.fpsIntegral +
-                                             kAdaptivePreviewDerivativeGain * derivative;
-
                     float const previousQuality = state.renderQualityWhileMoving;
-                    state.renderQualityWhileMoving =
-                      std::clamp(previousQuality + adjustment,
-                                 kAdaptivePreviewMinQuality,
-                                 state.renderQuality);
-                    state.fpsPreviousError = error;
+                    state.renderQualityWhileMoving = async_rendering::adaptInteractivePreviewQuality(
+                      previousQuality,
+                      kAdaptivePreviewTargetFrameTimeMs,
+                      executionDurationMs,
+                      kAdaptivePreviewMinQuality,
+                      state.renderQuality);
 
                     int const newWidth = static_cast<int>(std::clamp(
                       m_renderWindowSize_px.x * state.renderQualityWhileMoving,
@@ -5141,8 +5143,8 @@ namespace gladius::ui
             return false;
         }
 
-        size_t const width = static_cast<size_t>(lowResImage->getWidth());
-        size_t const height = static_cast<size_t>(lowResImage->getHeight());
+        size_t const width = lowResImage->getCapacityWidth();
+        size_t const height = lowResImage->getCapacityHeight();
         if (width == 0 || height == 0)
         {
             return false;
