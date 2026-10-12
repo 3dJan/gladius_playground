@@ -99,6 +99,8 @@
       var browserDropSequence = 0;
       var browserImportDirectory = '/gladius/browser-imports';
       var browserImportNames = Object.create(null);
+      var browserRuntimeInitialized = false;
+      var pendingBrowserStages = [];
 
       function getEmscriptenFileSystem() {
         if (typeof FS !== 'undefined') return FS;
@@ -137,6 +139,11 @@
       }
 
       function stageBrowserBytes(buffer, sourceName, attempt) {
+        if (!browserRuntimeInitialized) {
+          pendingBrowserStages.push({buffer: buffer, sourceName: sourceName});
+          return;
+        }
+
         var fs = getEmscriptenFileSystem();
         if (!fs) {
           if (attempt < 100) {
@@ -149,7 +156,6 @@
             'Gladius is not ready to receive files yet. Please try again.', true);
           return;
         }
-
         var displayName = String(sourceName || 'dropped-model.3mf');
         var finalPath = browserImportDirectory + '/' + getStagedFilename(displayName);
         var temporaryPath = finalPath + '.part';
@@ -177,6 +183,15 @@
             'Could not stage ' + displayName + ' for opening.', true);
         }
       }
+
+      window.gladiusOnRuntimeInitialized = function () {
+        browserRuntimeInitialized = true;
+        var stages = pendingBrowserStages;
+        pendingBrowserStages = [];
+        stages.forEach(function (stage) {
+          stageBrowserBytes(stage.buffer, stage.sourceName, 0);
+        });
+      };
 
       function stageBrowserFile(file) {
         var displayName = String(file.name || 'dropped-model.3mf');
@@ -347,6 +362,11 @@
 
     var gladiusWebGPUUnavailable = false;
     var Module = {
+      onRuntimeInitialized: function () {
+        if (typeof window.gladiusOnRuntimeInitialized === 'function') {
+          window.gladiusOnRuntimeInitialized();
+        }
+      },
       print: function (text) { console.log(text); },
       printErr: function (text) {
         console.error(text);
