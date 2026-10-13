@@ -27,6 +27,8 @@ namespace gladius::webgpu
         submitFrame(compute::FrameRequest request) override;
 
       private:
+        class FrameBufferPool;
         std::shared_ptr<WebGPUComputeContext> m_context;
+        std::shared_ptr<FrameBufferPool> m_frameBufferPool;
     };
 }

@@ -1,4 +1,5 @@
 #include "webgpu/WebGPUFrameBufferSet.h"
+#include "webgpu/WebGPUBufferCapacity.h"
 
 #include <algorithm>
 #include <limits>
@@ -23,35 +24,65 @@ namespace gladius::webgpu
             return;
         }
 
-        reset();
+        if (!m_uniformBuffer)
+        {
+            wgpu::BufferDescriptor uniformDescriptor;
+            uniformDescriptor.label = "Gladius frame uniforms";
+            uniformDescriptor.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+            uniformDescriptor.size = sizeof(FrameUniforms);
+            auto uniformBuffer = device.CreateBuffer(&uniformDescriptor);
+            if (!uniformBuffer)
+            {
+                throw std::runtime_error("Unable to allocate WebGPU frame uniforms");
+            }
+            m_uniformBuffer = std::move(uniformBuffer);
+        }
 
-        wgpu::BufferDescriptor uniformDescriptor;
-        uniformDescriptor.label = "Gladius frame uniforms";
-        uniformDescriptor.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
-        uniformDescriptor.size = sizeof(FrameUniforms);
-        m_uniformBuffer = device.CreateBuffer(&uniformDescriptor);
+        if (!m_outputBuffer || !m_stagingBuffer ||
+            m_outputCapacitySizeBytes < dispatchSize->outputSizeBytes)
+        {
+            wgpu::BufferDescriptor outputDescriptor;
+            outputDescriptor.label = "Gladius frame output";
+            outputDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
+            auto const outputCapacitySizeBytes =
+              detail::growBufferCapacity(m_outputCapacitySizeBytes, dispatchSize->outputSizeBytes);
+            outputDescriptor.size = outputCapacitySizeBytes;
+            auto outputBuffer = device.CreateBuffer(&outputDescriptor);
 
-        wgpu::BufferDescriptor outputDescriptor;
-        outputDescriptor.label = "Gladius frame output";
-        outputDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
-        outputDescriptor.size = dispatchSize->outputSizeBytes;
-        m_outputBuffer = device.CreateBuffer(&outputDescriptor);
+            wgpu::BufferDescriptor stagingDescriptor;
+            stagingDescriptor.label = "Gladius frame readback";
+            stagingDescriptor.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+            stagingDescriptor.size = outputCapacitySizeBytes;
+            auto stagingBuffer = device.CreateBuffer(&stagingDescriptor);
+            if (!outputBuffer || !stagingBuffer)
+            {
+                throw std::runtime_error("Unable to allocate WebGPU frame output buffers");
+            }
 
-        wgpu::BufferDescriptor stagingDescriptor;
-        stagingDescriptor.label = "Gladius frame readback";
-        stagingDescriptor.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
-        stagingDescriptor.size = dispatchSize->outputSizeBytes;
-        m_stagingBuffer = device.CreateBuffer(&stagingDescriptor);
+            m_outputBuffer = std::move(outputBuffer);
+            m_stagingBuffer = std::move(stagingBuffer);
+            m_outputCapacitySizeBytes = outputCapacitySizeBytes;
+        }
 
-        wgpu::BufferDescriptor parameterDescriptor;
-        parameterDescriptor.label = "Gladius frame parameters";
-        parameterDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
-        parameterDescriptor.size = parameterSizeBytes;
-        m_parameterBuffer = device.CreateBuffer(&parameterDescriptor);
+        if (!m_parameterBuffer || m_parameterCapacitySizeBytes < parameterSizeBytes)
+        {
+            wgpu::BufferDescriptor parameterDescriptor;
+            parameterDescriptor.label = "Gladius frame parameters";
+            parameterDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+            auto const parameterCapacitySizeBytes =
+              detail::growBufferCapacity(m_parameterCapacitySizeBytes, parameterSizeBytes);
+            parameterDescriptor.size = parameterCapacitySizeBytes;
+            auto parameterBuffer = device.CreateBuffer(&parameterDescriptor);
+            if (!parameterBuffer)
+            {
+                throw std::runtime_error("Unable to allocate WebGPU frame parameters");
+            }
+            m_parameterBuffer = std::move(parameterBuffer);
+            m_parameterCapacitySizeBytes = parameterCapacitySizeBytes;
+        }
 
         if (!isValid())
         {
-            reset();
             throw std::runtime_error("Unable to allocate WebGPU frame buffers");
         }
 
@@ -297,7 +328,9 @@ namespace gladius::webgpu
         m_width = 0u;
         m_height = 0u;
         m_outputSizeBytes = 0u;
+        m_outputCapacitySizeBytes = 0u;
         m_parameterSizeBytes = 0u;
+        m_parameterCapacitySizeBytes = 0u;
     }
 
     bool WebGPUFrameBufferSet::isValid() const noexcept
@@ -306,7 +339,15 @@ namespace gladius::webgpu
     }
 
     std::size_t WebGPUFrameBufferSet::getOutputSizeBytes() const noexcept { return m_outputSizeBytes; }
+    std::size_t WebGPUFrameBufferSet::getOutputCapacitySizeBytes() const noexcept
+    {
+        return m_outputCapacitySizeBytes;
+    }
     std::size_t WebGPUFrameBufferSet::getParameterSizeBytes() const noexcept { return m_parameterSizeBytes; }
+    std::size_t WebGPUFrameBufferSet::getParameterCapacitySizeBytes() const noexcept
+    {
+        return m_parameterCapacitySizeBytes;
+    }
     wgpu::Buffer const & WebGPUFrameBufferSet::getUniformBuffer() const noexcept { return m_uniformBuffer; }
     wgpu::Buffer const & WebGPUFrameBufferSet::getOutputBuffer() const noexcept { return m_outputBuffer; }
     wgpu::Buffer const & WebGPUFrameBufferSet::getStagingBuffer() const noexcept { return m_stagingBuffer; }

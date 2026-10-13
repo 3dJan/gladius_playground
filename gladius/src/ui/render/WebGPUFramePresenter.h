@@ -2,6 +2,7 @@
 
 #include "FramePresenter.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -37,18 +38,22 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] std::uintptr_t getTextureId() const noexcept override;
         [[nodiscard]] std::uint32_t getWidth() const noexcept override;
         [[nodiscard]] std::uint32_t getHeight() const noexcept override;
+        [[nodiscard]] std::array<float, 2> getTextureUvMax() const noexcept override;
         [[nodiscard]] std::optional<compute::RenderFreshnessStamp> getFreshness() const noexcept override;
 
       private:
-        void allocateTexture(std::uint32_t width, std::uint32_t height);
+        [[nodiscard]] bool allocateTexture(std::uint32_t width, std::uint32_t height);
 
         std::shared_ptr<webgpu::WebGPUComputeContext> m_context;
         wgpu::Texture m_texture;
         wgpu::TextureView m_textureView;
         std::uint32_t m_width{};
         std::uint32_t m_height{};
+        std::uint32_t m_capacityWidth{};
+        std::uint32_t m_capacityHeight{};
         std::optional<compute::RenderFreshnessStamp> m_freshness;
         std::vector<unsigned char> m_uploadData;
+        std::vector<unsigned char> m_clearData;
         std::uint64_t m_presentCount{};
         std::uint64_t m_lastLoggedViewGeneration{};
         std::uint32_t m_lastLoggedWidth{};

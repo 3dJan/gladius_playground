@@ -5,8 +5,10 @@
 #include "RenderUpdateTypes.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <optional>
 #include <vector>
 
@@ -53,6 +55,50 @@ namespace gladius::ui::async_rendering
         {
             m_realtime.configure(config);
             m_realtime.resetForResolution(m_width, m_height);
+        }
+
+        void setInteractivePreviewDimensionLimits(std::uint32_t maxDimension,
+                                                  std::uint64_t maxPixels) noexcept
+        {
+            m_interactivePreviewMaxDimension = maxDimension;
+            m_interactivePreviewMaxPixels = maxPixels;
+        }
+
+        [[nodiscard]] float interactivePreviewQualityTarget() const noexcept
+        {
+            return m_interactivePreviewQualityTarget;
+        }
+
+        /// Updates the desired preview scale and applies it only after a significant size change.
+        /// This does not change render freshness because preview quality does not change the view.
+        [[nodiscard]] bool updateInteractivePreviewQuality(float targetQuality,
+                                                           float minQuality,
+                                                           float maxQuality,
+                                                           float resizeThresholdPercent) noexcept
+        {
+            if (!std::isfinite(targetQuality) || !std::isfinite(minQuality) ||
+                !std::isfinite(maxQuality) || !std::isfinite(resizeThresholdPercent) ||
+                minQuality <= 0.0f || maxQuality < minQuality || resizeThresholdPercent <= 0.0f)
+            {
+                return false;
+            }
+
+            m_interactivePreviewQualityTarget = std::clamp(targetQuality, minQuality, maxQuality);
+            auto const [currentWidth, currentHeight] =
+              calculateInteractivePreviewDimensions(m_interactivePreviewScale);
+            auto const [targetWidth, targetHeight] =
+              calculateInteractivePreviewDimensions(m_interactivePreviewQualityTarget);
+            auto const widthChangePercent = std::abs(static_cast<float>(targetWidth) - currentWidth) /
+                                            static_cast<float>(currentWidth) * 100.0f;
+            auto const heightChangePercent = std::abs(static_cast<float>(targetHeight) - currentHeight) /
+                                             static_cast<float>(currentHeight) * 100.0f;
+            if (std::max(widthChangePercent, heightChangePercent) < resizeThresholdPercent)
+            {
+                return false;
+            }
+
+            m_interactivePreviewScale = m_interactivePreviewQualityTarget;
+            return true;
         }
 
         [[nodiscard]] RealtimeRaymarchConfig const & realtimeConfig() const noexcept
@@ -521,6 +567,52 @@ namespace gladius::ui::async_rendering
                    matches(*m_parameterUploadStamp, m_latestStamp, RenderStampMask::heavyGeometryTask());
         }
 
+        [[nodiscard]] std::pair<std::uint32_t, std::uint32_t>
+        calculateInteractivePreviewDimensions(float scale) const noexcept
+        {
+            auto scaledDimension = [scale](std::uint32_t dimension)
+            {
+                return std::max(1u, static_cast<std::uint32_t>(std::lround(dimension * scale)));
+            };
+            auto width = scaledDimension(m_width);
+            auto height = scaledDimension(m_height);
+
+            if (m_interactivePreviewMaxDimension > 0u)
+            {
+                auto const dimensionScale = std::min(
+                  1.0,
+                  std::min(static_cast<double>(m_interactivePreviewMaxDimension) / width,
+                           static_cast<double>(m_interactivePreviewMaxDimension) / height));
+                width = std::max(1u, static_cast<std::uint32_t>(std::floor(width * dimensionScale)));
+                height = std::max(1u, static_cast<std::uint32_t>(std::floor(height * dimensionScale)));
+            }
+
+            if (m_interactivePreviewMaxPixels > 0u &&
+                static_cast<std::uint64_t>(width) * height > m_interactivePreviewMaxPixels)
+            {
+                auto const pixelScale = std::sqrt(static_cast<double>(m_interactivePreviewMaxPixels) /
+                                                  (static_cast<double>(width) * height));
+                width = std::max(1u, static_cast<std::uint32_t>(std::floor(width * pixelScale)));
+                height = std::max(1u, static_cast<std::uint32_t>(std::floor(height * pixelScale)));
+                while (static_cast<std::uint64_t>(width) * height > m_interactivePreviewMaxPixels)
+                {
+                    if (width >= height && width > 1u)
+                    {
+                        --width;
+                    }
+                    else if (height > 1u)
+                    {
+                        --height;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+            return {width, height};
+        }
+
         void startTask(RenderUpdateDecision & decision,
                        RenderTaskType type,
                        RenderStamp const & stamp,
@@ -536,8 +628,10 @@ namespace gladius::ui::async_rendering
             uint32_t requestHeight = m_height;
             if (type == RenderTaskType::LowResolutionPreview)
             {
-                requestWidth = std::max(1u, (m_width + 1u) / 2u);
-                requestHeight = std::max(1u, (m_height + 1u) / 2u);
+                auto const previewDimensions =
+                  calculateInteractivePreviewDimensions(m_interactivePreviewScale);
+                requestWidth = previewDimensions.first;
+                requestHeight = previewDimensions.second;
             }
 
             size_t const requestedLines = lineCount == 0 ? static_cast<size_t>(requestHeight) : lineCount;
@@ -695,6 +789,10 @@ namespace gladius::ui::async_rendering
         uint64_t m_nextRequestId{1};
         uint32_t m_width{1};
         uint32_t m_height{1};
+        float m_interactivePreviewScale{0.5f};
+        float m_interactivePreviewQualityTarget{0.5f};
+        std::uint32_t m_interactivePreviewMaxDimension{};
+        std::uint64_t m_interactivePreviewMaxPixels{};
         /// Per-gesture latch: set when Auto mode first decides to use simpler rendering during
         /// an interaction. Cleared when the gesture ends to prevent mid-gesture quality switches.
         bool m_autoGestureLockedSimpler{false};

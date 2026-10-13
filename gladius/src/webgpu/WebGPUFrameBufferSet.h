@@ -43,7 +43,9 @@ namespace gladius::webgpu
 
         [[nodiscard]] bool isValid() const noexcept;
         [[nodiscard]] std::size_t getOutputSizeBytes() const noexcept;
+        [[nodiscard]] std::size_t getOutputCapacitySizeBytes() const noexcept;
         [[nodiscard]] std::size_t getParameterSizeBytes() const noexcept;
+        [[nodiscard]] std::size_t getParameterCapacitySizeBytes() const noexcept;
         [[nodiscard]] bool hasMeshPayloads() const noexcept { return m_meshPayloadBuffer != nullptr; }
         [[nodiscard]] wgpu::Buffer const & getUniformBuffer() const noexcept;
         [[nodiscard]] wgpu::Buffer const & getOutputBuffer() const noexcept;
@@ -80,7 +82,9 @@ namespace gladius::webgpu
         std::uint32_t m_width{};
         std::uint32_t m_height{};
         std::size_t m_outputSizeBytes{};
+        std::size_t m_outputCapacitySizeBytes{};
         std::size_t m_parameterSizeBytes{};
+        std::size_t m_parameterCapacitySizeBytes{};
         wgpu::Buffer m_uniformBuffer;
         wgpu::Buffer m_outputBuffer;
         wgpu::Buffer m_stagingBuffer;

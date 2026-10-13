@@ -61,13 +61,48 @@ namespace gladius::ui::async_rendering
         }
 
         webgpu::WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
-        if (!m_texture || m_width != frame.width || m_height != frame.height)
+        if (!m_texture || frame.width > m_capacityWidth || frame.height > m_capacityHeight)
         {
-            allocateTexture(frame.width, frame.height);
+            auto const capacityWidth = std::max(m_capacityWidth, frame.width);
+            auto const capacityHeight = std::max(m_capacityHeight, frame.height);
+            if (!allocateTexture(capacityWidth, capacityHeight))
+            {
+                return false;
+            }
         }
         if (!m_texture || !m_textureView)
         {
             return false;
+        }
+
+        bool const activeDimensionsChanged = m_width != frame.width || m_height != frame.height;
+        bool const freshnessChanged = !m_freshness.has_value() || *m_freshness != frame.freshness;
+        bool const startsProgressiveFrame = frame.firstRow == 0u && frame.endRow < frame.height;
+        if (activeDimensionsChanged || freshnessChanged || startsProgressiveFrame)
+        {
+            if (static_cast<std::size_t>(frame.height) >
+                std::numeric_limits<std::size_t>::max() / alignedBytesPerRow)
+            {
+                return false;
+            }
+            auto const clearSizeBytes = alignedBytesPerRow * static_cast<std::size_t>(frame.height);
+            m_clearData.resize(clearSizeBytes);
+            std::fill(m_clearData.begin(), m_clearData.end(), 0u);
+
+            wgpu::TexelCopyTextureInfo clearDestination;
+            clearDestination.texture = m_texture;
+            clearDestination.origin = {.x = 0u, .y = 0u, .z = 0u};
+            wgpu::TexelCopyBufferLayout clearLayout;
+            clearLayout.bytesPerRow = static_cast<std::uint32_t>(alignedBytesPerRow);
+            clearLayout.rowsPerImage = frame.height;
+            wgpu::Extent3D clearExtent{.width = frame.width,
+                                       .height = frame.height,
+                                       .depthOrArrayLayers = 1u};
+            m_context->getQueue().WriteTexture(&clearDestination,
+                                               m_clearData.data(),
+                                               m_clearData.size(),
+                                               &clearLayout,
+                                               &clearExtent);
         }
 
         wgpu::TexelCopyTextureInfo destination;
@@ -95,9 +130,9 @@ namespace gladius::ui::async_rendering
             }
             m_lastReportedError = errorMessage;
         }
-        bool const dimensionsChanged = frame.width != m_lastLoggedWidth || frame.height != m_lastLoggedHeight;
+        bool const loggedDimensionsChanged = frame.width != m_lastLoggedWidth || frame.height != m_lastLoggedHeight;
         bool const viewChanged = frame.freshness.viewGeneration != m_lastLoggedViewGeneration;
-        if (m_presentCount < 5u || dimensionsChanged || viewChanged)
+        if (m_presentCount < 5u || loggedDimensionsChanged || viewChanged)
         {
             std::uint64_t checksum = 0u;
             for (auto const pixel : frame.pixels)
@@ -119,6 +154,8 @@ namespace gladius::ui::async_rendering
         }
 #endif
 
+        m_width = frame.width;
+        m_height = frame.height;
         m_freshness = frame.freshness;
         ++m_presentCount;
         return true;
@@ -134,6 +171,8 @@ namespace gladius::ui::async_rendering
         }
         m_width = 0u;
         m_height = 0u;
+        m_capacityWidth = 0u;
+        m_capacityHeight = 0u;
         m_freshness.reset();
         m_presentCount = 0u;
         m_lastLoggedViewGeneration = 0u;
@@ -157,17 +196,24 @@ namespace gladius::ui::async_rendering
         return m_height;
     }
 
+    std::array<float, 2> WebGPUFramePresenter::getTextureUvMax() const noexcept
+    {
+        if (m_capacityWidth == 0u || m_capacityHeight == 0u)
+        {
+            return {0.0f, 0.0f};
+        }
+        return {static_cast<float>(m_width) / static_cast<float>(m_capacityWidth),
+                static_cast<float>(m_height) / static_cast<float>(m_capacityHeight)};
+    }
+
     std::optional<compute::RenderFreshnessStamp> WebGPUFramePresenter::getFreshness() const noexcept
     {
         return m_freshness;
     }
 
-    void WebGPUFramePresenter::allocateTexture(std::uint32_t const width,
+    bool WebGPUFramePresenter::allocateTexture(std::uint32_t const width,
                                                std::uint32_t const height)
     {
-        m_textureView = nullptr;
-        m_texture = nullptr;
-
         wgpu::TextureDescriptor descriptor;
         descriptor.label = "Gladius WebGPU frame texture";
         descriptor.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding;
@@ -176,25 +222,21 @@ namespace gladius::ui::async_rendering
         descriptor.format = wgpu::TextureFormat::RGBA8Unorm;
         descriptor.mipLevelCount = 1u;
         descriptor.sampleCount = 1u;
-        m_texture = m_context->getDevice().CreateTexture(&descriptor);
-        if (m_texture)
+        auto texture = m_context->getDevice().CreateTexture(&descriptor);
+        if (!texture)
         {
-            m_textureView = m_texture.CreateView();
-            if (!m_textureView)
-            {
-                m_texture = nullptr;
-            }
+            return false;
+        }
+        auto textureView = texture.CreateView();
+        if (!textureView)
+        {
+            return false;
         }
 
-        if (m_texture && m_textureView)
-        {
-            m_width = width;
-            m_height = height;
-        }
-        else
-        {
-            m_width = 0u;
-            m_height = 0u;
-        }
+        m_texture = std::move(texture);
+        m_textureView = std::move(textureView);
+        m_capacityWidth = width;
+        m_capacityHeight = height;
+        return true;
     }
 }

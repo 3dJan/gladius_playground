@@ -113,6 +113,26 @@ namespace gladius::ui::async_rendering
             return applyCoordinatorDecision(m_coordinator.configureViewport(width, height));
         }
 
+        void setInteractivePreviewDimensionLimits(std::uint32_t maxDimension,
+                                                  std::uint64_t maxPixels) noexcept
+        {
+            m_coordinator.setInteractivePreviewDimensionLimits(maxDimension, maxPixels);
+        }
+
+        [[nodiscard]] float interactivePreviewQualityTarget() const noexcept
+        {
+            return m_coordinator.interactivePreviewQualityTarget();
+        }
+
+        [[nodiscard]] bool updateInteractivePreviewQuality(float targetQuality,
+                                                           float minQuality,
+                                                           float maxQuality,
+                                                           float resizeThresholdPercent) noexcept
+        {
+            return m_coordinator.updateInteractivePreviewQuality(
+              targetQuality, minQuality, maxQuality, resizeThresholdPercent);
+        }
+
         [[nodiscard]] RenderWorkflowDecision notifyCameraChanged(bool replaceStaleInteractiveInFlight = false)
         {
             return applyCoordinatorDecision(m_coordinator.notifyCameraChanged(replaceStaleInteractiveInFlight));

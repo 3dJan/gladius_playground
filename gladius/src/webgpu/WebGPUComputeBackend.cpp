@@ -18,6 +18,59 @@ CMRC_DECLARE(gladius_resources);
 
 namespace gladius::webgpu
 {
+    class WebGPUComputeBackend::FrameBufferPool
+        : public std::enable_shared_from_this<WebGPUComputeBackend::FrameBufferPool>
+    {
+      public:
+        [[nodiscard]] std::shared_ptr<WebGPUFrameBufferSet> acquire()
+        {
+            std::shared_ptr<Slot> slot;
+            {
+                std::scoped_lock lock{m_mutex};
+                auto const available = std::find_if(
+                  m_slots.begin(), m_slots.end(), [](auto const & candidate)
+                  { return !candidate->isLeased; });
+                if (available != m_slots.end())
+                {
+                    slot = *available;
+                }
+                else
+                {
+                    slot = std::make_shared<Slot>();
+                    slot->isLeased = true;
+                    constexpr std::size_t maximumRetainedSlots = 2u;
+                    if (m_slots.size() < maximumRetainedSlots)
+                    {
+                        m_slots.push_back(slot);
+                    }
+                }
+                slot->isLeased = true;
+            }
+
+            auto const owner = shared_from_this();
+            return std::shared_ptr<WebGPUFrameBufferSet>(
+              &slot->buffers,
+              [owner, slot = std::move(slot)](WebGPUFrameBufferSet *)
+              { owner->release(slot); });
+        }
+
+      private:
+        struct Slot
+        {
+            WebGPUFrameBufferSet buffers;
+            bool isLeased{false};
+        };
+
+        void release(std::shared_ptr<Slot> const & slot) noexcept
+        {
+            std::scoped_lock lock{m_mutex};
+            slot->isLeased = false;
+        }
+
+        std::mutex m_mutex;
+        std::vector<std::shared_ptr<Slot>> m_slots;
+    };
+
     namespace
     {
         constexpr std::uint32_t MAX_FRAME_DIMENSION = 4096u;
@@ -52,8 +105,15 @@ namespace gladius::webgpu
 
         struct WebGPUFrameSubmissionState
         {
+            explicit WebGPUFrameSubmissionState(std::shared_ptr<WebGPUFrameBufferSet> lease)
+                : bufferLease(std::move(lease))
+                , buffers(*bufferLease)
+            {
+            }
+
             mutable std::mutex mutex;
-            WebGPUFrameBufferSet buffers;
+            std::shared_ptr<WebGPUFrameBufferSet> bufferLease;
+            WebGPUFrameBufferSet & buffers;
             compute::ComputeCompletionStatus status{compute::ComputeCompletionStatus::Pending};
             std::optional<compute::FrameResult> result;
             std::string errorMessage;
@@ -311,11 +371,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
         {
           public:
             WebGPUFrameSubmission(std::shared_ptr<WebGPUComputeContext> context,
-                                  compute::FrameRequest request)
+                                  compute::FrameRequest request,
+                                  std::shared_ptr<WebGPUFrameBufferSet> bufferLease)
                 : m_context(std::move(context))
                 , m_width(request.width)
                 , m_height(request.height)
-                , m_state(std::make_shared<WebGPUFrameSubmissionState>())
+                , m_state(std::make_shared<WebGPUFrameSubmissionState>(std::move(bufferLease)))
             {
                 try
                 {
@@ -727,8 +788,9 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                     0u, state->buffers.getOutputSizeBytes()));
                       if (mappedPixels == nullptr)
                       {
-                                                    state->status = compute::ComputeCompletionStatus::Failed;
-                                                    state->errorMessage = "WebGPU frame staging buffer returned no mapped data";
+                          state->buffers.getStagingBuffer().Unmap();
+                          state->status = compute::ComputeCompletionStatus::Failed;
+                          state->errorMessage = "WebGPU frame staging buffer returned no mapped data";
                           return;
                       }
 
@@ -752,6 +814,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
     WebGPUComputeBackend::WebGPUComputeBackend(std::shared_ptr<WebGPUComputeContext> context)
         : m_context(context ? std::move(context) : std::make_shared<WebGPUComputeContext>())
+        , m_frameBufferPool(std::make_shared<FrameBufferPool>())
     {
     }
 
@@ -767,5 +830,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
     std::unique_ptr<compute::IFrameSubmission>
     WebGPUComputeBackend::submitFrame(compute::FrameRequest request)
-    { return std::make_unique<WebGPUFrameSubmission>(m_context, std::move(request)); }
+    {
+        return std::make_unique<WebGPUFrameSubmission>(
+          m_context, std::move(request), m_frameBufferPool->acquire());
+    }
 }

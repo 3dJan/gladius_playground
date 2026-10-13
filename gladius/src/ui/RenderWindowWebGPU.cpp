@@ -4,6 +4,7 @@
 #include "../Document.h"
 #include "ShortcutManager.h"
 #include "render/WebGPUFramePresenter.h"
+#include "render/AdaptivePreviewQuality.h"
 #include "compute/ComputeRendererFactory.h"
 #include "imgui.h"
 
@@ -428,11 +429,13 @@ namespace gladius::ui
             return false;
         }
 
+        auto & workflow = m_neutralRenderScheduler.workflow();
+        workflow.setInteractivePreviewDimensionLimits(4096u, 10u * 1024u * 1024u);
         if (m_neutralViewportWidth != width || m_neutralViewportHeight != height)
         {
             m_neutralViewportWidth = width;
             m_neutralViewportHeight = height;
-            queueRenderDecision(m_neutralRenderScheduler.workflow().configureViewport(width, height));
+            queueRenderDecision(workflow.configureViewport(width, height));
         }
 
         auto pollResult = m_neutralRenderScheduler.poll(true);
@@ -450,16 +453,48 @@ namespace gladius::ui
 #endif
         for (auto & accepted : pollResult.acceptedFrames)
         {
-            if (accepted.frame.isValid())
+            if (!accepted.frame.isValid() || !m_neutralFramePresenter->present(accepted.frame))
             {
-                if (m_neutralFramePresenter->present(accepted.frame))
-                {
-                    (void) m_neutralRenderScheduler.workflow().presentCandidate(
-                      accepted.candidate,
-                      m_neutralRenderScheduler.workflow().latestStamp(),
-                      accepted.candidate.presentationMask);
-                }
+                continue;
             }
+
+            bool const presented = workflow.presentCandidate(
+              accepted.candidate, workflow.latestStamp(), accepted.candidate.presentationMask);
+            if (!presented || workflow.interactionState() ==
+                                async_rendering::RenderInteractionState::Static)
+            {
+                continue;
+            }
+
+            auto const completion = std::find_if(
+              pollResult.completions.begin(),
+              pollResult.completions.end(),
+              [&accepted](async_rendering::NeutralFrameSubmissionResult const & item)
+              { return item.taskResult.requestId == accepted.candidate.frameId; });
+            if (completion == pollResult.completions.end() ||
+                completion->taskResult.type != async_rendering::RenderTaskType::LowResolutionPreview ||
+                completion->taskResult.status != async_rendering::RenderTaskStatus::Completed ||
+                !completion->taskResult.producedDisplayFrame || completion->taskResult.durationNs == 0u)
+            {
+                continue;
+            }
+
+            constexpr float targetFrameTimeMs = 25.0f;
+            constexpr float minPreviewQuality = 0.02f;
+            constexpr float maxPreviewQuality = 0.5f;
+            constexpr float resizeThresholdPercent = 5.0f;
+            float const observedFrameTimeMs =
+              static_cast<float>(completion->taskResult.durationNs) / 1'000'000.0f;
+            float const targetQuality = async_rendering::adaptInteractivePreviewQuality(
+              workflow.interactivePreviewQualityTarget(),
+              targetFrameTimeMs,
+              observedFrameTimeMs,
+              minPreviewQuality,
+              maxPreviewQuality);
+            (void) workflow.updateInteractivePreviewQuality(targetQuality,
+                                                            minPreviewQuality,
+                                                            maxPreviewQuality,
+                                                            resizeThresholdPercent);
         }
         queueRenderDecision(async_rendering::RenderWorkflowDecision{
           .commands = std::move(pollResult.commands)});
@@ -598,8 +633,11 @@ namespace gladius::ui
         auto const textureId = m_neutralFramePresenter ? m_neutralFramePresenter->getTextureId() : 0u;
         if (textureId != 0u)
         {
+            auto const uvMax = m_neutralFramePresenter->getTextureUvMax();
             ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(textureId)),
-                         {m_renderWindowSize_px.x, m_renderWindowSize_px.y});
+                         {m_renderWindowSize_px.x, m_renderWindowSize_px.y},
+                         {0.0f, 0.0f},
+                         {uvMax[0], uvMax[1]});
         }
 
         slider(contentMin, contentMax);

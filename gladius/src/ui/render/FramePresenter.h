@@ -2,6 +2,7 @@
 
 #include "compute/RenderContracts.h"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -23,6 +24,10 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] virtual std::uintptr_t getTextureId() const noexcept = 0;
         [[nodiscard]] virtual std::uint32_t getWidth() const noexcept = 0;
         [[nodiscard]] virtual std::uint32_t getHeight() const noexcept = 0;
+        [[nodiscard]] virtual std::array<float, 2> getTextureUvMax() const noexcept
+        {
+            return {1.0f, 1.0f};
+        }
         [[nodiscard]] virtual std::optional<compute::RenderFreshnessStamp> getFreshness() const noexcept = 0;
 
       protected:
