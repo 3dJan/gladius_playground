@@ -111,6 +111,57 @@ namespace gladius::ui::async_rendering::tests
         }
     }
 
+    TEST(RenderUpdateCoordinator, PreviewQualityChange_UpdatesDimensionsWithoutChangingFreshness)
+    {
+        RenderUpdateCoordinator coordinator;
+        ASSERT_FALSE(coordinator.configureViewport(640, 480).commands.empty());
+
+        auto decision = coordinator.notifyCameraChanged();
+        auto preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(preview.has_value());
+        EXPECT_EQ(preview->width, 320u);
+        EXPECT_EQ(preview->height, 240u);
+
+        auto const before = coordinator.latestStamp();
+        EXPECT_FALSE(coordinator.updateInteractivePreviewQuality(0.48f, 0.02f, 0.5f, 5.0f));
+        EXPECT_FLOAT_EQ(coordinator.interactivePreviewQualityTarget(), 0.48f);
+        EXPECT_TRUE(coordinator.updateInteractivePreviewQuality(0.46f, 0.02f, 0.5f, 5.0f));
+        auto const after = coordinator.latestStamp();
+        EXPECT_EQ(after.sceneEpoch, before.sceneEpoch);
+        EXPECT_EQ(after.parameterEpoch, before.parameterEpoch);
+        EXPECT_EQ(after.viewEpoch, before.viewEpoch);
+        EXPECT_EQ(after.viewportEpoch, before.viewportEpoch);
+        EXPECT_EQ(after.qualityEpoch, before.qualityEpoch);
+
+        decision = coordinator.notifyCameraChanged(true);
+        preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(preview.has_value());
+        EXPECT_EQ(preview->width, 294u);
+        EXPECT_EQ(preview->height, 221u);
+
+        decision = coordinator.startDisplayTask(RenderTaskType::ProgressiveHighQualityChunk);
+        auto const highQuality = findStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk);
+        ASSERT_TRUE(highQuality.has_value());
+        EXPECT_EQ(highQuality->width, 640u);
+        EXPECT_EQ(highQuality->height, 480u);
+    }
+
+    TEST(RenderUpdateCoordinator, PreviewDimensions_RespectWebGpuLimits)
+    {
+        RenderUpdateCoordinator coordinator;
+        coordinator.setInteractivePreviewDimensionLimits(4096u, 10u * 1024u * 1024u);
+        ASSERT_FALSE(coordinator.configureViewport(16000u, 16000u).commands.empty());
+
+        auto const decision = coordinator.notifyCameraChanged();
+        auto const preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+
+        ASSERT_TRUE(preview.has_value());
+        EXPECT_LE(preview->width, 4096u);
+        EXPECT_LE(preview->height, 4096u);
+        EXPECT_LE(static_cast<std::uint64_t>(preview->width) * preview->height,
+                  10u * 1024u * 1024u);
+    }
+
     TEST(RenderUpdateCoordinator, CameraChanged_WithAutoLearning_StartsLowResolutionPreview)
     {
         RenderUpdateCoordinator coordinator;
