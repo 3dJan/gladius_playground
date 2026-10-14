@@ -6,50 +6,252 @@
 #include "RenderingTool.h"
 #include "../../Application.h"
 #include "../../Document.h"
+#include "compute/RenderContracts.h"
+#include <array>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #ifdef GLADIUS_ENABLE_OPENCL
 #include "../../ui/OrbitalCamera.h"
-#include <nlohmann/json.hpp>
 #endif
 
 namespace gladius
 {
     namespace mcp::tools
     {
+        namespace
+        {
+            using Vector3 = std::array<float, 3>;
+
+            [[nodiscard]] Vector3 readVector3(nlohmann::json const & value,
+                                              char const * const fieldName)
+            {
+                if (!value.is_array() || value.size() != 3u)
+                {
+                    throw std::invalid_argument(std::string{fieldName} +
+                                                " must be an array of 3 numbers");
+                }
+
+                Vector3 result{};
+                for (std::size_t index = 0; index < result.size(); ++index)
+                {
+                    if (!value[index].is_number())
+                    {
+                        throw std::invalid_argument(std::string{fieldName} +
+                                                    " must contain only numbers");
+                    }
+                    result[index] = value[index].get<float>();
+                    if (!std::isfinite(result[index]))
+                    {
+                        throw std::invalid_argument(std::string{fieldName} +
+                                                    " must contain finite values");
+                    }
+                }
+                return result;
+            }
+
+            [[nodiscard]] Vector3 subtract(Vector3 const & lhs, Vector3 const & rhs)
+            {
+                return {lhs[0] - rhs[0], lhs[1] - rhs[1], lhs[2] - rhs[2]};
+            }
+
+            [[nodiscard]] Vector3 cross(Vector3 const & lhs, Vector3 const & rhs)
+            {
+                return {lhs[1] * rhs[2] - lhs[2] * rhs[1],
+                        lhs[2] * rhs[0] - lhs[0] * rhs[2],
+                        lhs[0] * rhs[1] - lhs[1] * rhs[0]};
+            }
+
+            [[nodiscard]] Vector3 normalized(Vector3 value, char const * const fieldName)
+            {
+                auto const length = std::sqrt(value[0] * value[0] + value[1] * value[1] +
+                                              value[2] * value[2]);
+                if (!std::isfinite(length) || length <= 1.0e-6f)
+                {
+                    throw std::invalid_argument(std::string{fieldName} + " must be non-zero");
+                }
+                for (auto & component : value)
+                {
+                    component /= length;
+                }
+                return value;
+            }
+
+            [[nodiscard]] compute::RenderCamera parseRenderCamera(
+              nlohmann::json const & cameraSettings)
+            {
+                if (!cameraSettings.contains("eye_position") ||
+                    !cameraSettings.contains("target_position"))
+                {
+                    throw std::invalid_argument(
+                      "Camera settings must contain 'eye_position' and 'target_position'");
+                }
+
+                auto const eye = readVector3(cameraSettings.at("eye_position"), "eye_position");
+                auto const target =
+                  readVector3(cameraSettings.at("target_position"), "target_position");
+                auto forward = normalized(subtract(target, eye), "Camera direction");
+                auto up = cameraSettings.contains("up_vector")
+                            ? normalized(readVector3(cameraSettings.at("up_vector"), "up_vector"),
+                                         "up_vector")
+                            : Vector3{0.0f, 0.0f, 1.0f};
+                auto right = cross(forward, up);
+                auto const rightLength = std::sqrt(right[0] * right[0] + right[1] * right[1] +
+                                                   right[2] * right[2]);
+                if (rightLength <= 1.0e-6f)
+                {
+                    up = std::abs(forward[2]) > 0.99f ? Vector3{0.0f, 1.0f, 0.0f}
+                                                     : Vector3{0.0f, 0.0f, 1.0f};
+                    right = cross(forward, up);
+                }
+                right = normalized(right, "Camera right direction");
+                up = normalized(cross(right, forward), "Camera up direction");
+                return {.eyePosition = eye,
+                        .forwardDirection = forward,
+                        .rightDirection = right,
+                        .upDirection = up};
+            }
+
+            [[nodiscard]] nlohmann::json renderWebGpuPng(
+              Document & document,
+              std::string const & outputPath,
+              unsigned int const width,
+              unsigned int const height,
+              std::string const & format,
+              float const quality,
+              std::optional<compute::RenderCamera> camera,
+              std::string const & message,
+              nlohmann::json additionalData = nlohmann::json::object())
+            {
+                if (format != "png")
+                {
+                    throw std::invalid_argument(
+                      "The selected WebGPU thumbnail renderer currently supports PNG output only");
+                }
+
+                auto image = document.createThumbnailPng(width, height, std::move(camera));
+                auto const outputFile = std::filesystem::path(outputPath);
+                if (!outputFile.parent_path().empty())
+                {
+                    std::filesystem::create_directories(outputFile.parent_path());
+                }
+                std::ofstream output(outputFile, std::ios::binary);
+                if (!output)
+                {
+                    throw std::runtime_error("Unable to open thumbnail output file");
+                }
+                output.write(reinterpret_cast<char const *>(image.data.data()),
+                             static_cast<std::streamsize>(image.data.size()));
+                if (!output)
+                {
+                    throw std::runtime_error("Unable to write thumbnail output file");
+                }
+
+                nlohmann::json response = { {"success", true},
+                                            {"message", message},
+                                            {"outputPath", outputPath},
+                                            {"actualWidth", image.width},
+                                            {"actualHeight", image.height},
+                                            {"requestedWidth", width},
+                                            {"requestedHeight", height},
+                                            {"format", "png"},
+                                            {"quality", quality} };
+                for (auto const & [key, value] : additionalData.items())
+                {
+                    response[key] = value;
+                }
+                return response;
+            }
+        }
+
         RenderingTool::RenderingTool(Application * app)
             : MCPToolBase(app)
         {
         }
 
 #ifndef GLADIUS_ENABLE_OPENCL
-                nlohmann::json RenderingTool::renderToFile(const std::string &,
-                                                                                                     unsigned int,
-                                                                                                     unsigned int,
-                                                                                                     const std::string &,
-                                                                                                     float)
+                nlohmann::json RenderingTool::renderToFile(const std::string & outputPath,
+                                                           unsigned int width,
+                                                           unsigned int height,
+                                                           const std::string & format,
+                                                           float quality)
                 {
-                        return createToolError(
-                            "Image rendering is unavailable in a pure WebGPU MCP build.");
+                    if (!validateActiveDocument())
+                    {
+                        return createToolError(getLastErrorMessage());
+                    }
+
+                    try
+                    {
+                        auto document = m_application->getCurrentDocument();
+                        if (!document)
+                        {
+                            throw std::runtime_error("No active document");
+                        }
+                        return renderWebGpuPng(*document,
+                                               outputPath,
+                                               width,
+                                               height,
+                                               format,
+                                               quality,
+                                               {},
+                                               "Rendering completed successfully");
+                    }
+                    catch (std::exception const & error)
+                    {
+                        setErrorMessage("Rendering failed: " + std::string{error.what()});
+                        return createToolError(getLastErrorMessage());
+                    }
                 }
 
-                nlohmann::json RenderingTool::renderWithCamera(const std::string &,
-                                                                                                             const nlohmann::json &,
-                                                                                                             const nlohmann::json &)
+                nlohmann::json RenderingTool::renderWithCamera(
+                  const std::string & outputPath,
+                  const nlohmann::json & cameraSettings,
+                  const nlohmann::json & renderSettings)
                 {
-                        return createToolError(
-                            "Camera rendering is unavailable in a pure WebGPU MCP build.");
+                    if (!validateActiveDocument())
+                    {
+                        return createToolError(getLastErrorMessage());
+                    }
+
+                    try
+                    {
+                        auto document = m_application->getCurrentDocument();
+                        if (!document)
+                        {
+                            throw std::runtime_error("No active document");
+                        }
+                        auto const width = renderSettings.value("width", 256u);
+                        auto const height = renderSettings.value("height", 256u);
+                        auto const format = renderSettings.value("format", std::string{"png"});
+                        auto const quality = renderSettings.value("quality", 0.9f);
+                        auto additionalData = nlohmann::json{
+                          {"cameraSettings", cameraSettings}, {"renderSettings", renderSettings}};
+                        return renderWebGpuPng(*document,
+                                               outputPath,
+                                               width,
+                                               height,
+                                               format,
+                                               quality,
+                                               parseRenderCamera(cameraSettings),
+                                               "Camera-based rendering completed successfully",
+                                               std::move(additionalData));
+                    }
+                    catch (std::exception const & error)
+                    {
+                        setErrorMessage("Camera-based rendering failed: " +
+                                        std::string{error.what()});
+                        return createToolError(getLastErrorMessage());
+                    }
                 }
 
                 nlohmann::json RenderingTool::generateThumbnail(const std::string & outputPath,
                                         unsigned int size)
                 {
-                    nlohmann::json response;
                     if (!validateActiveDocument())
                     {
-                        response["success"] = false;
-                        response["error"] = getLastErrorMessage();
-                        return response;
+                        return createToolError(getLastErrorMessage());
                     }
 
                     try
@@ -60,42 +262,20 @@ namespace gladius
                             throw std::runtime_error("No active document");
                         }
 
-                        auto const outputFile = std::filesystem::path(outputPath);
-                        if (!outputFile.parent_path().empty())
-                        {
-                            std::filesystem::create_directories(outputFile.parent_path());
-                        }
-                        auto image = document->createThumbnailPng(size);
-                        std::ofstream output(outputFile, std::ios::binary);
-                        if (!output)
-                        {
-                            throw std::runtime_error("Unable to open thumbnail output file");
-                        }
-                        output.write(reinterpret_cast<char const *>(image.data.data()),
-                                 static_cast<std::streamsize>(image.data.size()));
-                        if (!output)
-                        {
-                            throw std::runtime_error("Unable to write thumbnail output file");
-                        }
-
-                        response["success"] = true;
-                        response["message"] = "Thumbnail generated successfully";
-                        response["outputPath"] = outputPath;
-                        response["actualWidth"] = size;
-                        response["actualHeight"] = size;
-                        response["requestedWidth"] = size;
-                        response["requestedHeight"] = size;
-                        response["format"] = "png";
-                        response["quality"] = 1.0f;
-                        response["size"] = size;
-                        return response;
+                        return renderWebGpuPng(*document,
+                                               outputPath,
+                                               size,
+                                               size,
+                                               "png",
+                                               1.0f,
+                                               {},
+                                               "Thumbnail generated successfully",
+                                               {{"size", size}});
                     }
                     catch (const std::exception & e)
                     {
                         setErrorMessage("Thumbnail generation failed: " + std::string(e.what()));
-                        response["success"] = false;
-                        response["error"] = getLastErrorMessage();
-                        return response;
+                        return createToolError(getLastErrorMessage());
                     }
                 }
 
@@ -233,6 +413,25 @@ namespace gladius
 
             try
             {
+                auto document = m_application->getCurrentDocument();
+                if (!document)
+                {
+                    throw std::runtime_error("No active document");
+                }
+                auto const backend = document->getBackendKind();
+                if (backend.has_value() &&
+                    *backend == compute::ComputeBackendKind::WebGPU)
+                {
+                    return renderWebGpuPng(*document,
+                                           outputPath,
+                                           width,
+                                           height,
+                                           format,
+                                           quality,
+                                           {},
+                                           "Rendering completed successfully");
+                }
+
                 // Get validated compute core
                 auto core = getValidatedComputeCore();
                 if (!core)
@@ -324,6 +523,28 @@ namespace gladius
 
             try
             {
+                auto document = m_application->getCurrentDocument();
+                if (!document)
+                {
+                    throw std::runtime_error("No active document");
+                }
+                auto const backend = document->getBackendKind();
+                if (backend.has_value() &&
+                    *backend == compute::ComputeBackendKind::WebGPU)
+                {
+                    auto additionalData = nlohmann::json{
+                      {"cameraSettings", cameraSettings}, {"renderSettings", renderSettings}};
+                    return renderWebGpuPng(*document,
+                                           outputPath,
+                                           width,
+                                           height,
+                                           format,
+                                           quality,
+                                           parseRenderCamera(cameraSettings),
+                                           "Camera-based rendering completed successfully",
+                                           std::move(additionalData));
+                }
+
                 // Get validated compute core
                 auto core = getValidatedComputeCore();
                 if (!core)
@@ -426,6 +647,26 @@ namespace gladius
 
             try
             {
+                auto document = m_application->getCurrentDocument();
+                if (!document)
+                {
+                    throw std::runtime_error("No active document");
+                }
+                auto const backend = document->getBackendKind();
+                if (backend.has_value() &&
+                    *backend == compute::ComputeBackendKind::WebGPU)
+                {
+                    return renderWebGpuPng(*document,
+                                           outputPath,
+                                           size,
+                                           size,
+                                           "png",
+                                           1.0f,
+                                           {},
+                                           "Thumbnail generated successfully",
+                                           {{"size", size}});
+                }
+
                 // Get validated compute core
                 auto core = getValidatedComputeCore();
                 if (!core)

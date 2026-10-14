@@ -82,115 +82,22 @@ namespace gladius::mcp
             {
             }
             bool const writeThumbnail = m_application && m_application->isHeadlessMode();
-
-            bool preparationSuccess = true;
-#ifdef GLADIUS_ENABLE_OPENCL
-            if (writeThumbnail)
-            {
-                // Get the compute core from the document for thumbnail preparation
-                auto computeCore = document->getCore();
-                if (computeCore)
-                {
-                    // Ensure assembly is updated before thumbnail preparation
-                    try
-                    {
-                        document->updateFlatAssembly();
-                        computeCore->tryRefreshProgramProtected(document->getFlatAssembly());
-                    }
-                    catch (const std::exception & e)
-                    {
-                        setError("Assembly update failed: " + std::string(e.what()));
-                        preparationSuccess = false;
-                        try
-                        {
-                            if (auto log = document->getSharedLogger())
-                            {
-                                log->logInfo("MCP.saveDocumentAsync: assembly/program refresh OK");
-                            }
-                        }
-                        catch (...)
-                        {
-                        }
-                    }
-
-                    if (preparationSuccess)
-                    {
-                        // Prepare the model for thumbnail generation
-                        preparationSuccess = computeCore->prepareImageRendering();
-                        if (!preparationSuccess)
-                        {
-                            setError(
-                              "Thumbnail preparation failed: This may be due to model compilation "
-                              "errors, "
-                              "SDF precomputation failure, or invalid bounding box. "
-                              "Check model validation for detailed OpenCL compilation errors.");
-                            // Don't fail the save operation, just disable thumbnail generation
-                            try
-                            {
-                                if (auto log = document->getSharedLogger())
-                                {
-                                    log->logError(
-                                      "MCP.saveDocumentAsync: prepareThumbnailGeneration=false");
-                                }
-                            }
-                            catch (...)
-                            {
-                            }
-                        }
-                        else
-                        {
-                            try
-                            {
-                                if (auto log = document->getSharedLogger())
-                                {
-                                    log->logInfo(
-                                      "MCP.saveDocumentAsync: prepareThumbnailGeneration OK");
-                                }
-                            }
-                            catch (...)
-                            {
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    setError("No compute core available for thumbnail preparation");
-                    try
-                    {
-                        if (auto log = document->getSharedLogger())
-                        {
-                            log->logError(
-                              "MCP.saveDocumentAsync: no compute core for thumbnail prep");
-                        }
-                    }
-                    catch (...)
-                    {
-                    }
-                    preparationSuccess = false;
-                }
-            }
-#endif
-
-            // Only write thumbnail if preparation succeeded
-            bool const actualWriteThumbnail = writeThumbnail && preparationSuccess;
             try
             {
                 if (auto log = document->getSharedLogger())
                 {
                     log->logInfo(std::string{"MCP.saveDocumentAsync: saving 3MF (thumb="} +
-                                 (actualWriteThumbnail ? "1)" : "0)"));
+                                 (writeThumbnail ? "1)" : "0)"));
                 }
             }
             catch (...)
             {
             }
-            document->saveAs(std::filesystem::path(path), actualWriteThumbnail);
+            document->saveAs(std::filesystem::path(path), writeThumbnail);
 
             // Success
-            m_lastErrorMessage = actualWriteThumbnail ? "Document saved successfully with thumbnail"
-                                 : (writeThumbnail && !preparationSuccess)
-                                   ? "Document saved successfully (thumbnail preparation failed)"
+            m_lastErrorMessage = writeThumbnail
+                                   ? "Document saved successfully (thumbnail generation is best-effort)"
                                    : "Document saved successfully";
             try
             {
@@ -245,7 +152,8 @@ namespace gladius::mcp
             co_await m_backgroundPool->schedule();
             document->saveAs(std::filesystem::path(path), true);
 
-            m_lastErrorMessage = "Document saved successfully with thumbnail";
+            m_lastErrorMessage =
+              "Document saved successfully (thumbnail generation is best-effort)";
             co_return true;
         }
         catch (const std::exception & e)

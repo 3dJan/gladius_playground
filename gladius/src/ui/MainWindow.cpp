@@ -39,9 +39,11 @@
 #include "SvgWriter.h"
 #endif
 #include "compute/ComputeBackendSettings.h"
+#include "compute/ApplicationComputeRuntime.h"
 #include "compute/types.h"
 #if defined(GLADIUS_ENABLE_WEBGPU)
 #include "webgpu/WebGPUComputeContext.h"
+#include "webgpu/WebGPUThumbnailRenderer.h"
 #endif
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
@@ -2774,6 +2776,15 @@ namespace gladius::ui
         auto const snapshotVersion = snapshot.version;
         auto const sourceDocument = save.sourceDocument;
         auto logger = m_logger;
+        auto const selectedBackend =
+          m_runtime ? std::optional<compute::ComputeBackendKind>{m_runtime->getBackendKind()}
+                    : std::optional<compute::ComputeBackendKind>{};
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        auto webGpuContext =
+          selectedBackend.has_value() && *selectedBackend == compute::ComputeBackendKind::WebGPU
+            ? m_runtime->getWebGPUContext()
+            : std::shared_ptr<webgpu::WebGPUComputeContext>{};
+#endif
 
         m_nativeSaveInProgress = true;
         m_nativeSaveFuture = std::async(
@@ -2782,6 +2793,10 @@ namespace gladius::ui
            tempFilename,
            snapshotDocumentIdentity,
            snapshotVersion,
+           selectedBackend,
+#if defined(GLADIUS_ENABLE_WEBGPU)
+           webGpuContext,
+#endif
            sourceDocument,
            snapshot = std::move(snapshot),
            logger]() mutable
@@ -2792,109 +2807,224 @@ namespace gladius::ui
                                       false,
                                       {},
                                       sourceDocument};
-#if defined(GLADIUS_ENABLE_OPENCL)
-              auto thumbnailInput = tempFilename;
-              thumbnailInput.replace_extension(".3mf");
-              try
+              auto saveWithoutThumbnail = [&]()
               {
-                  io::Writer3mf writer(logger);
-                  if (!writer.save(thumbnailInput, snapshot, false))
+                  try
                   {
-                      result.error = "The 3MF writer rejected the save snapshot.";
-                  }
-                  else
-                  {
-                      auto thumbnailContext =
-                        std::make_shared<ComputeContext>(EnableGLOutput::disabled);
-                      if (!thumbnailContext->isValid())
+                      io::Writer3mf writer(logger);
+                      if (!writer.save(tempFilename, snapshot, false))
                       {
-                          result.error = "No valid compute context is available for thumbnail "
-                                         "generation.";
+                          result.error = "The 3MF writer rejected the save snapshot.";
                       }
                       else
                       {
-                          auto thumbnailCore = std::make_shared<ComputeCore>(
-                            thumbnailContext, RequiredCapabilities::ComputeOnly, logger);
-                          auto thumbnailDocument = std::make_shared<Document>(thumbnailCore);
-                          thumbnailDocument->setUiMode(false);
-                          thumbnailDocument->load(thumbnailInput);
-
-                          if (!thumbnailCore->prepareImageRendering())
+                          std::error_code renameError;
+                          std::filesystem::rename(tempFilename, filename, renameError);
+                          if (renameError)
                           {
-                              result.error = "The isolated thumbnail renderer could not prepare "
-                                             "the snapshot model.";
+                              result.error = fmt::format(
+                                "Could not publish saved file: {}", renameError.message());
                           }
                           else
                           {
-                              auto thumbnail = thumbnailCore->createThumbnailPng();
-                              if (!writer.attachThumbnail(snapshot.model, thumbnail.data))
+                              result.success = true;
+                          }
+                      }
+                  }
+                  catch (std::exception const & error)
+                  {
+                      result.error = error.what();
+                  }
+
+                  std::error_code cleanupError;
+                  std::filesystem::remove(tempFilename, cleanupError);
+              };
+
+              bool thumbnailHandled = false;
+#if defined(GLADIUS_ENABLE_OPENCL)
+              if (selectedBackend.has_value() &&
+                  *selectedBackend == compute::ComputeBackendKind::OpenCL)
+              {
+                  thumbnailHandled = true;
+                  auto thumbnailInput = tempFilename;
+                  thumbnailInput.replace_extension(".3mf");
+                  try
+                  {
+                      io::Writer3mf writer(logger);
+                      if (!writer.save(thumbnailInput, snapshot, false))
+                      {
+                          result.error = "The 3MF writer rejected the save snapshot.";
+                      }
+                      else
+                      {
+                          auto thumbnailContext =
+                            std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+                          if (!thumbnailContext->isValid())
+                          {
+                              result.error = "No valid compute context is available for thumbnail "
+                                             "generation.";
+                          }
+                          else
+                          {
+                              auto thumbnailCore = std::make_shared<ComputeCore>(
+                                thumbnailContext, RequiredCapabilities::ComputeOnly, logger);
+                              auto thumbnailDocument = std::make_shared<Document>(thumbnailCore);
+                              thumbnailDocument->setUiMode(false);
+                              thumbnailDocument->load(thumbnailInput);
+
+                              if (!thumbnailCore->prepareImageRendering())
                               {
-                                  result.error = "The generated thumbnail could not be attached "
-                                                 "to the 3MF package.";
-                              }
-                              else if (!writer.save(tempFilename, snapshot, false))
-                              {
-                                  result.error = "The 3MF writer rejected the thumbnail package.";
+                                  result.error = "The isolated thumbnail renderer could not prepare "
+                                                 "the snapshot model.";
                               }
                               else
                               {
-                                  std::error_code renameError;
-                                  std::filesystem::rename(tempFilename,
-                                                          filename,
-                                                          renameError);
-                                  if (renameError)
+                                  auto thumbnail = thumbnailCore->createThumbnailPng();
+                                  if (!writer.attachThumbnail(snapshot.model, thumbnail.data))
                                   {
-                                      result.error = fmt::format(
-                                        "Could not publish saved file: {}", renameError.message());
+                                      result.error = "The generated thumbnail could not be attached "
+                                                     "to the 3MF package.";
+                                  }
+                                  else if (!writer.save(tempFilename, snapshot, false))
+                                  {
+                                      result.error = "The 3MF writer rejected the thumbnail package.";
                                   }
                                   else
                                   {
-                                      result.success = true;
+                                      std::error_code renameError;
+                                      std::filesystem::rename(tempFilename,
+                                                              filename,
+                                                              renameError);
+                                      if (renameError)
+                                      {
+                                          result.error = fmt::format(
+                                            "Could not publish saved file: {}",
+                                            renameError.message());
+                                      }
+                                      else
+                                      {
+                                          result.success = true;
+                                      }
                                   }
                               }
                           }
                       }
                   }
-              }
-              catch (std::exception const & e)
-              {
-                  result.error = e.what();
-              }
-
-              std::error_code cleanupError;
-              std::filesystem::remove(tempFilename, cleanupError);
-              std::filesystem::remove(thumbnailInput, cleanupError);
-#else
-              try
-              {
-                  io::Writer3mf writer(logger);
-                  if (!writer.save(tempFilename, snapshot, false))
+                  catch (std::exception const & error)
                   {
-                      result.error = "The 3MF writer rejected the save snapshot.";
+                      result.error = error.what();
                   }
-                  else
+
+                  std::error_code cleanupError;
+                  std::filesystem::remove(tempFilename, cleanupError);
+                  std::filesystem::remove(thumbnailInput, cleanupError);
+              }
+#endif
+#if defined(GLADIUS_ENABLE_WEBGPU)
+              if (!thumbnailHandled && selectedBackend.has_value() &&
+                  *selectedBackend == compute::ComputeBackendKind::WebGPU)
+              {
+                  thumbnailHandled = true;
+                  auto thumbnailInput = tempFilename;
+                  thumbnailInput.replace_extension(".3mf");
+                  auto outputTempFilename = thumbnailInput;
+                  try
                   {
-                      std::error_code renameError;
-                      std::filesystem::rename(tempFilename, filename, renameError);
-                      if (renameError)
+                      io::Writer3mf writer(logger);
+                      if (!writer.save(thumbnailInput, snapshot, false))
                       {
-                          result.error = fmt::format(
-                            "Could not publish saved file: {}", renameError.message());
+                          result.error = "The 3MF writer rejected the save snapshot.";
                       }
                       else
                       {
-                          result.success = true;
+                          bool thumbnailAttached = false;
+                          try
+                          {
+                              if (!webGpuContext || !webGpuContext->isValid())
+                              {
+                                  throw std::runtime_error(
+                                    "No valid WebGPU context is available for thumbnail generation.");
+                              }
+
+                              Document thumbnailDocument(logger);
+                              thumbnailDocument.setUiMode(false);
+                              thumbnailDocument.load(thumbnailInput);
+                              auto const flatAssembly = thumbnailDocument.getFlatAssembly();
+                              if (!flatAssembly || !flatAssembly->assemblyModel())
+                              {
+                                  throw std::runtime_error(
+                                    "The WebGPU thumbnail renderer could not load the saved snapshot.");
+                              }
+
+                              auto thumbnail = webgpu::WebGPUThumbnailRenderer::renderPng(
+                                webGpuContext,
+                                *flatAssembly,
+                                thumbnailDocument.getResourceManager(),
+                                256u,
+                                256u,
+                                std::max<std::uint64_t>(
+                                  thumbnailDocument.structuralEditEpoch(), 1u));
+                              if (!writer.attachThumbnail(snapshot.model, thumbnail.data))
+                              {
+                                  throw std::runtime_error(
+                                    "The generated WebGPU thumbnail could not be attached to the 3MF package.");
+                              }
+                              thumbnailAttached = true;
+                          }
+                          catch (std::exception const & error)
+                          {
+                              if (logger)
+                              {
+                                  logger->addEvent(
+                                    {fmt::format("Could not generate WebGPU save thumbnail; "
+                                                 "saving without a new thumbnail: {}",
+                                                 error.what()),
+                                     events::Severity::Warning});
+                              }
+                          }
+
+                          if (thumbnailAttached && writer.save(tempFilename, snapshot, false))
+                          {
+                              outputTempFilename = tempFilename;
+                          }
+                          else if (thumbnailAttached && logger)
+                          {
+                              logger->addEvent(
+                                {"Could not rewrite the save snapshot with its WebGPU thumbnail; "
+                                 "saving the snapshot without a new thumbnail.",
+                                 events::Severity::Warning});
+                          }
+
+                          if (result.error.empty())
+                          {
+                              std::error_code renameError;
+                              std::filesystem::rename(outputTempFilename, filename, renameError);
+                              if (renameError)
+                              {
+                                  result.error = fmt::format(
+                                    "Could not publish saved file: {}", renameError.message());
+                              }
+                              else
+                              {
+                                  result.success = true;
+                              }
+                          }
                       }
                   }
-              }
-              catch (std::exception const & e)
-              {
-                  result.error = e.what();
-              }
+                  catch (std::exception const & error)
+                  {
+                      result.error = error.what();
+                  }
 
-              std::error_code cleanupError;
-              std::filesystem::remove(tempFilename, cleanupError);
+                  std::error_code cleanupError;
+                  std::filesystem::remove(tempFilename, cleanupError);
+                  std::filesystem::remove(thumbnailInput, cleanupError);
+              }
 #endif
+              if (!thumbnailHandled)
+              {
+                  saveWithoutThumbnail();
+              }
               return result;
           });
     }

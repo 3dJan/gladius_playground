@@ -2156,7 +2156,10 @@ namespace gladius
     {
         if (filename.extension() == ".3mf")
         {
-            if (writeThumbnail && m_core)
+            bool const webGpuSelected =
+              m_backendRuntime != nullptr &&
+              m_backendRuntime->getBackendKind() == compute::ComputeBackendKind::WebGPU;
+            if (writeThumbnail && !webGpuSelected && m_core)
             {
 #if defined(GLADIUS_ENABLE_OPENCL)
                 auto computeToken = m_core->waitForComputeToken();
@@ -2191,9 +2194,87 @@ namespace gladius
 
     PlainImage Document::createThumbnailPng(std::uint32_t const size)
     {
-        if (size == 0u)
+        return createThumbnailPng(size, size);
+    }
+
+    std::optional<compute::ComputeBackendKind> Document::getBackendKind() const noexcept
+    {
+        if (m_backendRuntime != nullptr)
         {
-            throw std::invalid_argument("Thumbnail size must be greater than zero");
+            return m_backendRuntime->getBackendKind();
+        }
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        if (m_core)
+        {
+            return compute::ComputeBackendKind::OpenCL;
+        }
+#endif
+        return std::nullopt;
+    }
+
+    PlainImage Document::createThumbnailPng(
+      std::uint32_t const width,
+      std::uint32_t const height,
+      std::optional<compute::RenderCamera> camera)
+    {
+        if (width == 0u || height == 0u)
+        {
+            throw std::invalid_argument("Thumbnail dimensions must be greater than zero");
+        }
+
+#if !defined(GLADIUS_ENABLE_WEBGPU)
+        (void) camera;
+#endif
+
+        if (m_backendRuntime != nullptr)
+        {
+            switch (m_backendRuntime->getBackendKind())
+            {
+            case compute::ComputeBackendKind::WebGPU:
+#if defined(GLADIUS_ENABLE_WEBGPU)
+                if (!m_backendRuntime->isAvailable())
+                {
+                    throw std::runtime_error("WebGPU thumbnail runtime is unavailable: " +
+                                             m_backendRuntime->getErrorMessage());
+                }
+
+                if (auto context = m_backendRuntime->getWebGPUContext())
+                {
+                    auto assemblyToken = waitForAssemblyToken();
+                    updateFlatAssembly();
+                    auto const flatAssembly = getFlatAssembly();
+                    if (!flatAssembly || !flatAssembly->assemblyModel())
+                    {
+                        throw std::runtime_error("WebGPU thumbnail requires a flattened assembly");
+                    }
+
+                    auto const generation = std::max<std::uint64_t>(structuralEditEpoch(), 1u);
+                    return webgpu::WebGPUThumbnailRenderer::renderPng(
+                      std::move(context),
+                      *flatAssembly,
+                      getResourceManager(),
+                      width,
+                      height,
+                      generation,
+                      std::move(camera));
+                }
+                throw std::runtime_error("WebGPU thumbnail context is unavailable");
+#else
+                throw std::runtime_error("WebGPU thumbnail generation is unavailable in this build");
+#endif
+            case compute::ComputeBackendKind::OpenCL:
+#if defined(GLADIUS_ENABLE_OPENCL)
+                if (auto core = m_backendRuntime->getOpenCLCore())
+                {
+                    return core->createThumbnailPng();
+                }
+                throw std::runtime_error("OpenCL thumbnail core is unavailable");
+#else
+                throw std::runtime_error("OpenCL thumbnail generation is unavailable in this build");
+#endif
+            }
+            throw std::runtime_error("Thumbnail generation is unavailable for the selected backend");
         }
 
 #if defined(GLADIUS_ENABLE_OPENCL)
@@ -2203,28 +2284,7 @@ namespace gladius
         }
 #endif
 
-#if defined(GLADIUS_ENABLE_WEBGPU)
-        if (m_backendRuntime == nullptr ||
-            m_backendRuntime->getBackendKind() != compute::ComputeBackendKind::WebGPU)
-        {
-            throw std::runtime_error("WebGPU thumbnail runtime is unavailable");
-        }
-
-        auto * const session = m_backendRuntime->getRenderBackendSession();
-        updateFlatAssembly();
-        auto const flatAssembly = getFlatAssembly();
-        if (session == nullptr || !flatAssembly || !flatAssembly->assemblyModel())
-        {
-            throw std::runtime_error("WebGPU thumbnail requires a flattened assembly");
-        }
-
-        auto const generation = std::max<std::uint64_t>(structuralEditEpoch(), 1u);
-        return webgpu::WebGPUThumbnailRenderer::renderPng(
-          *session, *flatAssembly, getResourceManager(), size, generation);
-#else
-        (void) size;
         throw std::runtime_error("Thumbnail generation is unavailable for the selected backend");
-#endif
     }
 
     io::SaveSnapshot Document::createSaveSnapshot() const

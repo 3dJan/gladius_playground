@@ -30,27 +30,32 @@ namespace gladius::tests
         auto logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
         Document document(logger);
         document.setBackendRuntime(runtime.get());
+        auto const backend = document.getBackendKind();
+        ASSERT_TRUE(backend.has_value());
+        EXPECT_EQ(*backend, compute::ComputeBackendKind::WebGPU);
 
-                auto const filePath =
-                    std::filesystem::path("testdata") / "honeycombecase_connectable_007.3mf";
+        auto const filePath =
+          std::filesystem::path("testdata") / "honeycombecase_connectable_007.3mf";
         ASSERT_TRUE(std::filesystem::exists(filePath)) << filePath;
         ASSERT_NO_THROW(document.load(filePath));
 
-        constexpr unsigned THUMBNAIL_SIZE = 64u;
+        constexpr unsigned THUMBNAIL_WIDTH = 64u;
+        constexpr unsigned THUMBNAIL_HEIGHT = 48u;
         PlainImage image;
-        ASSERT_NO_THROW(image = document.createThumbnailPng(THUMBNAIL_SIZE));
+        ASSERT_NO_THROW(image = document.createThumbnailPng(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT));
         ASSERT_FALSE(image.data.empty());
-        EXPECT_EQ(image.width, THUMBNAIL_SIZE);
-        EXPECT_EQ(image.height, THUMBNAIL_SIZE);
+        EXPECT_EQ(image.width, THUMBNAIL_WIDTH);
+        EXPECT_EQ(image.height, THUMBNAIL_HEIGHT);
 
         std::vector<unsigned char> decoded;
         unsigned decodedWidth = 0u;
         unsigned decodedHeight = 0u;
         auto const error = lodepng::decode(decoded, decodedWidth, decodedHeight, image.data);
         ASSERT_EQ(error, 0u) << lodepng_error_text(error);
-        EXPECT_EQ(decodedWidth, THUMBNAIL_SIZE);
-        EXPECT_EQ(decodedHeight, THUMBNAIL_SIZE);
-        ASSERT_EQ(decoded.size(), static_cast<std::size_t>(THUMBNAIL_SIZE) * THUMBNAIL_SIZE * 4u);
+        EXPECT_EQ(decodedWidth, THUMBNAIL_WIDTH);
+        EXPECT_EQ(decodedHeight, THUMBNAIL_HEIGHT);
+        ASSERT_EQ(decoded.size(),
+                  static_cast<std::size_t>(THUMBNAIL_WIDTH) * THUMBNAIL_HEIGHT * 4u);
 
         bool hasPixelVariation = false;
         for (std::size_t offset = 4u; offset < decoded.size(); offset += 4u)

@@ -967,11 +967,40 @@ namespace gladius::mcp::tools
     std::vector<unsigned char> LibraryTool::renderThumbnailPng(std::shared_ptr<Document> document) const
     {
         auto logger = document->getSharedLogger();
+        auto const backend = document->getBackendKind();
+        if (backend.has_value() && *backend == compute::ComputeBackendKind::WebGPU)
+        {
+            try
+            {
+                auto image = document->createThumbnailPng();
+                if (logger)
+                {
+                    logger->addEvent(
+                      {fmt::format("renderThumbnailPng: {} WebGPU bytes", image.data.size()),
+                       events::Severity::Info});
+                }
+                return std::move(image.data);
+            }
+            catch (std::exception const & error)
+            {
+                if (logger)
+                {
+                    logger->addEvent(
+                      {fmt::format("renderThumbnailPng: WebGPU render failed: {}", error.what()),
+                       events::Severity::Warning});
+                }
+                return {};
+            }
+        }
+
         auto computeCore = document->getCore();
         if (!computeCore)
         {
-            logger->addEvent(
-              {"renderThumbnailPng: no compute core available", events::Severity::Warning});
+            if (logger)
+            {
+                logger->addEvent(
+                  {"renderThumbnailPng: no compute core available", events::Severity::Warning});
+            }
             return {};
         }
 
