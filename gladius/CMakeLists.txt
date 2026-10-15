@@ -116,8 +116,15 @@ message("CMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
 message("VCPKG_ROOT=${VCPKG_ROOT}")
 message("ENV{VCPKG_ROOT}=$ENV{VCPKG_ROOT}")
 
-if(DEFINED ENV{VCPKG_ROOT} AND NOT EXISTS ${CMAKE_TOOLCHAIN_FILE})
-  set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+# Resolve the vcpkg toolchain: an explicit VCPKG_ROOT wins, otherwise fall back
+# to the vcpkg submodule checked out at the repository root. A toolchain already
+# provided by a preset is left untouched.
+set(GLADIUS_VCPKG_ROOT "$ENV{VCPKG_ROOT}")
+if(NOT GLADIUS_VCPKG_ROOT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/scripts/buildsystems/vcpkg.cmake")
+  set(GLADIUS_VCPKG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg")
+endif()
+if(GLADIUS_VCPKG_ROOT AND NOT EXISTS "${CMAKE_TOOLCHAIN_FILE}")
+  set(CMAKE_TOOLCHAIN_FILE "${GLADIUS_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
 endif()
 
 message("CMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")

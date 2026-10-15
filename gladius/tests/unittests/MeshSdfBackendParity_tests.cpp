@@ -154,6 +154,7 @@ namespace gladius::tests
             }
             catch (std::exception const & exception)
             {
+                (void)exception; // availability failure is signalled via *skipped
                 *skipped = true;
                 return {};
             }

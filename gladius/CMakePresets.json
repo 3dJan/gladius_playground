@@ -15,7 +15,7 @@
             "cacheVariables": {
                 "ENABLE_UI_TESTING": "$env{GLADIUS_ENABLE_UI_TESTING}",
                 "CMAKE_TOOLCHAIN_FILE": {
-                    "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                    "value": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
                     "type": "FILEPATH"
                 },
                 "USE_CACHE": "true",
@@ -41,7 +41,7 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_CXX_FLAGS_DEBUG": "/Z7 /RTCus /D_ITERATOR_DEBUG_LEVEL=2 /D_DEBUG /D_DISABLE_VECTOR_ANNOTATION",
-                "ENABLE_TRACY": "false",
+                "ENABLE_TRACY": "true",
                 "ENABLE_ASAN": "false",
                 "ENABLE_OPENCL_TESTS": "ON"
             }
@@ -57,7 +57,7 @@
             },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "ENABLE_TRACY": "false",
+                "ENABLE_TRACY": "true",
                 "ENABLE_OPENCL_TESTS": "ON"
             }
         },
@@ -69,7 +69,7 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_CXX_FLAGS_DEBUG": "/Z7",
-                "ENABLE_TRACY": "false",
+                "ENABLE_TRACY": "true",
                 "ENABLE_ASAN": "false"
             }
         },
@@ -80,7 +80,7 @@
             "inherits": "x64-release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "ENABLE_TRACY": "false",
+                "ENABLE_TRACY": "true",
                 "ENABLE_ASAN": "true",
                 "VCPKG_TARGET_TRIPLET": "x64-windows-asan"
             }
@@ -93,7 +93,7 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_CXX_FLAGS_DEBUG": "/Z7",
-                "ENABLE_TRACY": "false",
+                "ENABLE_TRACY": "true",
                 "ENABLE_ASAN": "false",
                 "ENABLE_OPENCL_TESTS": "OFF"
             }
@@ -181,7 +181,7 @@
             "binaryDir": "${sourceDir}/out/build/${presetName}",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
                 "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
                 "VCPKG_TARGET_TRIPLET": "wasm32-emscripten",
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",

@@ -655,7 +655,7 @@ namespace gladius::tests
         Eigen::Vector3f const domainMin = modelMin - Eigen::Vector3f::Constant(padding);
         Eigen::Vector3f const domainSize = modelSize + Eigen::Vector3f::Constant(2.0F * padding);
         std::size_t const branchSampleDepth = std::min(options.maxDepth, std::size_t{6U});
-        std::size_t const subdivisions = 1U << branchSampleDepth;
+        std::size_t const subdivisions = std::size_t{1U} << branchSampleDepth;
         std::size_t const samplesPerAxis = subdivisions + 1U;
         std::vector<Eigen::Vector3f> branchSamples;
         branchSamples.reserve(samplesPerAxis * samplesPerAxis * samplesPerAxis);

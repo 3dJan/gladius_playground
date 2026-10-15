@@ -2808,7 +2808,9 @@ namespace gladius::ui
             m_core->getResourceContext()->getRenderingSettings().approximation = AM_FULL_MODEL;
         }
 
-        std::pair<int, int> const lowResPreviewResolution = m_core->getLowResPreviewResolution();
+        auto const previewResolution = m_core->getLowResPreviewResolution();
+        std::pair<int, int> const lowResPreviewResolution{static_cast<int>(previewResolution.first),
+                                                          static_cast<int>(previewResolution.second)};
 
         int newWidth = static_cast<int>(
           std::clamp(m_renderWindowSize_px.x * state.renderQualityWhileMoving, 1.f, 16000.f));
