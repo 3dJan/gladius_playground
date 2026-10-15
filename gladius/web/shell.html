@@ -96,6 +96,30 @@
       var canvas = document.getElementById('gladius-canvas');
       if (!canvas) return;
 
+      function resizeCanvasToDevicePixels() {
+        var bounds = canvas.getBoundingClientRect();
+        var pixelRatio = window.devicePixelRatio || 1;
+        var width = Math.max(1, Math.round(bounds.width * pixelRatio));
+        var height = Math.max(1, Math.round(bounds.height * pixelRatio));
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
+      }
+
+      window.gladiusResizeCanvasToDevicePixels = resizeCanvasToDevicePixels;
+      window.addEventListener('resize', resizeCanvasToDevicePixels);
+      if (typeof ResizeObserver !== 'undefined') {
+        window.gladiusCanvasResizeObserver = new ResizeObserver(resizeCanvasToDevicePixels);
+        window.gladiusCanvasResizeObserver.observe(canvas);
+      }
+      if (typeof MutationObserver !== 'undefined') {
+        window.gladiusCanvasBackingSizeObserver = new MutationObserver(resizeCanvasToDevicePixels);
+        window.gladiusCanvasBackingSizeObserver.observe(canvas, {
+          attributes: true,
+          attributeFilter: ['width', 'height']
+        });
+      }
+      resizeCanvasToDevicePixels();
+
       var browserDropSequence = 0;
       var browserImportDirectory = '/gladius/browser-imports';
       var browserImportNames = Object.create(null);

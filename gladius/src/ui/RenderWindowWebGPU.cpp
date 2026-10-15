@@ -420,10 +420,11 @@ namespace gladius::ui
                             m_runtime != nullptr ? m_runtime->getWebGPUContext() : nullptr);
         }
 
-        auto const width = static_cast<std::uint32_t>(std::clamp(
-          m_renderWindowSize_px.x * state.renderQuality, 1.0f, 16000.0f));
-        auto const height = static_cast<std::uint32_t>(std::clamp(
-          m_renderWindowSize_px.y * state.renderQuality, 1.0f, 16000.0f));
+                auto const framebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+                auto const width = static_cast<std::uint32_t>(std::clamp(
+                    m_renderWindowSize_px.x * framebufferScale.x * state.renderQuality, 1.0f, 16000.0f));
+                auto const height = static_cast<std::uint32_t>(std::clamp(
+                    m_renderWindowSize_px.y * framebufferScale.y * state.renderQuality, 1.0f, 16000.0f));
         if (width == 0u || height == 0u)
         {
             return false;
