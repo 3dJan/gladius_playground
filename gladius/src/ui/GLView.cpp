@@ -216,6 +216,16 @@ namespace gladius
             return;
         }
 
+#ifdef __EMSCRIPTEN__
+        // GLFW initializes the canvas at the requested window size. Restore the
+        // browser viewport's device-pixel backing size after window creation.
+        EM_ASM({
+            if (typeof window.gladiusResizeCanvasToDevicePixels === 'function') {
+                window.gladiusResizeCanvasToDevicePixels();
+            }
+        });
+#endif
+
         static auto staticDropCallback = [](GLFWwindow * window, int count, const char ** paths)
         {
             // Get the GLView instance from the window user pointer
@@ -676,15 +686,29 @@ namespace gladius
         ImGui_ImplGlfw_NewFrame();
 
 #ifdef __EMSCRIPTEN__
-        // The WebGPU canvas is configured in framebuffer pixels by GLFW. Do not
-        // apply the browser's device-pixel ratio a second time to ImGui's draw
-        // data, or its scissor rectangles exceed the configured surface.
-        ImGui::GetIO().DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
-        if (m_webgpuRendererInitialized)
-        {
-            ImGui::GetIO().DisplaySize = ImVec2(static_cast<float>(m_webgpuSurfaceWidth),
-                                                 static_cast<float>(m_webgpuSurfaceHeight));
-        }
+                {
+                        ImGuiIO & io = ImGui::GetIO();
+                        double canvasCssWidth = 0.0;
+                        double canvasCssHeight = 0.0;
+                        int canvasWidth = 0;
+                        int canvasHeight = 0;
+                        auto const cssSizeResult =
+                            emscripten_get_element_css_size("#gladius-canvas", &canvasCssWidth, &canvasCssHeight);
+                        auto const canvasSizeResult =
+                            emscripten_get_canvas_element_size("#gladius-canvas", &canvasWidth, &canvasHeight);
+                        if (cssSizeResult == EMSCRIPTEN_RESULT_SUCCESS &&
+                                canvasSizeResult == EMSCRIPTEN_RESULT_SUCCESS && canvasCssWidth > 0.0 &&
+                                canvasCssHeight > 0.0 && canvasWidth > 0 && canvasHeight > 0)
+                        {
+                                // GLFW mouse events are in CSS pixels, so keep ImGui layout and
+                                // hit-testing in CSS coordinates until draw data is finalized.
+                                io.DisplaySize = ImVec2(static_cast<float>(canvasCssWidth),
+                                                                                static_cast<float>(canvasCssHeight));
+                                io.DisplayFramebufferScale = ImVec2(
+                                    static_cast<float>(canvasWidth) / io.DisplaySize.x,
+                                    static_cast<float>(canvasHeight) / io.DisplaySize.y);
+                        }
+                }
 #endif
 
 // ImGuiTestEngineHook_PreNewFrame is handled natively when IMGUI_ENABLE_TEST_ENGINE is defined.
@@ -774,7 +798,42 @@ namespace gladius
 #endif
         }
 #ifdef __EMSCRIPTEN__
-    ImGui::GetDrawData()->FramebufferScale = ImVec2(1.0f, 1.0f);
+        // The bundled WebGPU renderer uses FramebufferScale for its viewport and
+        // scissors but not its vertex projection. Scale finalized draw data so
+        // it fills the physical canvas while ImGui layout/input remain in CSS px.
+        auto * const drawData = ImGui::GetDrawData();
+        if (drawData != nullptr)
+        {
+            auto const framebufferScale = drawData->FramebufferScale;
+            if (framebufferScale.x != 1.0f || framebufferScale.y != 1.0f)
+            {
+                drawData->DisplayPos.x *= framebufferScale.x;
+                drawData->DisplayPos.y *= framebufferScale.y;
+                drawData->DisplaySize.x *= framebufferScale.x;
+                drawData->DisplaySize.y *= framebufferScale.y;
+
+                for (int listIndex = 0; listIndex < drawData->CmdLists.Size; ++listIndex)
+                {
+                    ImDrawList * const drawList = drawData->CmdLists[listIndex];
+                    for (int vertexIndex = 0; vertexIndex < drawList->VtxBuffer.Size; ++vertexIndex)
+                    {
+                        ImVec2 & position = drawList->VtxBuffer[vertexIndex].pos;
+                        position.x *= framebufferScale.x;
+                        position.y *= framebufferScale.y;
+                    }
+                    for (int commandIndex = 0; commandIndex < drawList->CmdBuffer.Size; ++commandIndex)
+                    {
+                        ImVec4 & clipRect = drawList->CmdBuffer[commandIndex].ClipRect;
+                        clipRect.x *= framebufferScale.x;
+                        clipRect.y *= framebufferScale.y;
+                        clipRect.z *= framebufferScale.x;
+                        clipRect.w *= framebufferScale.y;
+                    }
+                }
+
+                drawData->FramebufferScale = ImVec2(1.0f, 1.0f);
+            }
+        }
 #endif
         ImGuiIO & io = ImGui::GetIO();
     #if defined(GLADIUS_UI_BACKEND_OPENGL)
@@ -818,12 +877,8 @@ namespace gladius
     void GLView::determineUiScale()
     {
     #ifdef __EMSCRIPTEN__
-        // Browser CSS coordinates are already logical pixels. Emscripten's
-        // GLFW implementation reports window.devicePixelRatio from
-        // glfwGetWindowContentScale(), even though this target intentionally
-        // keeps the canvas in CSS-sized coordinates and handles framebuffer
-        // sizing separately for WebGPU. Do not use browser DPR to enlarge the
-        // ImGui style and fonts a second time.
+        // ImGui and GLFW both use CSS-pixel coordinates in the browser. The
+        // renderer applies the canvas backing-store scale separately.
         m_baseScale = 1.0f;
         recomputeTotalScale();
         return;

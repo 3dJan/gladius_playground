@@ -267,10 +267,7 @@ namespace gladius::ui
             newModel();
         }
     #ifdef __EMSCRIPTEN__
-        // The browser preview renderer is not enabled yet, so expose the graph
-        // editor immediately instead of leaving the canvas with only an empty
-        // preview area until the user discovers the Graph toolbar button.
-        m_modelEditor.setVisibility(true);
+        m_modelEditor.setVisibility(false); // nicer for using the webversion as viewer initally.
     #endif
         loadRenderSettings();
     }
