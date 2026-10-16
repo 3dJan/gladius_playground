@@ -21,6 +21,7 @@ namespace gladius
             return 3;
         case io::PixelFormat::GRAYSCALE_16BIT:
         case io::PixelFormat::GRAYSCALE_8BIT:
+        case io::PixelFormat::GRAYSCALE_1BIT:
             return 1;
         case io::PixelFormat::GRAYSCALE_ALPHA_16BIT:
         case io::PixelFormat::GRAYSCALE_ALPHA_8BIT:
@@ -37,18 +38,19 @@ namespace gladius
             return; // throw std::runtime_error("ImageStackResource::loadImpl: stack is empty");
         }
 
-        m_payloadData.meta.clear();
-
-        PrimitiveMeta metaData{};
-        metaData.primitiveType = SDF_IMAGESTACK;
-        metaData.start = static_cast<int>(m_payloadData.data.size());
-
         auto const & firstImage = m_stack.front();
         m_width = firstImage.getWidth();
         m_height = firstImage.getHeight();
         m_numSheets = m_stack.size();
         m_format = firstImage.getFormat();
         m_numChannels = numChannelsFromPixelFormat(m_format);
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        m_payloadData.meta.clear();
+
+        PrimitiveMeta metaData{};
+        metaData.primitiveType = SDF_IMAGESTACK;
+        metaData.start = static_cast<int>(m_payloadData.data.size());
 
         int sheetIndex = 0;
         for (auto const & image : m_stack)
@@ -145,5 +147,6 @@ namespace gladius
         }
         metaData.end = static_cast<int>(m_payloadData.data.size());
         m_payloadData.meta.push_back(metaData);
+#endif
     }
 }

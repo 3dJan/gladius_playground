@@ -209,7 +209,7 @@ namespace gladius::webgpu
                     .imagePayloadTable = scene.imageResources.size() > 0u
                                            ? ([&]()
                                               {
-                                                  std::vector<std::vector<float>> table;
+                                                  std::vector<std::vector<std::uint32_t>> table;
                                                   table.reserve(scene.imageResources.size());
                                                   for (auto const & image : scene.imageResources)
                                                   {
@@ -217,7 +217,7 @@ namespace gladius::webgpu
                                                   }
                                                   return table;
                                               })()
-                                           : std::vector<std::vector<float>>{}};
+                                               : std::vector<std::vector<std::uint32_t>>{}};
         }
     }
 

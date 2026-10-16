@@ -27,6 +27,19 @@ namespace gladius::compute
     };
 
     /**
+     * @brief Word-aligned image-stack payload with an encoding header.
+     */
+    struct ImageResourcePayload
+    {
+        std::vector<std::uint32_t> data;
+
+        [[nodiscard]] bool isValid() const noexcept
+        {
+            return !data.empty();
+        }
+    };
+
+    /**
      * @brief Immutable CPU payload for a supported analytic render scene.
      *
     * The evaluator is WGSL because it is produced by the current analytic graph lowering path.
@@ -43,8 +56,8 @@ namespace gladius::compute
         std::vector<MeshResourcePayload> meshResources;
         /// Beam lattice payloads indexed by beam resource id (sparse; empty entries invalid).
         std::vector<MeshResourcePayload> beamLatticeResources;
-        /// Image stack payloads indexed by image resource id (sparse; empty entries invalid).
-        std::vector<MeshResourcePayload> imageResources;
+        /// Word-aligned image stack payloads indexed by image resource id (sparse; empty entries invalid).
+        std::vector<ImageResourcePayload> imageResources;
 
         [[nodiscard]] bool isValid() const noexcept
         {

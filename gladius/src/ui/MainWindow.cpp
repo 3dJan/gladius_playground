@@ -220,12 +220,20 @@ namespace gladius::ui
               if (path.empty())
               {
                   open();
+#ifdef __EMSCRIPTEN__
+                  if (m_showSaveBeforeFileOperation)
+                  {
+                      m_welcomeScreen.hide();
+                  }
+#else
+                  m_welcomeScreen.hide();
+#endif
               }
               else
               {
                   open(path);
+                  m_welcomeScreen.hide();
               }
-              m_welcomeScreen.hide();
           });
 
         // Set the logger for the welcome screen
@@ -241,15 +249,12 @@ namespace gladius::ui
         // Set recent files
     #ifndef __EMSCRIPTEN__
         m_welcomeScreen.setRecentFiles(getRecentFiles(100));
-    #endif
-
-        // Set examples directory
-    #ifndef __EMSCRIPTEN__
         m_welcomeScreen.setExamplesDirectory(getAppDir() / "examples");
     #else
-        // Browser builds have no native recent-file or welcome-screen workflow.
-        // Start directly in the editor with the embedded/default document.
-        m_welcomeScreen.hide();
+        (void) syncEmbeddedExamples(getAppDir() / "examples");
+        m_welcomeScreen.setExamplesDirectory(getAppDir() / "examples");
+        m_welcomeScreen.show();
+        m_createInitialModelOnWelcomeDismissal = true;
     #endif
 
         // Wire up export state to dialogs and editors that need it
@@ -622,6 +627,8 @@ namespace gladius::ui
             m_welcomeScreen.setLogger(m_logger);
 #ifdef __EMSCRIPTEN__
             m_welcomeScreen.hide();
+            (void) syncEmbeddedExamples(getAppDir() / "examples");
+            m_welcomeScreen.setExamplesDirectory(getAppDir() / "examples");
 #endif
         }
         {
@@ -1220,13 +1227,24 @@ namespace gladius::ui
                 }
             }
             else if (m_asyncLoadState == AsyncLoadState::Idle &&
-                     !m_asyncFileDialog.isActive())
+                     !m_asyncFileDialog.isActive()
+#ifdef __EMSCRIPTEN__
+                     && !m_showSaveBeforeFileOperation
+#endif
+            )
             {
                 // Welcome screen closed without selecting a file and no other
                 // operation was already started (e.g. "New Project" or "Open
                 // Existing").  Load the default template so the user has a
                 // blank model to work with.
+#ifndef __EMSCRIPTEN__
                 newModel();
+#else
+                if (m_createInitialModelOnWelcomeDismissal)
+                {
+                    newModel();
+                }
+#endif
             }
         }
         m_wasWelcomeScreenVisible = welcomeScreenVisible;
@@ -1914,6 +1932,9 @@ namespace gladius::ui
 
     void MainWindow::newModel()
     {
+#ifdef __EMSCRIPTEN__
+        m_createInitialModelOnWelcomeDismissal = false;
+#endif
         if (!m_computeAvailable || !m_doc)
         {
             if (m_logger)
@@ -1941,15 +1962,10 @@ namespace gladius::ui
 
         // Defer editor reset until the async load inside newFromTemplate() completes.
         // (Same deferred pattern used by loadFileDeferred().)
-#ifdef __EMSCRIPTEN__
-        // Browser builds do not enable Emscripten pthreads, so std::async cannot
-        // be used for the initial template load.  Start with a valid empty model
-        // and leave file loading to an explicit browser action.
-        m_doc->newModel();
-#else
-        m_asyncLoadState = AsyncLoadState::LoadingWithReset;
-        m_doc->newFromTemplate();
-#endif
+        m_modelFileName.clear();
+        m_currentAssemblyFileName.reset();
+    m_asyncLoadState = AsyncLoadState::LoadingWithReset;
+    m_doc->newFromTemplate();
     }
 
     void MainWindow::renderWindow()
@@ -2444,15 +2460,40 @@ namespace gladius::ui
         }
         if (m_fileChanged)
         {
+#ifdef __EMSCRIPTEN__
+            m_createInitialModelOnWelcomeDismissal = false;
+#endif
             m_pendingFileOperation = PendingFileOperation::OpenFile;
             m_pendingOpenFilename.reset();
             m_showSaveBeforeFileOperation = true;
             return;
         }
 
+#ifdef __EMSCRIPTEN__
+        requestBrowserFileOpen();
+#else
         m_asyncDialogOp = AsyncDialogOperation::Open;
         m_asyncFileDialog.openFile({{"*.3mf"}});
+#endif
     }
+
+#ifdef __EMSCRIPTEN__
+    void MainWindow::requestBrowserFileOpen()
+    {
+        EM_ASM(
+          {
+              if (typeof window.gladiusOpenBrowserFile === 'function')
+              {
+                  window.gladiusOpenBrowserFile();
+              }
+              else if (typeof window.gladiusSetBrowserFileStatus === 'function')
+              {
+                  window.gladiusSetBrowserFileStatus('The browser file picker is unavailable.',
+                                                      true);
+              }
+          });
+    }
+#endif
 
     void MainWindow::merge()
     {
@@ -2489,6 +2530,9 @@ namespace gladius::ui
 
     void MainWindow::open(const std::filesystem::path & filename)
     {
+#ifdef __EMSCRIPTEN__
+        m_createInitialModelOnWelcomeDismissal = false;
+#endif
         if (!m_computeAvailable || !m_doc)
         {
             if (m_logger)
@@ -2536,6 +2580,7 @@ namespace gladius::ui
                                             filename->filename().string()),
                                 events::Severity::Info});
         }
+        m_welcomeScreen.hide();
         open(filename.value());
     }
 #endif
@@ -2553,6 +2598,9 @@ namespace gladius::ui
 
     void MainWindow::loadFileDeferred(const std::filesystem::path & filename)
     {
+#ifdef __EMSCRIPTEN__
+        m_createInitialModelOnWelcomeDismissal = false;
+#endif
         m_currentAssemblyFileName = filename;
         m_welcomeScreen.hide();
 
@@ -3846,10 +3894,15 @@ namespace gladius::ui
                     }
                     else if (!dialogActive)
                     {
+#ifdef __EMSCRIPTEN__
+                        requestBrowserFileOpen();
+                        return true; // The browser picker owns the next step
+#else
                         // Start async file dialog
                         m_asyncDialogOp = AsyncDialogOperation::OpenAfterSavePrompt;
                         m_asyncFileDialog.openFile({{"*.3mf"}});
                         return false; // Wait for dialog
+#endif
                     }
                     return false; // Dialog in progress
                 }
@@ -4873,6 +4926,7 @@ namespace gladius::ui
     void MainWindow::showWelcomeScreen()
     {
         m_overlayOpacity = 1.0f;
+        m_overlayFadeoutActive = false;
         m_welcomeScreen.show();
     }
 

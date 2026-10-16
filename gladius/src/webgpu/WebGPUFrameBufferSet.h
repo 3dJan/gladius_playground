@@ -39,7 +39,7 @@ namespace gladius::webgpu
         /// Upload image stack payloads (concatenated, one entry per resource slot).
         void setImagePayloads(wgpu::Device const & device,
                               wgpu::Queue const & queue,
-                              std::vector<std::vector<float>> const & imagePayloadTable);
+                              std::vector<std::vector<std::uint32_t>> const & imagePayloadTable);
 
         [[nodiscard]] bool isValid() const noexcept;
         [[nodiscard]] std::size_t getOutputSizeBytes() const noexcept;

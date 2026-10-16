@@ -29,6 +29,12 @@ namespace gladius
     /// @return The number of files that were copied.
     [[nodiscard]] std::size_t syncShippedLibrary();
 
+    /// @brief Copies CMRC-bundled example 3MFs into a directory for path-based loading.
+    /// Existing target files are never overwritten; nested paths are preserved.
+    /// @param target Destination examples directory.
+    /// @return The number of files that were copied.
+    [[nodiscard]] std::size_t syncEmbeddedExamples(std::filesystem::path const & target);
+
     /// @brief Returns the bin directory for soft-deleted library entries: <userLib>/.bin
     std::filesystem::path getBinDir();
 

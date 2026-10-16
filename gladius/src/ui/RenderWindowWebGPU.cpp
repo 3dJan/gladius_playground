@@ -95,8 +95,7 @@ namespace gladius::ui
             }
             std::cerr << '\n';
 
-            auto const logPayloadTable = [](char const * const name,
-                                            std::vector<compute::MeshResourcePayload> const & table)
+            auto const logPayloadTable = [](char const * const name, auto const & table)
             {
                 std::cerr << "[WebGPU] " << name << " slots=" << table.size() << " payloads=";
                 for (std::size_t index = 0u; index < table.size(); ++index)

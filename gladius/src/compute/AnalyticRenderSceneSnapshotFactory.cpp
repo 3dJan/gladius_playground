@@ -280,7 +280,7 @@ namespace gladius::compute
                 throw std::runtime_error("Referenced image stack resource has an unexpected type");
             }
 
-            MeshResourcePayload payload;
+            ImageResourcePayload payload;
             payload.data = io::serializeImageStackPayload(*imageStack->getImageStack());
             auto const index = static_cast<std::size_t>(resourceId);
             if (index >= snapshot.imageResources.size())

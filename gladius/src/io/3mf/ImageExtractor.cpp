@@ -183,26 +183,54 @@ namespace gladius::io
                 continue;
             }
 
-            std::vector<unsigned char> image;
-            unsigned int width, height;
-            // Always decode to RGBA for consistent handling of all PNG formats
-            // (including indexed/palette which lodepng converts automatically)
-            unsigned const int error = lodepng::decode(image, width, height, fileContents);
-            if (error)
-            {
-                throw std::runtime_error(
-                  fmt::format("Error decoding PNG {}: {}", filename.string(), error));
-            }
-
             auto const pngHeaderInfo = lodepng::getPNGHeaderInfo(fileContents);
             if (images.empty())
             {
                 m_pngInfo = pngHeaderInfo;
             }
 
+            auto decodedColorType = LCT_RGBA;
+            auto pixelFormat = PixelFormat::RGBA_8BIT;
+            switch (pngHeaderInfo.color.colortype)
+            {
+            case LCT_GREY:
+                if (!pngHeaderInfo.color.key_defined)
+                {
+                    decodedColorType = LCT_GREY;
+                    pixelFormat = PixelFormat::GRAYSCALE_8BIT;
+                }
+                break;
+            case LCT_GREY_ALPHA:
+                decodedColorType = LCT_GREY_ALPHA;
+                pixelFormat = PixelFormat::GRAYSCALE_ALPHA_8BIT;
+                break;
+            case LCT_RGB:
+                if (!pngHeaderInfo.color.key_defined)
+                {
+                    decodedColorType = LCT_RGB;
+                    pixelFormat = PixelFormat::RGB_8BIT;
+                }
+                break;
+            case LCT_RGBA:
+                break;
+            default:
+                // Indexed PNGs are expanded to RGBA to retain palette transparency.
+                break;
+            }
+
+            std::vector<unsigned char> image;
+            unsigned int width, height;
+            unsigned const int error =
+              lodepng::decode(image, width, height, fileContents, decodedColorType, 8u);
+            if (error)
+            {
+                throw std::runtime_error(
+                  fmt::format("Error decoding PNG {}: {}", filename.string(), error));
+            }
+
             Image img{std::move(image), width, height};
             img.swapXYData();
-            img.setFormat(PixelFormat::RGBA_8BIT);
+            img.setFormat(pixelFormat);
             img.setBitDepth(8);
             images.emplace_back(std::move(img));
         }

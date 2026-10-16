@@ -244,10 +244,10 @@ namespace gladius::webgpu
     void WebGPUFrameBufferSet::setImagePayloads(
       wgpu::Device const & device,
       wgpu::Queue const & queue,
-      std::vector<std::vector<float>> const & imagePayloadTable)
+            std::vector<std::vector<std::uint32_t>> const & imagePayloadTable)
     {
         std::vector<std::uint32_t> offsetTable(imagePayloadTable.size() * 2u, 0u);
-        std::size_t totalFloats = 0u;
+                std::size_t totalWords = 0u;
         for (std::size_t slot = 0u; slot < imagePayloadTable.size(); ++slot)
         {
             auto const & payload = imagePayloadTable[slot];
@@ -255,24 +255,24 @@ namespace gladius::webgpu
             {
                 continue;
             }
-            if (totalFloats > std::numeric_limits<std::uint32_t>::max() ||
-                payload.size() > std::numeric_limits<std::uint32_t>::max() - totalFloats)
+            if (totalWords > std::numeric_limits<std::uint32_t>::max() ||
+                payload.size() > std::numeric_limits<std::uint32_t>::max() - totalWords)
             {
                 throw std::length_error("WebGPU image payload table exceeds 32-bit addressing");
             }
-            offsetTable[slot * 2u] = static_cast<std::uint32_t>(totalFloats);
+            offsetTable[slot * 2u] = static_cast<std::uint32_t>(totalWords);
             offsetTable[slot * 2u + 1u] = static_cast<std::uint32_t>(payload.size());
-            totalFloats += payload.size();
+            totalWords += payload.size();
         }
 
-        if (totalFloats == 0u)
+        if (totalWords == 0u)
         {
             m_imagePayloadBuffer = nullptr;
             m_imageOffsetTableBuffer = nullptr;
             return;
         }
 
-        auto const totalBytes = totalFloats * sizeof(float);
+        auto const totalBytes = totalWords * sizeof(std::uint32_t);
         if (!m_imagePayloadBuffer || m_imagePayloadBufferSize < totalBytes)
         {
             wgpu::BufferDescriptor descriptor;
@@ -304,7 +304,7 @@ namespace gladius::webgpu
             {
                 continue;
             }
-            auto const bytes = payload.size() * sizeof(float);
+            auto const bytes = payload.size() * sizeof(std::uint32_t);
             queue.WriteBuffer(m_imagePayloadBuffer, imageOffset, payload.data(), bytes);
             imageOffset += bytes;
         }

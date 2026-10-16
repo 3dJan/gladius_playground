@@ -5,6 +5,8 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string>
+#include <system_error>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <cmrc/cmrc.hpp>
@@ -27,46 +29,50 @@ namespace gladius
     namespace
     {
         constexpr char const * EMBEDDED_LIBRARY_ROOT = "library";
+        constexpr char const * EMBEDDED_EXAMPLES_ROOT = "examples";
 
-#ifdef __EMSCRIPTEN__
-        std::size_t syncEmbeddedLibrary(std::filesystem::path const & target)
+        std::size_t syncEmbeddedThreeMfFiles(std::string const & resourceRoot,
+                                             std::filesystem::path const & target)
         {
             auto const resources = cmrc::gladius_resources::get_filesystem();
-            if (!resources.is_directory(EMBEDDED_LIBRARY_ROOT))
+            if (!resources.is_directory(resourceRoot))
+            {
+                return 0;
+            }
+
+            std::error_code error;
+            std::filesystem::create_directories(target, error);
+            if (error)
             {
                 return 0;
             }
 
             std::size_t copiedCount = 0;
-            for (auto const category : resources.iterate_directory(EMBEDDED_LIBRARY_ROOT))
+            auto copyDirectory = [&](auto && self,
+                                     std::string const & resourceDirectory,
+                                     std::filesystem::path const & targetDirectory) -> void
             {
-                if (!category.is_directory())
+                for (auto const entry : resources.iterate_directory(resourceDirectory))
                 {
-                    continue;
-                }
+                    auto const filename = std::string(entry.filename());
+                    auto const resourcePath = resourceDirectory + "/" + filename;
+                    auto const targetPath = targetDirectory / filename;
 
-                auto const categoryName = category.filename();
-                auto const resourceCategory =
-                  std::string(EMBEDDED_LIBRARY_ROOT) + "/" + categoryName;
-                auto const targetCategory = target / categoryName;
+                    if (entry.is_directory())
+                    {
+                        self(self, resourcePath, targetPath);
+                        continue;
+                    }
 
-                for (auto const entry : resources.iterate_directory(resourceCategory))
-                {
-                    if (!entry.is_file() || entry.filename().ends_with(".3mf") == false)
+                    if (!entry.is_file() || !filename.ends_with(".3mf") ||
+                        std::filesystem::exists(targetPath))
                     {
                         continue;
                     }
 
-                    auto const resourcePath = resourceCategory + "/" + entry.filename();
-                    auto const targetPath = targetCategory / entry.filename();
-                    if (std::filesystem::exists(targetPath))
-                    {
-                        continue;
-                    }
-
-                    std::error_code ec;
-                    std::filesystem::create_directories(targetCategory, ec);
-                    if (ec)
+                    std::error_code createError;
+                    std::filesystem::create_directories(targetDirectory, createError);
+                    if (createError)
                     {
                         continue;
                     }
@@ -86,12 +92,21 @@ namespace gladius
                     }
                     else
                     {
-                        std::filesystem::remove(targetPath, ec);
+                        std::error_code removeError;
+                        std::filesystem::remove(targetPath, removeError);
                     }
                 }
-            }
+            };
+
+            copyDirectory(copyDirectory, resourceRoot, target);
 
             return copiedCount;
+        }
+
+#ifdef __EMSCRIPTEN__
+        std::size_t syncEmbeddedLibrary(std::filesystem::path const & target)
+        {
+            return syncEmbeddedThreeMfFiles(EMBEDDED_LIBRARY_ROOT, target);
         }
 #endif
     }
@@ -195,6 +210,11 @@ namespace gladius
 #else
         return syncLibraryDirectory(getShippedLibraryDir(), getUserLibraryDir());
 #endif
+    }
+
+    std::size_t syncEmbeddedExamples(std::filesystem::path const & target)
+    {
+        return syncEmbeddedThreeMfFiles(EMBEDDED_EXAMPLES_ROOT, target);
     }
 
     std::filesystem::path getBinDir()

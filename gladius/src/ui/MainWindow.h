@@ -246,6 +246,9 @@ namespace gladius::ui
         void updateContours();
         void close();
         void open();
+    #ifdef __EMSCRIPTEN__
+        void requestBrowserFileOpen();
+    #endif
         void merge();
         void resetEditorState();
         bool save();
@@ -392,6 +395,9 @@ namespace gladius::ui
         ConfigManager * m_configManager = nullptr; // Pointer to the Application's ConfigManager
 
         bool m_wasWelcomeScreenVisible = false;
+    #ifdef __EMSCRIPTEN__
+        bool m_createInitialModelOnWelcomeDismissal{false};
+    #endif
 
         // Shortcut system
         std::shared_ptr<ShortcutManager> m_shortcutManager;

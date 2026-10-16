@@ -3,6 +3,7 @@
 #include "EventLogger.h"
 #include "IconsFontAwesome5.h"
 #include "imgui.h"
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -10,6 +11,11 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+
+#ifdef __EMSCRIPTEN__
+#include <cmrc/cmrc.hpp>
+CMRC_DECLARE(gladius_resources);
+#endif
 
 namespace gladius::ui
 {
@@ -120,11 +126,13 @@ namespace gladius::ui
             m_recentFiles = recentFiles;
             m_needsRefresh = true;
 
+#ifndef __EMSCRIPTEN__
             // Update thumbnails if the thumbnail extractor is available
             if (m_thumbnailExtractor)
             {
                 updateThumbnailInfos();
             }
+#endif
         }
     }
 
@@ -239,6 +247,13 @@ namespace gladius::ui
             {
                 if (entry.is_regular_file() && entry.path().extension() == ".3mf")
                 {
+#ifdef __EMSCRIPTEN__
+                    if (entry.path().lexically_relative(m_examplesDirectory) ==
+                        std::filesystem::path{"template.3mf"})
+                    {
+                        continue;
+                    }
+#endif
                     // Get file modification time
                     auto fileTime = std::filesystem::last_write_time(entry);
                     auto timeT = std::chrono::system_clock::to_time_t(
@@ -347,13 +362,6 @@ namespace gladius::ui
     {
         m_logger = std::move(logger);
 
-#ifdef __EMSCRIPTEN__
-        // The browser build has no working ImGui WGPU backend or thread
-        // pool, and the welcome screen is hidden anyway.  Skip creating
-        // the async thumbnail loader and the thumbnail extractor to
-        // avoid std::async spinning on the main thread.
-        (void)m_logger;
-#else
         // Initialize the thumbnail extractor if it doesn't exist
         if (!m_thumbnailExtractor && m_logger)
         {
@@ -362,15 +370,27 @@ namespace gladius::ui
             m_thumbnailExtractor->setWebGPUContext(m_webgpuContext);
 #endif
 
+#ifdef __EMSCRIPTEN__
+                        // WebAssembly processes one small, pre-extracted PNG per frame instead of parsing
+                        // an entire 3MF archive on the browser thread.
+                        m_asyncLoader = std::make_unique<AsyncThumbnailLoader>(
+                            m_logger,
+                            1,
+                            [this](std::filesystem::path const & filePath)
+                            { return loadEmbeddedExampleThumbnail(filePath); });
+#else
             // Initialize the async thumbnail loader
             m_asyncLoader = std::make_unique<AsyncThumbnailLoader>(m_logger, 1);
+#endif
 
             // Force a refresh of thumbnails if we have any recent files
+#ifndef __EMSCRIPTEN__
             if (!m_recentFiles.empty())
             {
                 m_needsRefresh = true;
                 updateThumbnailInfos();
             }
+#endif
 
             // Force a refresh of example thumbnails if we have any examples
             if (!m_exampleFiles.empty())
@@ -379,8 +399,51 @@ namespace gladius::ui
                 updateExampleThumbnailInfos();
             }
         }
-#endif
     }
+
+#ifdef __EMSCRIPTEN__
+    ThumbnailLoadResult WelcomeScreen::loadEmbeddedExampleThumbnail(
+      std::filesystem::path const & filePath) const
+    {
+        ThumbnailLoadResult result;
+        auto const relativePath = filePath.lexically_relative(m_examplesDirectory);
+        if (relativePath.empty() || relativePath.is_absolute() ||
+            *relativePath.begin() == std::filesystem::path{".."})
+        {
+            result.errorMessage = "File is not a bundled example";
+            return result;
+        }
+
+        auto const resourcePath = fmt::format("examples/{}.png", relativePath.generic_string());
+        auto const resources = cmrc::gladius_resources::get_filesystem();
+        if (!resources.is_file(resourcePath))
+        {
+            result.errorMessage = "No embedded thumbnail for example";
+            return result;
+        }
+
+        auto const thumbnail = resources.open(resourcePath);
+        std::vector<unsigned char> pngData(thumbnail.begin(), thumbnail.end());
+        result.decodedPixels = ThreemfThumbnailExtractor::decodePngToPixels(
+          pngData, result.width, result.height);
+        result.success = !result.decodedPixels.empty();
+        if (!result.success)
+        {
+            result.errorMessage = "Failed to decode embedded example thumbnail";
+        }
+
+        try
+        {
+            result.fileSize = std::filesystem::file_size(filePath);
+        }
+        catch (std::filesystem::filesystem_error const &)
+        {
+            // Thumbnail display does not depend on optional tooltip metadata.
+        }
+
+        return result;
+    }
+#endif
 
 #if defined(GLADIUS_UI_BACKEND_WEBGPU)
     void WelcomeScreen::setWebGPUContext(
@@ -429,13 +492,6 @@ namespace gladius::ui
         {
             return false;
         }
-#ifdef __EMSCRIPTEN__
-        // The welcome screen uses WebGPU textures for thumbnails, and the
-        // browser build does not yet have a working ImGui WGPU backend, so
-        // skip the welcome screen entirely.  The application can still be
-        // used once a file is opened programmatically.
-        return false;
-#endif
 
         // Update async thumbnail loading - process completed background loads
         if (m_asyncLoader)
@@ -525,11 +581,15 @@ namespace gladius::ui
             ImGui::Spacing();
 
             // Main content split: left side for buttons, right side for tabbed content
-            const float buttonWidth = 200.0f;
-            const float listWidth = windowWidth - buttonWidth - 40.0f; // 20px padding on each side
+            const bool compactLayout = windowWidth < 640.0f;
+            const float contentWidth = std::max(1.0f, windowWidth - 40.0f);
+            const float buttonWidth = compactLayout ? contentWidth : 200.0f;
+            const float listWidth = compactLayout ? contentWidth : windowWidth - buttonWidth - 40.0f;
 
             // Left side - actions
-            ImGui::BeginChild("ActionsPane", ImVec2(buttonWidth, 0), ImGuiChildFlags_None);
+            ImGui::BeginChild("ActionsPane",
+                              ImVec2(buttonWidth, compactLayout ? 125.0f : 0.0f),
+                              ImGuiChildFlags_None);
 
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 10));
 
@@ -550,14 +610,19 @@ namespace gladius::ui
                 {
                     m_openFileCallback(
                       std::filesystem::path()); // Empty path signals to show file dialog
-                                        hide();
+#ifndef __EMSCRIPTEN__
+                    hide();
+#endif
                 }
             }
 
             ImGui::PopStyleVar();
             ImGui::EndChild();
 
-            ImGui::SameLine();
+            if (!compactLayout)
+            {
+                ImGui::SameLine();
+            }
 
             // Right side - tabbed content
             ImGui::BeginChild("TabbedContentPane", ImVec2(listWidth, 0), true);
@@ -569,6 +634,12 @@ namespace gladius::ui
                 ImGuiTabItemFlags initialSelectFlag =
                   m_initialTabSet ? ImGuiTabItemFlags_None : ImGuiTabItemFlags_SetSelected;
 
+#ifdef __EMSCRIPTEN__
+                if (!m_initialTabSet)
+                {
+                    m_activeTab = WelcomeTab::Examples;
+                }
+#else
                 // Recent Files tab - only show if there are recent files
                 if (!m_recentFiles.empty())
                 {
@@ -582,6 +653,7 @@ namespace gladius::ui
                         ImGui::EndTabItem();
                     }
                 }
+#endif
 
                 // Examples tab
                 {
@@ -596,6 +668,7 @@ namespace gladius::ui
                     }
                 }
 
+#ifndef __EMSCRIPTEN__
                 // Restore Backup tab
                 {
                     ImGuiTabItemFlags flags = (m_activeTab == WelcomeTab::RestoreBackup && m_preferBackupTab)
@@ -608,6 +681,7 @@ namespace gladius::ui
                         ImGui::EndTabItem();
                     }
                 }
+#endif
 
                 // After first frame, mark initial tab as set
                 m_initialTabSet = true;

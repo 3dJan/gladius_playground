@@ -286,5 +286,11 @@ namespace gladius::ui
         /// Helper method to handle file click and set pending file open
         /// @return true if the click was processed, false if already processed this frame
         bool trySetPendingFileOpen(std::filesystem::path const & path);
+
+#ifdef __EMSCRIPTEN__
+        /// Loads the pre-extracted CMRC thumbnail for a bundled example.
+        ThumbnailLoadResult loadEmbeddedExampleThumbnail(
+          std::filesystem::path const & filePath) const;
+#endif
     };
 }

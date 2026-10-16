@@ -100,13 +100,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     target_link_options(${BINARY} PRIVATE
         "--shell-file=${CMAKE_SOURCE_DIR}/web/shell.html"
         "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/misc@misc"
-        "--embed-file=${CMAKE_CURRENT_BINARY_DIR}/examples@/gladius/examples"
         "-sALLOW_MEMORY_GROWTH=1"
         "-sASSERTIONS=2"
         "-sENVIRONMENT=web"
         "-sFORCE_FILESYSTEM=1"
         "-sNO_EXIT_RUNTIME=1"
         "-sSINGLE_FILE=1"
+        # The Emscripten default is only 64 KiB, which is insufficient for loading some valid 3MFs.
+        "-sSTACK_SIZE=1048576"
         # Allow C++ exceptions (e.g. thrown by the WebGPU context
         # initialiser) to be caught on the browser target.  Without
         # this, any throw causes the runtime to abort with
