@@ -304,20 +304,46 @@ namespace gladius::mcp
         return example;
     }
 
-    /// Enrich an error response with `success: false` and `usage_example` if missing.
+    /// Return whether a tool payload represents a failed operation.
+    static bool isToolError(nlohmann::json const & result)
+    {
+        if (!result.is_object())
+        {
+            return false;
+        }
+
+        if (result.contains("isError") && result["isError"].is_boolean()
+            && result["isError"].get<bool>())
+        {
+            return true;
+        }
+        if (result.contains("success") && result["success"].is_boolean()
+            && !result["success"].get<bool>())
+        {
+            return true;
+        }
+        return result.contains("error") && result["error"].is_string()
+               && !result["error"].get<std::string>().empty();
+    }
+
+    /// Enrich an error response with a consistent error and usage example.
     static void enrichErrorResponse(nlohmann::json & result,
                                     std::string const & toolName,
                                     std::map<std::string, ToolInfo> const & toolInfo)
     {
-        bool const isError = (result.contains("error") && !result.value("error", "").empty()) ||
-                             (result.contains("success") && result["success"] == false);
-        if (!isError)
+        if (!isToolError(result))
         {
             return;
         }
         if (!result.contains("success"))
         {
             result["success"] = false;
+        }
+        if ((!result.contains("error") || !result["error"].is_string()
+             || result["error"].get<std::string>().empty())
+            && result.contains("message") && result["message"].is_string())
+        {
+            result["error"] = result["message"];
         }
         if (!result.contains("usage_example"))
         {
@@ -505,7 +531,8 @@ namespace gladius::mcp
             }
 
             json params = request["params"].value("arguments", json::object());
-            json result = toolIt->second(params);
+            json result = executeTool(toolName, params);
+            bool const toolCallFailed = isToolError(result);
 
             json response = {
               {"jsonrpc", "2.0"},
@@ -520,10 +547,18 @@ namespace gladius::mcp
                 {
                     response["result"]["isError"] = result["isError"];
                 }
+                if (toolCallFailed)
+                {
+                    response["result"]["isError"] = true;
+                }
             }
             else
             {
                 response["result"]["content"] = {{{"type", "text"}, {"text", result.dump(2)}}};
+                if (toolCallFailed)
+                {
+                    response["result"]["isError"] = true;
+                }
             }
 
             if (request.contains("id"))

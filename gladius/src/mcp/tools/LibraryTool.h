@@ -157,8 +157,10 @@ namespace mcp::tools
 
         /// @brief Prepare the GPU and render a PNG thumbnail for the active document.
         /// @param document Active document (must not be null).
-        /// @return Raw PNG bytes, or empty if the compute core is unavailable or rendering fails.
-        std::vector<unsigned char> renderThumbnailPng(std::shared_ptr<Document> document) const;
+        /// @param diagnostic Output: explanation if rendering fails.
+        /// @return Raw PNG bytes, or empty if rendering fails.
+        std::vector<unsigned char> renderThumbnailPng(std::shared_ptr<Document> document,
+                        std::string & diagnostic) const;
     };
 } // namespace gladius::mcp::tools
 } // namespace gladius

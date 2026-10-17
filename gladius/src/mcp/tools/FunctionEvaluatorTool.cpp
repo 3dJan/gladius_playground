@@ -10,6 +10,7 @@
 #include "../../CLProgram.h"
 #include "../../Document.h"
 #include "../../ResourceContext.h"
+#include "../../compute/ComputeBackend.h"
 #include "../../compute/ComputeCore.h"
 #include "../../compute/GpuKernelAccessGuard.h"
 #include "../../compute/ProgramManager.h"
@@ -467,6 +468,19 @@ namespace gladius::mcp::tools
             return createToolError("No active document. Open or create a document first.");
         }
 
+        auto const core = document->getCore();
+        if (!core)
+        {
+                        auto const backend = document->getBackendKind();
+            return createToolError(
+              "Function evaluation requires an active OpenCL compute core. "
+              "The selected backend does not support this evaluation tool.",
+              {},
+                            {{"reason", "backend_unsupported"},
+                             {"phase", "backend_validation"},
+                             {"backend", backend ? std::string(compute::toString(*backend)) : "unknown"}});
+        }
+
         auto assembly = document->getAssembly();
         if (!assembly)
         {
@@ -575,12 +589,6 @@ namespace gladius::mcp::tools
 
         // --- Ensure model is compiled -------------------------------------------------
         document->refreshModelBlocking();
-
-        auto core = document->getCore();
-        if (!core)
-        {
-            return createToolError("Compute core not available.");
-        }
 
         // For assembly (root) evaluation, use the pre-compiled flat assembly source.
         // For sub-function evaluation, generate OCL from the original assembly so

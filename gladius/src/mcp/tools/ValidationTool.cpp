@@ -8,6 +8,7 @@
 #include "../../Document.h"
 #include "../EventLogger.h"
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 
 namespace gladius
 {
@@ -112,7 +113,7 @@ namespace gladius
             };
 
             // Phase 1: graph_sync (update 3MF model, update IOs, validate assembly)
-            nlohmann::json phase1 = {{"name", "graph_sync"}};
+            nlohmann::json phase1 = {{"name", "graph_sync"}, {"errors", 0}};
             try
             {
                 // Bring 3MF model in sync and update assembly IO relationship
@@ -146,13 +147,17 @@ namespace gladius
                 {
                     // Refresh program and attempt a blocking recompile on the compute core
                     auto core = document->getCore();
-                    if (core)
+                    if (!core)
                     {
-                        // Ensure the flattened assembly exists and kernel is generated
-                        document->updateFlatAssembly();
-                        core->tryRefreshProgramProtected(document->getFlatAssembly());
-                        core->recompileBlockingNoLock();
+                        throw std::runtime_error(
+                          "OpenCL compilation requires an active OpenCL compute core; "
+                          "the selected backend cannot run this compilation phase. "
+                          "Use compile=false for graph-only validation.");
                     }
+                    // Ensure the flattened assembly exists and kernel is generated
+                    document->updateFlatAssembly();
+                    core->tryRefreshProgramProtected(document->getFlatAssembly());
+                    core->recompileBlockingNoLock();
                     auto logger = document->getSharedLogger();
                     auto diag = snapshotLogger(logger);
                     phase2.update(diag);

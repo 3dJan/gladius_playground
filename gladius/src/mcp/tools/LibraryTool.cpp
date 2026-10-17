@@ -15,6 +15,7 @@
 #include "../../ExpressionToGraphConverter.h"
 #include "../../FileSystemUtils.h"
 #include "../../FunctionArgument.h"
+#include "../../compute/ComputeBackend.h"
 #include "../../compute/ComputeCore.h"
 #include "../../io/3mf/LibraryMetadata.h"
 #include "../../io/3mf/ResourceDependencyGraph.h"
@@ -27,7 +28,10 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <lib3mf_implicit.hpp>
+#include <random>
 #include <sstream>
+#include <stdexcept>
+#include <system_error>
 #include <unordered_set>
 #endif
 
@@ -38,6 +42,80 @@ namespace gladius::mcp::tools
 
     namespace
     {
+        nlohmann::json makeLibraryOperationError(std::string const & reason,
+                                                 std::string const & phase,
+                                                 std::string const & backend,
+                                                 std::string const & message,
+                                                 nlohmann::json const & usageExample = {},
+                                                 nlohmann::json const & additionalInfo = {})
+        {
+            auto result = MCPToolBase::createToolError(message, usageExample, additionalInfo);
+            result["reason"] = reason;
+            result["phase"] = phase;
+            result["backend"] = backend;
+            result["message"] = message;
+            return result;
+        }
+
+        std::string getBackendName(std::shared_ptr<Document> const & document)
+        {
+            if (!document)
+            {
+                return "unknown";
+            }
+
+            auto const backend = document->getBackendKind();
+            return backend.has_value() ? std::string(compute::toString(*backend)) : "unknown";
+        }
+
+        class ScopedLibraryStagingFile
+        {
+          public:
+            explicit ScopedLibraryStagingFile(fs::path const & targetPath)
+            {
+                std::random_device random;
+                auto const prefix = targetPath.filename().string() + ".staging-";
+                for (int attempt = 0; attempt < 16; ++attempt)
+                {
+                    m_directory = targetPath.parent_path() / (prefix + std::to_string(random()));
+                    std::error_code error;
+                    if (fs::create_directory(m_directory, error))
+                    {
+                        m_path = m_directory / targetPath.filename();
+                        return;
+                    }
+
+                    if (error && error != std::errc::file_exists)
+                    {
+                        throw fs::filesystem_error(
+                          "Failed to create library staging directory", m_directory, error);
+                    }
+                }
+
+                throw std::runtime_error("Failed to allocate a unique library staging directory");
+            }
+
+            ~ScopedLibraryStagingFile()
+            {
+                std::error_code error;
+                fs::remove_all(m_directory, error);
+            }
+
+            fs::path const & path() const
+            {
+                return m_path;
+            }
+
+            void commitTo(fs::path const & targetPath) const
+            {
+                fs::rename(m_path, targetPath);
+            }
+
+          private:
+            fs::path m_directory;
+            fs::path m_path;
+        };
+
         /// @brief Open a 3MF file into a standalone lib3mf model (does not affect the app).
         Lib3MF::PModel openStandaloneModel(fs::path const & path)
         {
@@ -247,13 +325,16 @@ namespace gladius::mcp::tools
         /// @param filePath  Path to the already-written 3MF file.
         /// @param taggedFunctionId  Model resource ID of the primary library function.
         /// @param logger  Shared logger (may be nullptr).
+                /// @param diagnostic Output: nonfatal reason if pruning fails.
         /// @return Number of resources removed, or 0 if nothing was pruned.
         std::size_t pruneExportedLibraryFile(
           fs::path const & filePath,
           Lib3MF_uint32 taggedFunctionId,
           std::vector<unsigned char> const & thumbnailPng,
-          events::SharedLogger logger)
+                    events::SharedLogger logger,
+                    std::string & diagnostic)
         {
+                        diagnostic.clear();
             try
             {
                 auto model = openStandaloneModel(filePath);
@@ -388,15 +469,40 @@ namespace gladius::mcp::tools
             }
             catch (std::exception const & e)
             {
+                diagnostic = fmt::format(
+                  "Export pruning failed for '{}': {}. The entry may contain unrelated resources.",
+                  filePath.string(), e.what());
                 if (logger)
                 {
-                    logger->addEvent(
-                      {fmt::format("Warning: Export pruning failed for '{}': {}. "
-                                   "The library entry may contain unrelated resources.",
-                                   filePath.string(), e.what()),
-                       events::Severity::Warning});
+                    try
+                    {
+                        logger->addEvent({diagnostic, events::Severity::Warning});
+                    }
+                    catch (...)
+                    {
+                        // A logger failure must not obscure the pruning diagnostic.
+                    }
                 }
                 return 0; // Non-fatal — the file was already written with full content
+            }
+            catch (...)
+            {
+                diagnostic = fmt::format(
+                  "Export pruning failed for '{}' with an unknown exception. "
+                  "The entry may contain unrelated resources.",
+                  filePath.string());
+                if (logger)
+                {
+                    try
+                    {
+                        logger->addEvent({diagnostic, events::Severity::Warning});
+                    }
+                    catch (...)
+                    {
+                        // A logger failure must not obscure the pruning diagnostic.
+                    }
+                }
+                return 0;
             }
         }
 
@@ -636,31 +742,50 @@ namespace gladius::mcp::tools
         std::vector<std::string> const & tags,
         bool overwrite)
     {
-        if (name.empty() || category.empty() || programSnippet.empty())
+        std::string phase = "input_validation";
+        std::string backend = "not_started";
+        auto makeError = [&phase, &backend](std::string const & reason,
+                                            std::string const & message,
+                                            nlohmann::json const & usageExample = {},
+                                            nlohmann::json const & additionalInfo = {}) {
+            return makeLibraryOperationError(
+              reason, phase, backend, message, usageExample, additionalInfo);
+        };
+
+        if (!validateApplication())
         {
-            return createToolError(
-              "name, category, and program_snippet are required",
-              {{"name", "helix-spring"},
-               {"category", "mechanical"},
-               {"function_id", 1},
-               {"program_snippet",
-                "// Function: helix_spring (ID: 1)\nfloat helix_spring_1(vec3 pos) {...}\n\n"
-                "// Function: main (ID: 3) [root]\n(float shape) main_3(vec3 pos) {\n"
-                "  shape = helix_spring_1(pos);\n}"},
-               {"description", "A parametric helix spring"}});
+            return makeError("application_unavailable", getLastErrorMessage());
         }
+
+                if (name.empty() || category.empty() || programSnippet.empty())
+                {
+                        return makeError(
+                            "invalid_arguments",
+                            "name, category, and program_snippet are required.",
+                            {{"name", "helix-spring"},
+                             {"category", "mechanical"},
+                             {"function_id", 1},
+                             {"program_snippet",
+                                "// Function: helix_spring (ID: 1)\nfloat helix_spring_1(vec3 pos) {...}\n\n"
+                                "// Function: main (ID: 3) [root]\n(float shape) main_3(vec3 pos) {\n"
+                                "  shape = helix_spring_1(pos);\n}"},
+                             {"description", "A parametric helix spring"}});
+                }
 
         auto const targetPath = getUserLibraryDir() / category / (name + ".3mf");
 
+        phase = "target_check";
         if (fs::exists(targetPath) && !overwrite)
         {
-            return createToolError(
+            return makeError(
+              "entry_already_exists",
               fmt::format("Library entry '{}' already exists in category '{}'", name, category),
               {{"name", name}, {"category", category}, {"overwrite", true}});
         }
 
         try
         {
+            phase = "document_creation";
             auto stepStart = std::chrono::steady_clock::now();
             auto logStep = [&stepStart](char const * label) {
                 auto now = std::chrono::steady_clock::now();
@@ -674,21 +799,36 @@ namespace gladius::mcp::tools
             DocumentLifecycleTool docTool(m_application);
             if (!docTool.createNewDocument())
             {
-                return createToolError("Failed to create document from template");
+                return makeError("document_creation_failed",
+                                 "Failed to create a new document from the library template.");
             }
 
             auto document = m_application->getCurrentDocument();
             if (!document)
             {
-                return createToolError("Failed to access newly created document");
+                return makeError("document_unavailable",
+                                 "Document creation succeeded, but no active document was available.");
             }
+            backend = getBackendName(document);
             logStep("Step 1: create document from template");
 
+                        phase = "backend_validation";
+                        auto const core = document->getCore();
+                        if (!core)
+                        {
+                                return makeError(
+                                    "backend_unsupported",
+                                    fmt::format("Library creation requires OpenCL compilation and model bounds, "
+                                                            "but the selected {} backend has no OpenCL compute core. "
+                                                            "Select OpenCL to use create_library_entry.", backend));
+                        }
+
             // Step 2: Apply the full program snippet (includes main + library function)
+            phase = "snippet_validation";
             auto assembly = document->getAssembly();
             if (!assembly)
             {
-                return createToolError("No assembly available in document");
+                return makeError("assembly_unavailable", "The new document has no assembly.");
             }
 
             // Verify the snippet includes a main function definition.
@@ -696,7 +836,8 @@ namespace gladius::mcp::tools
             // function has no demo / thumbnail.
             if (programSnippet.find("// Function: main (ID: 3)") == std::string::npos)
             {
-                return createToolError(
+                                return makeError(
+                                    "missing_demo_function",
                   "program_snippet must include a main function definition "
                   "(\"// Function: main (ID: 3) [root]\") that demonstrates the library "
                   "function with concrete example parameters.",
@@ -710,6 +851,7 @@ namespace gladius::mcp::tools
                     "  shape = my_func_1(sA, sB);\n}"}});
             }
 
+                    phase = "snippet_graph_conversion";
             ExpressionParser parser;
             ExpressionToGraphConverter::setProgramSnippet(programSnippet, *assembly, parser);
             logStep("Step 2: setProgramSnippet");
@@ -751,42 +893,41 @@ namespace gladius::mcp::tools
             }
 
             // Sync changes to 3MF model
+            phase = "model_synchronization";
             logStep("Step 2a: default color fixup");
             document->update3mfModel();
             document->rebuildResourceDependencyGraph();
             logStep("Step 2a: update3mfModel + rebuildDependencyGraph");
 
             // Step 2b: Force a fresh compilation and check for errors
+            phase = "backend_compilation";
             document->refreshModelBlocking();
             logStep("Step 2b: refreshModelBlocking (GPU compile)");
-
-            auto const core = document->getCore();
-            if (!core)
-            {
-                return createToolError("Failed to access compute core");
-            }
 
             auto const slicerProgram = core->getSlicerProgram();
             if (!slicerProgram || !slicerProgram->isValid())
             {
-                return createToolError(
+                                return makeError(
+                                    "invalid_compiled_program",
                   "Compilation failed: the slicer program is invalid. "
                   "Check the program_snippet for syntax errors or unsupported constructs.");
             }
 
             if (!slicerProgram->compilationSucceeded())
             {
-                return createToolError(
+                                return makeError(
+                                    "backend_compilation_failed",
                   "Compilation failed. The program_snippet contains errors. "
                   "Check for unsupported functions, missing parameters, or syntax issues.");
             }
             logStep("Step 2b: compilation check");
 
             // Step 3: Verify the tagged function exists
+            phase = "function_lookup";
             auto sourceModel = document->get3mfModel();
             if (!sourceModel)
             {
-                return createToolError("Failed to access 3MF model");
+                return makeError("model_unavailable", "Failed to access the compiled 3MF model.");
             }
 
             bool functionFound = false;
@@ -811,7 +952,8 @@ namespace gladius::mcp::tools
                       {{"resource_id", func->GetModelResourceID()},
                        {"name", func->GetDisplayName()}});
                 }
-                return createToolError(
+                                return makeError(
+                                    "function_not_found",
                   fmt::format("Function with resource ID {} not found in document. "
                               "Check your program_snippet function IDs.", functionId),
                   {{"function_id", 1},
@@ -821,6 +963,7 @@ namespace gladius::mcp::tools
             }
 
             // Step 4: Validate bounding box (must be meaningful and smaller than eval domain)
+            phase = "bounding_box_validation";
             try
             {
                 auto bbox = document->computeBoundingBox();
@@ -832,19 +975,24 @@ namespace gladius::mcp::tools
                   || (bbox.max.z - bbox.min.z <= 0.f);
                 if (isDegenerate)
                 {
-                    return {{"success", false},
-                            {"reason", "invalid_bounding_box"},
-                            {"message",
-                             "The main function produces a degenerate or zero-volume bounding box. "
-                             "Verify that main calls the library function with valid demo parameters "
-                             "and produces a visible surface."}};
+                                        return makeError(
+                                            "invalid_bounding_box",
+                                            "The main function produces a degenerate or zero-volume bounding box. "
+                                            "Verify that main calls the library function with valid demo parameters "
+                                            "and produces a visible surface.");
                 }
 
                 // The bbox must be strictly smaller than the evaluation domain (build volume).
                 // If it matches the build volume, the function likely has no real surface and
                 // the bbox is just the fallback eval domain.
-                auto const & buildVolume =
-                  core->getResourceContext()->getBuildVolume();
+                                auto const resourceContext = core->getResourceContext();
+                                if (!resourceContext)
+                                {
+                                        return makeError(
+                                            "compute_context_unavailable",
+                                            "The compute core has no resource context for bounding-box validation.");
+                                }
+                                auto const & buildVolume = resourceContext->getBuildVolume();
                 float constexpr MARGIN = 1.f; // mm
                 bool const matchesBuildVolume =
                   (bbox.min.x <= buildVolume.min.x + MARGIN)
@@ -855,45 +1003,47 @@ namespace gladius::mcp::tools
                   && (bbox.max.z >= buildVolume.max.z - MARGIN);
                 if (matchesBuildVolume)
                 {
-                    return {{"success", false},
-                            {"reason", "bounding_box_matches_eval_domain"},
-                            {"message",
-                             "The bounding box matches the evaluation domain, which means the "
-                             "function likely has no real surface or the SDF is always negative. "
-                             "Verify that the main function produces a visible, bounded shape."}};
+                    return makeError(
+                      "bounding_box_matches_eval_domain",
+                      "The bounding box matches the evaluation domain, which means the "
+                      "function likely has no real surface or the SDF is always negative. "
+                      "Verify that the main function produces a visible, bounded shape.");
                 }
             }
             catch (std::exception const & e)
             {
-                return {{"success", false},
-                        {"reason", "invalid_bounding_box"},
-                        {"message",
-                         fmt::format("Failed to compute bounding box: {}", e.what())}};
+                return makeError("invalid_bounding_box",
+                                 fmt::format("Failed to compute bounding box: {}", e.what()));
             }
             logStep("Step 4: bounding box validation");
 
             // Step 5: Render thumbnail
-            std::vector<unsigned char> const thumbnailPng = renderThumbnailPng(document);
+            phase = "thumbnail_rendering";
+            std::string thumbnailDiagnostic;
+            std::vector<unsigned char> const thumbnailPng =
+              renderThumbnailPng(document, thumbnailDiagnostic);
             if (thumbnailPng.empty())
             {
-                return {{"success", false},
-                        {"reason", "thumbnail_render_failed"},
-                        {"message",
-                         "Failed to render thumbnail. The main function may not produce "
-                         "a visible surface, or the GPU pipeline is unavailable."}};
+                return makeError(
+                  "thumbnail_render_failed",
+                  fmt::format("Failed to render the library thumbnail: {}", thumbnailDiagnostic));
             }
             logStep("Step 5: render thumbnail");
 
             // Step 6: Write model to library with scaffold and metadata
+            phase = "staging_file_creation";
             fs::create_directories(targetPath.parent_path());
+            ScopedLibraryStagingFile stagedFile(targetPath);
+            auto const stagedPath = stagedFile.path();
             {
                 auto writer = sourceModel->QueryWriter("3mf");
-                writer->WriteToFile(targetPath.string());
+                writer->WriteToFile(stagedPath.string());
             }
 
             // Stamp library metadata and thumbnail on the standalone copy
+            phase = "metadata_and_thumbnail_embedding";
             {
-                auto exportedModel = openStandaloneModel(targetPath);
+                auto exportedModel = openStandaloneModel(stagedPath);
 
                 io::LibraryMetadata metadata;
                 metadata.libraryFunctions =
@@ -925,20 +1075,44 @@ namespace gladius::mcp::tools
                 }
 
                 auto writer = exportedModel->QueryWriter("3mf");
-                writer->WriteToFile(targetPath.string());
+                writer->WriteToFile(stagedPath.string());
 
                 // Step 7: Validate the written file's 3MF references.
                 // Re-read the final file and check that all levelset channel and
                 // volumetric color references resolve to existing function outputs.
-                auto finalModel = openStandaloneModel(targetPath);
+                phase = "staged_file_validation";
+                auto finalModel = openStandaloneModel(stagedPath);
                 auto refError = validate3mfReferences(finalModel);
                 if (!refError.empty())
                 {
-                    fs::remove(targetPath);
-                    return createToolError(
-                      fmt::format("3MF reference validation failed: {}", refError));
+                    return makeError("invalid_3mf_references",
+                                     fmt::format("3MF reference validation failed: {}", refError));
+                }
+
+                auto finalMetadata = io::readLibraryMetadata(finalModel);
+                if (!finalMetadata.has_value())
+                {
+                    return makeError("library_metadata_missing",
+                                     "The staged 3MF file did not retain its library metadata.");
+                }
+                auto const taggedFunctionIds =
+                  io::parseResourceIds(finalMetadata->libraryFunctions);
+                if (std::find(taggedFunctionIds.begin(), taggedFunctionIds.end(), functionId)
+                    == taggedFunctionIds.end())
+                {
+                    return makeError(
+                      "tagged_function_missing",
+                      fmt::format("The staged 3MF metadata does not tag function {}.", functionId));
+                }
+                if (!finalModel->HasPackageThumbnailAttachment())
+                {
+                    return makeError("thumbnail_missing",
+                                     "The staged 3MF file did not retain its thumbnail attachment.");
                 }
             }
+
+            phase = "target_commit";
+            stagedFile.commitTo(targetPath);
 
             auto msg = fmt::format(
               "Created library entry '{}' in category '{}' (with scaffold and thumbnail)",
@@ -957,38 +1131,72 @@ namespace gladius::mcp::tools
         }
         catch (std::exception const & e)
         {
-            std::error_code ec;
-            fs::remove(targetPath, ec);
-            return createToolError(
-              fmt::format("Failed to create library entry: {}", e.what()));
+            return makeError("library_creation_failed",
+                             fmt::format("Failed during {}: {}", phase, e.what()));
+        }
+        catch (...)
+        {
+            return makeError("library_creation_failed",
+                             fmt::format("Failed during {} with an unknown exception.", phase));
         }
     }
 
-    std::vector<unsigned char> LibraryTool::renderThumbnailPng(std::shared_ptr<Document> document) const
+    std::vector<unsigned char> LibraryTool::renderThumbnailPng(std::shared_ptr<Document> document,
+                                                                std::string & diagnostic) const
     {
+        diagnostic.clear();
+        if (!document)
+        {
+            diagnostic = "Cannot render a thumbnail because the document is null.";
+            return {};
+        }
+
         auto logger = document->getSharedLogger();
         auto const backend = document->getBackendKind();
+        auto const backendName = getBackendName(document);
+        auto logEvent = [&logger](std::string const & message, events::Severity severity) {
+            if (logger)
+            {
+                try
+                {
+                    logger->addEvent({message, severity});
+                }
+                catch (...)
+                {
+                    // Logging must not hide the original rendering failure.
+                }
+            }
+        };
+
         if (backend.has_value() && *backend == compute::ComputeBackendKind::WebGPU)
         {
             try
             {
                 auto image = document->createThumbnailPng();
-                if (logger)
+                if (image.data.empty())
                 {
-                    logger->addEvent(
-                      {fmt::format("renderThumbnailPng: {} WebGPU bytes", image.data.size()),
-                       events::Severity::Info});
+                    diagnostic = "The WebGPU thumbnail renderer returned an empty PNG buffer.";
+                    logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                             events::Severity::Warning);
+                    return {};
                 }
+
+                logEvent(fmt::format("renderThumbnailPng: {} WebGPU bytes", image.data.size()),
+                         events::Severity::Info);
                 return std::move(image.data);
             }
             catch (std::exception const & error)
             {
-                if (logger)
-                {
-                    logger->addEvent(
-                      {fmt::format("renderThumbnailPng: WebGPU render failed: {}", error.what()),
-                       events::Severity::Warning});
-                }
+                diagnostic = fmt::format("WebGPU thumbnail rendering threw: {}", error.what());
+                logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                         events::Severity::Warning);
+                return {};
+            }
+            catch (...)
+            {
+                diagnostic = "WebGPU thumbnail rendering failed with an unknown exception.";
+                logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                         events::Severity::Warning);
                 return {};
             }
         }
@@ -996,18 +1204,18 @@ namespace gladius::mcp::tools
         auto computeCore = document->getCore();
         if (!computeCore)
         {
-            if (logger)
-            {
-                logger->addEvent(
-                  {"renderThumbnailPng: no compute core available", events::Severity::Warning});
-            }
+            diagnostic = fmt::format(
+              "The {} backend has no initialized compute core for thumbnail rendering.",
+              backendName);
+            logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                     events::Severity::Warning);
             return {};
         }
 
         try
         {
-            logger->addEvent(
-              {"renderThumbnailPng: starting GPU prep", events::Severity::Info});
+            logEvent("renderThumbnailPng: starting OpenCL compute preparation",
+                     events::Severity::Info);
 
             document->updateParameterRegistration();
             document->updateParameter();
@@ -1016,23 +1224,40 @@ namespace gladius::mcp::tools
 
             if (!computeCore->prepareImageRendering())
             {
-                logger->addEvent(
-                  {"renderThumbnailPng: prepareImageRendering returned false",
-                   events::Severity::Warning});
+                diagnostic =
+                  "OpenCL prepareImageRendering() returned false; check compute initialization, "
+                  "program compilation, and whether the document has a renderable surface.";
+                logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                         events::Severity::Warning);
                 return {};
             }
 
             auto image = computeCore->createThumbnailPng();
-            logger->addEvent(
-              {fmt::format("renderThumbnailPng: {} bytes", image.data.size()),
-               events::Severity::Info});
+            if (image.data.empty())
+            {
+                diagnostic = "The OpenCL thumbnail renderer returned an empty PNG buffer.";
+                logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                         events::Severity::Warning);
+                return {};
+            }
+
+            logEvent(fmt::format("renderThumbnailPng: {} OpenCL bytes", image.data.size()),
+                     events::Severity::Info);
             return std::move(image.data);
         }
         catch (std::exception const & e)
         {
-            logger->addEvent(
-              {fmt::format("renderThumbnailPng: failed: {}", e.what()),
-               events::Severity::Warning});
+            diagnostic = fmt::format("OpenCL thumbnail preparation or rendering threw: {}",
+                                     e.what());
+            logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                     events::Severity::Warning);
+            return {};
+        }
+        catch (...)
+        {
+            diagnostic = "OpenCL thumbnail preparation or rendering failed with an unknown exception.";
+            logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                     events::Severity::Warning);
             return {};
         }
     }
@@ -1044,9 +1269,20 @@ namespace gladius::mcp::tools
                                                  bool overwrite,
                                                  bool keepScaffold)
     {
+                std::string phase = "document_validation";
+                std::string backend = "not_started";
+                auto makeError = [&phase, &backend](std::string const & reason,
+                                                                                        std::string const & message,
+                                                                                        nlohmann::json const & usageExample = {},
+                                                                                        nlohmann::json const & additionalInfo = {}) {
+                        return makeLibraryOperationError(
+                            reason, phase, backend, message, usageExample, additionalInfo);
+                };
+
         if (!validateActiveDocument())
         {
-            return createToolError(
+                        return makeError(
+                            "document_unavailable",
               "No active document. Open or create a document first.",
               {{"function_id", 5},
                {"category", "primitives"},
@@ -1056,9 +1292,11 @@ namespace gladius::mcp::tools
 
         auto const targetPath = getUserLibraryDir() / category / (name + ".3mf");
 
+        phase = "target_check";
         if (fs::exists(targetPath) && !overwrite)
         {
-            return createToolError(
+            return makeError(
+              "entry_already_exists",
               fmt::format("Library entry '{}' already exists in category '{}'", name, category),
               {{"function_id", functionId},
                {"category", category},
@@ -1068,19 +1306,24 @@ namespace gladius::mcp::tools
 
         try
         {
+            phase = "document_access";
             auto document = m_application->getCurrentDocument();
             if (!document)
             {
-                return createToolError("Failed to access active document");
+                return makeError("document_unavailable",
+                                 "The active document became unavailable before export started.");
             }
+            backend = getBackendName(document);
 
             // Sync the internal node graph to the 3MF model
+            phase = "model_synchronization";
             document->update3mfModel();
 
             // FR-014b: Validate thumbnail and bounding box before writing
             auto logger = document->getSharedLogger();
 
             // Check bounding box validity
+            phase = "bounding_box_validation";
             try
             {
                 auto bbox = document->computeBoundingBox();
@@ -1092,39 +1335,38 @@ namespace gladius::mcp::tools
                   || (bbox.max.z - bbox.min.z <= 0.f);
                 if (isDegenerate)
                 {
-                    return {{"success", false},
-                            {"reason", "invalid_bounding_box"},
-                            {"message",
-                             "Function produces a degenerate or zero-volume bounding box. "
-                             "The SDF may not define a valid surface."}};
+                    return makeError("invalid_bounding_box",
+                                     "Function produces a degenerate or zero-volume bounding box. "
+                                     "The SDF may not define a valid surface.");
                 }
             }
             catch (std::exception const & e)
             {
-                return {{"success", false},
-                        {"reason", "invalid_bounding_box"},
-                        {"message",
-                         fmt::format("Failed to compute bounding box: {}", e.what())}};
+                return makeError("invalid_bounding_box",
+                                 fmt::format("Failed to compute bounding box: {}", e.what()));
             }
 
             // Render thumbnail
-            std::vector<unsigned char> const thumbnailPng = renderThumbnailPng(document);
+            phase = "thumbnail_rendering";
+            std::string thumbnailDiagnostic;
+            std::vector<unsigned char> const thumbnailPng =
+              renderThumbnailPng(document, thumbnailDiagnostic);
             if (thumbnailPng.empty())
             {
-                return {{"success", false},
-                        {"reason", "thumbnail_render_failed"},
-                        {"message",
-                         "Failed to render thumbnail for the library entry. "
-                         "The function may not produce a visible surface."}};
+                return makeError(
+                  "thumbnail_render_failed",
+                  fmt::format("Failed to render the library thumbnail: {}", thumbnailDiagnostic));
             }
 
+            phase = "model_access";
             auto sourceModel = document->get3mfModel();
             if (!sourceModel)
             {
-                return createToolError("Failed to access 3MF model");
+                return makeError("model_unavailable", "Failed to access the active 3MF model.");
             }
 
             // Verify the function exists
+            phase = "function_lookup";
             bool functionFound = false;
             auto funcIter = sourceModel->GetFunctions();
             while (funcIter->MoveNext())
@@ -1148,7 +1390,8 @@ namespace gladius::mcp::tools
                       {{"resource_id", func->GetModelResourceID()},
                        {"name", func->GetDisplayName()}});
                 }
-                return createToolError(
+                                return makeError(
+                                    "function_not_found",
                   fmt::format("Function with resource ID {} not found in document", functionId),
                   {{"function_id", 5},
                    {"category", category},
@@ -1161,15 +1404,19 @@ namespace gladius::mcp::tools
             // in-memory model's metadata. This avoids a lib3mf issue where stamping
             // metadata on the live model and then removing it leaves residual state
             // that causes "Duplicate Model Metadata" on a subsequent export.
+            phase = "staging_file_creation";
             fs::create_directories(targetPath.parent_path());
+            ScopedLibraryStagingFile stagedFile(targetPath);
+            auto const stagedPath = stagedFile.path();
             {
                 auto writer = sourceModel->QueryWriter("3mf");
-                writer->WriteToFile(targetPath.string());
+                writer->WriteToFile(stagedPath.string());
             }
 
             // Now stamp library metadata on the standalone copy, along with the thumbnail.
+            phase = "metadata_and_thumbnail_embedding";
             {
-                auto exportedModel = openStandaloneModel(targetPath);
+                auto exportedModel = openStandaloneModel(stagedPath);
 
                 io::LibraryMetadata metadata;
                 metadata.libraryFunctions =
@@ -1188,18 +1435,69 @@ namespace gladius::mcp::tools
                 }
 
                 auto writer = exportedModel->QueryWriter("3mf");
-                writer->WriteToFile(targetPath.string());
+                writer->WriteToFile(stagedPath.string());
             }
 
             size_t prunedCount = 0;
+            std::string pruningDiagnostic;
             if (!keepScaffold)
             {
                 // Prune the exported file to only include the tagged function,
                 // its transitive dependencies, and any example build item chain.
                 prunedCount = pruneExportedLibraryFile(
-                  targetPath, static_cast<Lib3MF_uint32>(functionId),
-                  thumbnailPng, logger);
+                  stagedPath, static_cast<Lib3MF_uint32>(functionId),
+                  thumbnailPng, logger, pruningDiagnostic);
             }
+
+            phase = "staged_file_validation";
+            auto finalModel = openStandaloneModel(stagedPath);
+            auto const refError = validate3mfReferences(finalModel);
+            if (!refError.empty())
+            {
+                return makeError("invalid_3mf_references",
+                                 fmt::format("3MF reference validation failed: {}", refError));
+            }
+
+            bool finalFunctionFound = false;
+            auto finalFunctionIter = finalModel->GetFunctions();
+            while (finalFunctionIter->MoveNext())
+            {
+                if (finalFunctionIter->GetCurrentFunction()->GetModelResourceID() == functionId)
+                {
+                    finalFunctionFound = true;
+                    break;
+                }
+            }
+            if (!finalFunctionFound)
+            {
+                return makeError(
+                  "function_missing_after_pruning",
+                  fmt::format("Function {} is missing from the staged 3MF after export pruning.",
+                              functionId));
+            }
+
+            auto finalMetadata = io::readLibraryMetadata(finalModel);
+            if (!finalMetadata.has_value())
+            {
+                return makeError("library_metadata_missing",
+                                 "The staged 3MF file did not retain its library metadata.");
+            }
+            auto const taggedFunctionIds = io::parseResourceIds(finalMetadata->libraryFunctions);
+            if (std::find(taggedFunctionIds.begin(), taggedFunctionIds.end(), functionId)
+                == taggedFunctionIds.end())
+            {
+                return makeError("tagged_function_missing",
+                                 fmt::format("The staged 3MF metadata does not tag function {}.",
+                                             functionId));
+            }
+            if (!finalModel->HasPackageThumbnailAttachment())
+            {
+                return makeError("thumbnail_missing",
+                                 "The staged 3MF file did not retain its thumbnail attachment.");
+            }
+
+            phase = "target_commit";
+            stagedFile.commitTo(targetPath);
 
             auto message = fmt::format(
               "Exported function {} to library entry '{}' in category '{}'",
@@ -1217,16 +1515,28 @@ namespace gladius::mcp::tools
                 message += " (thumbnail embedded)";
             }
 
-            return {{"success", true},
-                    {"path", targetPath.string()},
-                    {"name", name},
-                    {"category", category},
-                    {"function_id", functionId},
-                    {"message", message}};
+            nlohmann::json result = {{"success", true},
+                                     {"path", targetPath.string()},
+                                     {"name", name},
+                                     {"category", category},
+                                     {"function_id", functionId},
+                                     {"message", message}};
+            if (!pruningDiagnostic.empty())
+            {
+                result["warnings"] = nlohmann::json::array({pruningDiagnostic});
+            }
+            return result;
         }
         catch (std::exception const & e)
         {
-            return createToolError(fmt::format("Export failed: {}", e.what()));
+            return makeError("library_export_failed",
+                             fmt::format("Export failed during {}: {}", phase, e.what()));
+        }
+        catch (...)
+        {
+            return makeError("library_export_failed",
+                             fmt::format("Export failed during {} with an unknown exception.",
+                                         phase));
         }
     }
 

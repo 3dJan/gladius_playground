@@ -1171,6 +1171,15 @@ namespace gladius
 
     void Document::refreshModelBlocking()
     {
+        if (!m_core)
+        {
+            if (prepareAssemblyForRefresh())
+            {
+                updateFlatAssembly();
+            }
+            return;
+        }
+
     #if !defined(GLADIUS_ENABLE_OPENCL)
         return;
     #else
