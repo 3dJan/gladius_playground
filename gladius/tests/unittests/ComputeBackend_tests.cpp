@@ -105,6 +105,19 @@ namespace gladius::compute::tests
         ASSERT_TRUE(document.getAssembly()->assemblyModel());
     }
 
+    TEST(Document, RefreshModelBlocking_WithoutComputeCore_UpdatesFlatAssembly)
+    {
+        auto logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+        Document document(logger);
+        auto const previousFlatAssembly = document.getFlatAssembly();
+
+        ASSERT_NO_THROW(document.refreshModelBlocking());
+
+        ASSERT_TRUE(document.getFlatAssembly());
+        EXPECT_NE(document.getFlatAssembly(), previousFlatAssembly);
+        EXPECT_EQ(document.getCore(), nullptr);
+    }
+
 #if defined(GLADIUS_ENABLE_WEBGPU)
     TEST(ApplicationComputeRuntime, WebGPUConstruction_DoesNotCreateOpenCLCore)
     {

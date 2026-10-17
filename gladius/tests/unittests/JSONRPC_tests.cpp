@@ -1,6 +1,7 @@
 #include "FunctionArgument.h"
 #include "mcp/MCPApplicationInterface.h"
 #include "mcp/MCPServer.h"
+#include "mcp/tools/LibraryTool.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -489,6 +490,68 @@ namespace gladius::tests
         EXPECT_EQ(response["id"], 1);
         EXPECT_TRUE(response.contains("error"));
         EXPECT_EQ(response["error"]["code"], -32601); // Method not found
+    }
+
+    TEST_F(JSONRPCTest, ToolsCall_LibraryFailure_MarksErrorAndAddsUsageExample)
+    {
+        json request = {{"jsonrpc", "2.0"},
+                        {"id", 1},
+                        {"method", "tools/call"},
+                        {"params",
+                         {{"name", "get_library_entry_info"},
+                          {"arguments", {{"category", "primitives"}, {"name", "missing"}}}}}};
+
+        json response = m_server->processJSONRPCRequest(request);
+
+        ASSERT_TRUE(response.contains("result"));
+        EXPECT_TRUE(response["result"].value("isError", false));
+        auto const payload = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+        EXPECT_FALSE(payload["success"].get<bool>());
+        EXPECT_EQ(payload["error"], "Not implemented in mock");
+        EXPECT_TRUE(payload.contains("usage_example"));
+    }
+
+    TEST_F(JSONRPCTest, ToolsCall_MessageOnlyFailure_ProvidesErrorFieldAndIsErrorFlag)
+    {
+        m_server->registerTool(
+          "thumbnail_failure",
+          "Simulate a thumbnail rendering failure",
+          {{"type", "object"}, {"properties", json::object()}, {"required", json::array()}},
+          [](json const &) -> json
+          {
+              return {{"success", false},
+                      {"reason", "thumbnail_render_failed"},
+                      {"phase", "thumbnail_rendering"},
+                      {"backend", "opencl"},
+                      {"message", "No compute core available"}};
+          });
+        json request = {{"jsonrpc", "2.0"},
+                        {"id", 2},
+                        {"method", "tools/call"},
+                        {"params", {{"name", "thumbnail_failure"}, {"arguments", json::object()}}}};
+
+        json response = m_server->processJSONRPCRequest(request);
+
+        ASSERT_TRUE(response.contains("result"));
+        EXPECT_TRUE(response["result"].value("isError", false));
+        auto const payload = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+        EXPECT_EQ(payload["error"], "No compute core available");
+        EXPECT_EQ(payload["reason"], "thumbnail_render_failed");
+        EXPECT_EQ(payload["phase"], "thumbnail_rendering");
+        EXPECT_EQ(payload["backend"], "opencl");
+    }
+
+    TEST(LibraryToolErrorTest, CreateWithoutApplication_ReturnsPhaseAndBackend)
+    {
+        gladius::mcp::tools::LibraryTool tool(nullptr);
+
+        auto const result = tool.createLibraryEntry("entry", "operations", "snippet", 1, "");
+
+        EXPECT_FALSE(result.at("success").get<bool>());
+        EXPECT_EQ(result.at("reason"), "application_unavailable");
+        EXPECT_EQ(result.at("phase"), "input_validation");
+        EXPECT_EQ(result.at("backend"), "not_started");
+        EXPECT_EQ(result.at("error"), "Application instance is null");
     }
 
     // Test notification (request without id)
