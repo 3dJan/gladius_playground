@@ -104,8 +104,9 @@ namespace gladius::ui
             auto const candidates = model.collectCompatibleLinkCandidates(targetId, false);
             std::vector<PortOption> options;
             options.reserve(candidates.size());
-            for (auto const portId : candidates)
+            for (auto const candidateId : candidates)
             {
+                auto const portId = static_cast<nodes::PortId>(candidateId);
                 auto const * port = model.getPort(portId);
                 if (port == nullptr)
                 {
@@ -209,8 +210,9 @@ namespace gladius::ui
         auto const candidates = model.collectCompatibleLinkCandidates(sourcePortId, true);
         std::vector<ParameterOption> options;
         options.reserve(candidates.size());
-        for (auto const parameterId : candidates)
+        for (auto const candidateId : candidates)
         {
+            auto const parameterId = static_cast<nodes::ParameterId>(candidateId);
             auto const * parameter = model.getParameter(parameterId);
             if (parameter == nullptr)
             {

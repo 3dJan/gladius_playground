@@ -13,8 +13,8 @@ prior knowledge of Python or another language is enough to follow along.
 
 1. [Install system packages](#1-install-system-packages)
 2. [Choose and install an OpenCL runtime](#2-choose-and-install-an-opencl-runtime)
-3. [Install vcpkg](#3-install-vcpkg)
-4. [Set environment variables](#4-set-environment-variables)
+3. [vcpkg (vendored submodule)](#3-vcpkg-vendored-submodule)
+4. [Environment variables (optional)](#4-environment-variables-optional)
 5. [Clone the repository](#5-clone-the-repository)
 6. [Configure and build](#6-configure-and-build)
 7. [Verify the build](#7-verify-the-build)
@@ -146,26 +146,37 @@ empty, your runtime is not installed or not visible to the ICD loader.
 
 ---
 
-## 3. Install vcpkg
+## 3. vcpkg (vendored submodule)
 
 vcpkg is the package manager that downloads and builds all C++ dependencies
-(ImGui, OpenVDB, Eigen3, lib3mf, etc.). **The first build will take 30–60 minutes**
-because vcpkg compiles everything from source — this is a one-time cost.
+(ImGui, OpenVDB, Eigen3, lib3mf, Tracy, etc.). It is vendored in this repository
+as a git submodule at `vcpkg/`, pinned to the same commit as the
+`builtin-baseline` in `gladius/vcpkg.json`. **The first build will take 30–60
+minutes** because vcpkg compiles everything from source — this is a one-time cost.
+
+After cloning the repository (step 5), initialise and bootstrap the submodule:
 
 ```bash
-# Clone vcpkg somewhere permanent (e.g. your home directory):
-git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+git submodule update --init --recursive vcpkg
 
-# Bootstrap the vcpkg binary:
-cd ~/vcpkg && ./bootstrap-vcpkg.sh
+# Bootstrap the vcpkg binary (downloads a prebuilt vcpkg executable):
+./vcpkg/bootstrap-vcpkg.sh
 ```
+
+> **Using your own vcpkg instead:** if you prefer a separate checkout, set
+> `VCPKG_ROOT` to its path (step 4). An explicit `VCPKG_ROOT` always takes
+> precedence over the vendored submodule.
 
 ---
 
-## 4. Set environment variables
+## 4. Environment variables (optional)
 
-vcpkg and CMake need to know where vcpkg lives. Add this to your shell's
-startup file (`~/.bashrc`, `~/.zshrc`, etc.) so it persists across sessions:
+Nothing has to be exported for a default build: `gladius/CMakeLists.txt` falls
+back to the vendored `vcpkg/` submodule when `VCPKG_ROOT` is unset.
+
+Set `VCPKG_ROOT` only if you want CMake to use a different vcpkg checkout. Add
+it to your shell's startup file (`~/.bashrc`, `~/.zshrc`, etc.) so it persists
+across sessions:
 
 ```bash
 export VCPKG_ROOT="$HOME/vcpkg"
@@ -180,29 +191,31 @@ echo $VCPKG_ROOT
 # Expected output: /home/<you>/vcpkg
 ```
 
-> **Why this matters:** The CMake preset uses `$env{VCPKG_ROOT}` to locate
-> the vcpkg toolchain file. If `VCPKG_ROOT` is unset, CMake will not find
-> any of the third-party libraries and the configure step will fail with
-> errors like `Could not find a package configuration file provided by "fmt"`.
+> **Why this matters:** if neither `VCPKG_ROOT` nor the vendored submodule is
+> available, CMake will not find any of the third-party libraries and the
+> configure step will fail with errors like `Could not find a package
+> configuration file provided by "fmt"`.
 
 ---
 
 ## 5. Clone the repository
 
 ```bash
-git clone https://github.com/3MFConsortium/gladius.git
+git clone --recurse-submodules https://github.com/3MFConsortium/gladius.git
 cd gladius
 
-# Initialize the two vendored header-only libraries:
+# Or, if you already cloned without submodules:
 git submodule update --init --recursive
 ```
 
 > **What the submodules provide:**
+> - `vcpkg` — the pinned vcpkg package manager used by the build (see step 3)
 > - `gladius/components/IconFontCppHeaders` — Font Awesome icon constants for the UI
 > - `gladius/components/psimpl` — polyline simplification
 >
 > If you forget this step you will see build errors like
-> `fatal error: IconsFontAwesome5.h: No such file or directory`.
+> `fatal error: IconsFontAwesome5.h: No such file or directory`, or CMake will
+> report that it cannot find the vcpkg toolchain file.
 
 ---
 
@@ -331,18 +344,23 @@ sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-16 100
 sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-16 100
 ```
 
-### `VCPKG_ROOT` is not set
+### vcpkg is not being used (`Could not find a package configuration file`)
 
 ```
 CMake Error: Could not find a package configuration file provided by "fmt"
 ```
 
-Check:
+CMake uses `$VCPKG_ROOT` when it is set, and falls back to the vendored `vcpkg/`
+submodule otherwise. Check both:
 
 ```bash
-echo $VCPKG_ROOT   # should print your vcpkg path
-# If empty, ensure you added the export to ~/.bashrc and sourced it.
+echo $VCPKG_ROOT                                  # either empty, or your vcpkg path
+ls vcpkg/scripts/buildsystems/vcpkg.cmake         # the vendored fallback
 ```
+
+If the submodule directory is empty, initialise it (`git submodule update --init --recursive vcpkg`)
+and bootstrap it (`./vcpkg/bootstrap-vcpkg.sh`). If `VCPKG_ROOT` points somewhere
+unexpected, unset it to go back to the vendored copy.
 
 ### vcpkg fails during dependency compilation
 

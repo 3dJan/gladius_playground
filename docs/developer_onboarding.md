@@ -152,7 +152,10 @@ The repo enforces conventions (see `.github/copilot-instructions.md`):
 
 ## “If you’re stuck” checklist
 
-- Build issues: check `VCPKG_ROOT`, OpenCL headers/runtime, and preset selection.
+- Build issues: check that the `vcpkg` submodule is initialised and bootstrapped
+  (`git submodule update --init --recursive` then `bootstrap-vcpkg`), that
+  `VCPKG_ROOT` only points somewhere else if you intend to override the vendored
+  submodule, and check OpenCL headers/runtime and preset selection.
 - Runtime issues: verify OpenCL device availability and driver correctness.
 - Test flakiness: try the `noOpenCL` preset to isolate non-GPU failures.
 

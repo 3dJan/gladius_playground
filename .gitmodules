@@ -6,3 +6,6 @@
 	path = gladius/components/psimpl
 	url = https://github.com/dand-oss/psimpl-code.git
 
+[submodule "vcpkg"]
+	path = vcpkg
+	url = https://github.com/microsoft/vcpkg.git

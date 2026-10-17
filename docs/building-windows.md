@@ -12,8 +12,8 @@ prior knowledge of Python or another language is enough to follow along.
 ## Table of Contents
 
 1. [Install prerequisites](#1-install-prerequisites)
-2. [Install vcpkg](#2-install-vcpkg)
-3. [Set environment variables](#3-set-environment-variables)
+2. [vcpkg (vendored submodule)](#2-vcpkg-vendored-submodule)
+3. [Environment variables (optional)](#3-environment-variables-optional)
 4. [Clone the repository](#4-clone-the-repository)
 5. [Configure and build](#5-configure-and-build)
 6. [Verify the build](#6-verify-the-build)
@@ -25,12 +25,17 @@ prior knowledge of Python or another language is enough to follow along.
 
 ## 1. Install prerequisites
 
-### Visual Studio 2022 (required)
+### Visual Studio 2022 or newer (required)
 
-Gladius requires the **MSVC v143** compiler toolset (shipped with Visual Studio 2022).
+Gladius is built with the **MSVC v143** compiler toolset. Visual Studio 2022
+ships it by default. Newer releases (for example Visual Studio 2026 / "18")
+also work, but you must make sure the **MSVC v143** toolset component is
+installed alongside the newest one — the custom vcpkg triplet
+(`x64-windows-gladius.cmake`) pins `VCPKG_PLATFORM_TOOLSET v143`.
+
 You can use either the full IDE or just the standalone Build Tools.
 
-**Option A — Full Visual Studio 2022** (includes the IDE):
+**Option A — Full Visual Studio** (includes the IDE):
 
 Download from <https://visualstudio.microsoft.com/vs/>
 
@@ -38,14 +43,17 @@ During installation, select the workload:
 
 - **Desktop development with C++**
 
-This automatically includes MSVC v143, CMake, Ninja, and the Windows SDK.
+This automatically includes MSVC, CMake, Ninja, and the Windows SDK. On
+Visual Studio 2026 or newer, open the **Individual components** tab of the
+installer and also enable **MSVC v143 - VS 2022 C++ x64/x86 build tools**.
 
 **Option B — Build Tools only** (smaller, no IDE, VS Code is your editor):
 
-Download "Build Tools for Visual Studio 2022" from
+Download "Build Tools for Visual Studio" from
 <https://visualstudio.microsoft.com/visual-cpp-build-tools/>
 
-Select the same workload: **Desktop development with C++**
+Select the same workload: **Desktop development with C++** (plus the
+MSVC v143 individual component on VS 2026 or newer).
 
 > **Why v143 specifically?** The custom vcpkg triplet (`x64-windows-gladius.cmake`)
 > hard-codes `VCPKG_PLATFORM_TOOLSET v143`. Using Visual Studio 2019 (v142)
@@ -69,73 +77,71 @@ winget install Git.Git
 
 After installation, open a new terminal so `git` is on your PATH.
 
-### OpenCL SDK
+### OpenCL
 
-The Khronos OpenCL SDK provides the headers and ICD loader needed to compile
-OpenCL code. At runtime, your GPU driver provides the actual implementation.
+No separate OpenCL SDK install is needed: the OpenCL headers and ICD loader
+come from the `opencl` port in the vcpkg manifest
+(`gladius/vcpkg.json`), so `find_package(OpenCL)` resolves inside the vcpkg
+install tree automatically.
 
-Download and install the **Khronos OpenCL SDK**:
-<https://github.com/KhronosGroup/OpenCL-SDK/releases>
-
-> Alternatively, installing the **CUDA Toolkit** (NVIDIA) or **ROCm for Windows**
-> (AMD) also installs OpenCL support for that GPU. The Khronos SDK is vendor-neutral
-> and works regardless of which GPU you have.
-
-After installing, the environment variable `OPENCL_ROOT` (or `OCL_ROOT`)
-should point to the SDK. CMake will pick it up automatically via `find_package(OpenCL)`.
+At runtime, your GPU driver provides the actual OpenCL implementation. If no
+OpenCL-capable device is available, configure with the
+`x64-release-debug-noOpenCL` preset to skip the OpenCL tests.
 
 ---
 
-## 2. Install vcpkg
+## 2. vcpkg (vendored submodule)
 
 vcpkg is the package manager that downloads and builds all C++ dependencies.
-**The first build will take 30–60 minutes** because vcpkg compiles everything
-from source — this is a one-time cost.
+It is **vendored as a git submodule** at the repository root (`vcpkg/`), pinned
+to the same commit as `builtin-baseline` in `gladius/vcpkg.json`, so there is
+nothing to install separately — initialising the submodules (section 4) is
+enough.
 
-Open **PowerShell** (or the new Windows Terminal) and run:
+The CMake presets point at `../vcpkg/scripts/buildsystems/vcpkg.cmake`, and
+`gladius/CMakeLists.txt` falls back to that submodule whenever `VCPKG_ROOT` is
+not set.
 
-```powershell
-# Clone vcpkg to a permanent location (e.g. C:\vcpkg):
-git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+**The first build will take 30–60 minutes** because vcpkg compiles all
+dependencies from source — this is a one-time cost.
 
-# Bootstrap (compiles the vcpkg executable):
-C:\vcpkg\bootstrap-vcpkg.bat
-```
+> **Bootstrap:** the submodule does not contain the `vcpkg.exe` binary (it is
+> git-ignored). If `vcpkg\vcpkg.exe` is missing, build it once:
+>
+> ```powershell
+> .\vcpkg\bootstrap-vcpkg.bat
+> ```
+>
+> CMake invokes this for you if the submodule is present but not bootstrapped,
+> so this is only needed if you want to run `vcpkg` from the command line.
 
 ---
 
-## 3. Set environment variables
+## 3. Environment variables (optional)
 
-CMake and vcpkg need to know where vcpkg lives. Set this as a **system-wide**
-environment variable so it persists across terminal sessions and IDE restarts.
+Nothing has to be set for the default workflow — the presets already point at
+the vendored submodule.
 
-**Via Settings UI:**
-
-1. Open **Start** → search for **"Edit the system environment variables"**
-2. Click **Environment Variables…**
-3. Under **System variables**, click **New**:
-   - Variable name: `VCPKG_ROOT`
-   - Variable value: `C:\vcpkg` (or wherever you cloned vcpkg)
-4. Click OK and close all dialogs
-
-**Via PowerShell (permanent, system-wide):**
+Set `VCPKG_ROOT` only if you want CMake to use a **different** vcpkg checkout
+(a shared install, a newer baseline, a corporate mirror). An existing
+`VCPKG_ROOT` always wins over the submodule:
 
 ```powershell
 [System.Environment]::SetEnvironmentVariable("VCPKG_ROOT", "C:\vcpkg", "Machine")
 ```
 
-> You must open a **new** terminal after setting this for it to take effect.
+> You must open a **new** terminal (and fully restart VS Code) after setting
+> this for it to take effect.
 
 **Verify:**
 
 ```powershell
-echo $env:VCPKG_ROOT
-# Expected: C:\vcpkg
+echo $env:VCPKG_ROOT   # empty is fine — the submodule is used
 ```
 
-> **Why this matters:** The CMake presets reference `$env{VCPKG_ROOT}` to
-> locate the vcpkg toolchain file. If it is unset, CMake will not find any
-> third-party libraries and the configure step fails with errors like
+> **Why this matters:** If the vcpkg submodule is not initialised *and*
+> `VCPKG_ROOT` is unset, CMake cannot locate any third-party library and the
+> configure step fails with errors like
 > `Could not find a package configuration file provided by "fmt"`.
 
 ---
@@ -145,19 +151,21 @@ echo $env:VCPKG_ROOT
 Open a terminal (**Git Bash**, **PowerShell**, or **Developer Command Prompt**):
 
 ```bash
-git clone https://github.com/3MFConsortium/gladius.git
+git clone --recurse-submodules https://github.com/3MFConsortium/gladius.git
 cd gladius
 
-# Initialize the two vendored header-only libraries:
+# ...or, if you cloned without --recurse-submodules:
 git submodule update --init --recursive
 ```
 
 > **What the submodules provide:**
+> - `vcpkg` — the pinned package manager used by the build
 > - `gladius/components/IconFontCppHeaders` — Font Awesome icon constants for the UI
 > - `gladius/components/psimpl` — polyline simplification
 >
 > If you forget this step you will see build errors like
-> `fatal error: IconsFontAwesome5.h: No such file or directory`.
+> `fatal error: IconsFontAwesome5.h: No such file or directory`, or a configure
+> error about the missing vcpkg toolchain file.
 
 ---
 
@@ -175,7 +183,7 @@ Install VS Code and the CMake Tools extension, then select the
 
 ### Option B: Developer Command Prompt
 
-Open the **"x64 Native Tools Command Prompt for VS 2022"** from the Start menu
+Open the **"x64 Native Tools Command Prompt for VS"** from the Start menu
 (this sets up MSVC compiler paths). Then:
 
 ```cmd
@@ -210,16 +218,26 @@ Key binaries:
 
 ## 6. Verify the build
 
-Run the fast unit tests (no GPU required for most):
+The `ctest --preset ...` presets in `CMakePresets.json` point at the Linux
+build trees, so on Windows run CTest directly from the build directory:
 
 ```cmd
-cd gladius\gladius
-ctest --preset ReleaseWithDebug --output-on-failure
+cd gladius\gladius\out\build\x64-release-debug
+ctest -L unit --output-on-failure
 ```
 
-> Note: Windows does not have the `ReleaseWithDebug-noOpenCL` CTest preset
-> listed in `CMakePresets.json`. To skip OpenCL tests, configure with
-> `-DENABLE_OPENCL_TESTS=OFF` added to the CMake configure step.
+CTest labels come from `gtest_discover_tests`, so you can select a subset:
+
+| Command | What it runs |
+|---|---|
+| `ctest -L unit --output-on-failure` | Fast unit tests (no GPU required) |
+| `ctest -L integration --output-on-failure` | Integration tests (set `GLADIUS_RUN_GPU_TESTS=1` to include GPU paths) |
+| `ctest -L api --output-on-failure` | API tests (MCP, external interfaces) |
+| `ctest --output-on-failure` | Everything |
+
+> Note: Windows has no `ReleaseWithDebug-noOpenCL` CTest preset. Use the
+> `x64-release-debug-noOpenCL` *configure* preset instead, which sets
+> `ENABLE_OPENCL_TESTS=OFF`.
 
 ---
 
@@ -242,8 +260,9 @@ Open VS Code in the repository root, then install:
 ### Select the kit and preset
 
 1. Open the Command Palette (`Ctrl+Shift+P`)
-2. Run **CMake: Select a Kit** → choose **Visual Studio Community 2022 Release - amd64**
-   (or the Build Tools equivalent)
+2. Run **CMake: Select a Kit** → choose a **Visual Studio** kit with the
+   **MSVC v143** toolset (for example "Visual Studio Build Tools 2022 (Release) - amd64",
+   or the v143 kit offered by a newer Visual Studio)
 3. Run **CMake: Select Configure Preset** → choose `x64-release-debug`
 4. Run **CMake: Configure**
 
@@ -267,7 +286,7 @@ Command Palette.
 
 If you prefer the full Visual Studio IDE:
 
-1. Open Visual Studio 2022
+1. Open Visual Studio
 2. Choose **Open a local folder** and select the `gladius/gladius` folder
 3. Visual Studio detects `CMakePresets.json` automatically
 4. In the configuration dropdown at the top, select **x64-release-debug**
@@ -280,19 +299,20 @@ download) and then build the project.
 
 ## 9. Troubleshooting
 
-### `VCPKG_ROOT` is not set
+### Third-party packages not found
 
 ```
 CMake Error: Could not find a package configuration file provided by "fmt"
 ```
 
-Check:
+The vcpkg submodule is almost certainly not initialised:
 
 ```powershell
-echo $env:VCPKG_ROOT
+git submodule update --init --recursive
+.\vcpkg\bootstrap-vcpkg.bat
 ```
 
-If empty:
+If you intentionally use a separate vcpkg checkout via `VCPKG_ROOT`:
 1. Make sure you set it as a **system** variable (not just user-level) and
    opened a **new** terminal after setting it.
 2. If using VS Code, restart VS Code entirely after setting the environment
@@ -304,13 +324,14 @@ If empty:
 error MSB8020: The build tools for v142 cannot be found.
 ```
 
-This means Visual Studio 2019 (v142) Build Tools are being used instead of
-2022 (v143). Fix:
+The custom triplet pins `VCPKG_PLATFORM_TOOLSET v143`, so the v143 toolset has
+to be installed. Fix:
 
-1. Open the Visual Studio Installer
-2. Ensure **Visual Studio 2022** (or Build Tools 2022) is installed with the
-   **Desktop development with C++** workload
-3. In VS Code, re-run **CMake: Select a Kit** and pick the 2022 option
+1. Open the Visual Studio Installer → **Modify**
+2. Ensure the **Desktop development with C++** workload is installed, and on
+   Visual Studio 2026 or newer also add the individual component
+   **MSVC v143 - VS 2022 C++ x64/x86 build tools**
+3. In VS Code, re-run **CMake: Select a Kit** and pick the v143 kit
 
 ### OpenCL not found at configure time
 
@@ -318,10 +339,9 @@ This means Visual Studio 2019 (v142) Build Tools are being used instead of
 Could not find OpenCL
 ```
 
-1. Ensure the Khronos OpenCL SDK (or CUDA toolkit) is installed
-2. Reopen your terminal/VS Code after installing so the new environment
-   variables (`OPENCL_ROOT`, `CUDA_PATH`, etc.) are visible
-3. As a fallback, pass the include/lib paths manually:
+OpenCL comes from the `opencl` port in `gladius/vcpkg.json`, so this usually
+means the vcpkg dependencies were not built yet (see the first item in this
+section). As a fallback, pass the include/lib paths manually:
    ```
    -DOpenCL_INCLUDE_DIR="C:\path\to\opencl\include"
    -DOpenCL_LIBRARY="C:\path\to\opencl\lib\OpenCL.lib"

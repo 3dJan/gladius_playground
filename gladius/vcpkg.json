@@ -3,12 +3,14 @@
     "fmt",
     "openmesh",
     "glad",
+    "glad",
     "glfw3",
     "eigen3",
     "tinyfiledialogs",
     "gtest",
     "nlopt",
     "platform-folders",
+      "opencl",
       "opencl",
     {
         "name": "dawn",
@@ -41,6 +43,9 @@
         [
           "docking-experimental",
           "glfw-binding",
+          "opengl2-binding",
+          "win32-binding",
+          "test-engine"
           "opengl2-binding",
           "test-engine"
         ]

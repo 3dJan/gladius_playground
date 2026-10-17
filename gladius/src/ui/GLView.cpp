@@ -788,6 +788,7 @@ namespace gladius
         try {
             ImGui::Render();
         } catch (std::exception const & ex) {
+            (void)ex; // ex is only consumed by the Emscripten diagnostics below
 #ifdef __EMSCRIPTEN__
             EM_ASM({
                 var msg = UTF8ToString($0);
