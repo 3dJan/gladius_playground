@@ -245,13 +245,30 @@ namespace gladius::ui
     ThumbnailLoadResult
     ThreemfThumbnailExtractor::extractThumbnailDataOnly(std::filesystem::path const & filePath)
     {
+        return extractThumbnailDataOnlyImpl(filePath, nullptr);
+    }
+
+    ThumbnailLoadResult ThreemfThumbnailExtractor::extractThumbnailDataOnlyFromBuffer(
+      std::vector<unsigned char> const & fileBuffer)
+    {
+        return extractThumbnailDataOnlyImpl({}, &fileBuffer);
+    }
+
+    ThumbnailLoadResult ThreemfThumbnailExtractor::extractThumbnailDataOnlyImpl(
+      std::filesystem::path const & filePath,
+      std::vector<unsigned char> const * fileBuffer)
+    {
         ThumbnailLoadResult result;
 
         try
         {
-            // Get file size (quick filesystem operation)
-            if (std::filesystem::exists(filePath))
+            if (fileBuffer != nullptr)
             {
+                result.fileSize = fileBuffer->size();
+            }
+            else if (std::filesystem::exists(filePath))
+            {
+                // Get file size (quick filesystem operation)
                 result.fileSize = std::filesystem::file_size(filePath);
             }
 
@@ -267,7 +284,14 @@ namespace gladius::ui
             auto reader = model->QueryReader("3mf");
 
             reader->SetStrictModeActive(false);
-            reader->ReadFromFile(filePath.string());
+            if (fileBuffer != nullptr)
+            {
+                reader->ReadFromBuffer(*fileBuffer);
+            }
+            else
+            {
+                reader->ReadFromFile(filePath.string());
+            }
 
             // Extract metadata from the model
             try

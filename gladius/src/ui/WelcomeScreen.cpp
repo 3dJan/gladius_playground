@@ -371,8 +371,7 @@ namespace gladius::ui
 #endif
 
 #ifdef __EMSCRIPTEN__
-                        // WebAssembly processes one small, pre-extracted PNG per frame instead of parsing
-                        // an entire 3MF archive on the browser thread.
+                        // WebAssembly processes one embedded example archive per frame.
                         m_asyncLoader = std::make_unique<AsyncThumbnailLoader>(
                             m_logger,
                             1,
@@ -414,34 +413,17 @@ namespace gladius::ui
             return result;
         }
 
-        auto const resourcePath = fmt::format("examples/{}.png", relativePath.generic_string());
+        auto const resourcePath = fmt::format("examples/{}", relativePath.generic_string());
         auto const resources = cmrc::gladius_resources::get_filesystem();
         if (!resources.is_file(resourcePath))
         {
-            result.errorMessage = "No embedded thumbnail for example";
+            result.errorMessage = "No embedded 3MF archive for example";
             return result;
         }
 
-        auto const thumbnail = resources.open(resourcePath);
-        std::vector<unsigned char> pngData(thumbnail.begin(), thumbnail.end());
-        result.decodedPixels = ThreemfThumbnailExtractor::decodePngToPixels(
-          pngData, result.width, result.height);
-        result.success = !result.decodedPixels.empty();
-        if (!result.success)
-        {
-            result.errorMessage = "Failed to decode embedded example thumbnail";
-        }
-
-        try
-        {
-            result.fileSize = std::filesystem::file_size(filePath);
-        }
-        catch (std::filesystem::filesystem_error const &)
-        {
-            // Thumbnail display does not depend on optional tooltip metadata.
-        }
-
-        return result;
+        auto const archive = resources.open(resourcePath);
+        std::vector<unsigned char> archiveData(archive.begin(), archive.end());
+        return ThreemfThumbnailExtractor::extractThumbnailDataOnlyFromBuffer(archiveData);
     }
 #endif
 

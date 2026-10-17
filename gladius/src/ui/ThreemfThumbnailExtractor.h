@@ -218,6 +218,15 @@ namespace gladius::ui
          */
         [[nodiscard]] static ThumbnailLoadResult extractThumbnailDataOnly(std::filesystem::path const & filePath);
 
+                /**
+                 * @brief Extract thumbnail data from an in-memory 3MF archive
+                 *
+                 * @param fileBuffer Raw 3MF archive bytes
+                 * @return ThumbnailLoadResult Result containing decoded pixels or error
+                 */
+                [[nodiscard]] static ThumbnailLoadResult extractThumbnailDataOnlyFromBuffer(
+                    std::vector<unsigned char> const & fileBuffer);
+
         /**
          * @brief Decode PNG data to RGBA pixels (thread-safe, static)
          *
@@ -241,6 +250,10 @@ namespace gladius::ui
         void createTextureFromPixels(ThumbnailInfo & info);
 
       private:
+                [[nodiscard]] static ThumbnailLoadResult extractThumbnailDataOnlyImpl(
+                    std::filesystem::path const & filePath,
+                    std::vector<unsigned char> const * fileBuffer);
+
         events::SharedLogger m_logger; ///< Logger for error reporting
     #if defined(GLADIUS_UI_BACKEND_WEBGPU)
         std::shared_ptr<webgpu::WebGPUComputeContext> m_webgpuContext;

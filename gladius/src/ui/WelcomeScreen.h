@@ -288,7 +288,7 @@ namespace gladius::ui
         bool trySetPendingFileOpen(std::filesystem::path const & path);
 
 #ifdef __EMSCRIPTEN__
-        /// Loads the pre-extracted CMRC thumbnail for a bundled example.
+  /// Extracts the thumbnail from a bundled 3MF archive in CMRC resources.
         ThumbnailLoadResult loadEmbeddedExampleThumbnail(
           std::filesystem::path const & filePath) const;
 #endif
