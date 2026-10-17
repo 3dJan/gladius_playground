@@ -1,6 +1,7 @@
 #include "Document.h"
 #include "EventLogger.h"
 #include "compute/ApplicationComputeRuntime.h"
+#include "ui/ThreemfThumbnailExtractor.h"
 
 #include <gtest/gtest.h>
 #include <lodepng.h>
@@ -8,11 +9,35 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <vector>
 
 namespace gladius::tests
 {
+        TEST(ThreemfThumbnailExtractor, BufferInput_ExtractsPackageThumbnail)
+        {
+                auto const filePath = std::filesystem::path("testdata") / "SimpleGyroid.3mf";
+                std::ifstream archiveFile(filePath, std::ios::binary);
+                ASSERT_TRUE(archiveFile) << filePath;
+
+                std::vector<unsigned char> archiveData(
+                    (std::istreambuf_iterator<char>(archiveFile)), std::istreambuf_iterator<char>());
+                ASSERT_FALSE(archiveData.empty());
+
+                auto const fileResult = ui::ThreemfThumbnailExtractor::extractThumbnailDataOnly(filePath);
+                auto const bufferResult =
+                    ui::ThreemfThumbnailExtractor::extractThumbnailDataOnlyFromBuffer(archiveData);
+
+                ASSERT_TRUE(fileResult.success) << fileResult.errorMessage;
+                ASSERT_TRUE(bufferResult.success) << bufferResult.errorMessage;
+                EXPECT_EQ(bufferResult.fileSize, archiveData.size());
+                EXPECT_EQ(bufferResult.width, fileResult.width);
+                EXPECT_EQ(bufferResult.height, fileResult.height);
+                EXPECT_EQ(bufferResult.decodedPixels, fileResult.decodedPixels);
+        }
+
 #if defined(GLADIUS_ENABLE_WEBGPU)
     TEST(WebGPUThumbnail, CorelessDocument_CreateThumbnailPng_ReturnsDecodableImage)
     {
