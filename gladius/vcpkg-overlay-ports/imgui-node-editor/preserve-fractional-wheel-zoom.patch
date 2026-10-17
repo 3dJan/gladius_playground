@@ -1,0 +1,47 @@
+diff --git a/imgui_node_editor_internal.h b/imgui_node_editor_internal.h
+--- a/imgui_node_editor_internal.h
++++ b/imgui_node_editor_internal.h
+@@ -832,6 +832,7 @@ struct NavigateAction final: EditorAction
+     bool            m_IsActive;
+     float           m_Zoom;
++    float           m_ZoomWheelRemainder;
+     ImRect          m_VisibleRect;
+     ImVec2          m_Scroll;
+     ImVec2          m_ScrollStart;
+     ImVec2          m_ScrollDelta;
+diff --git a/imgui_node_editor.cpp b/imgui_node_editor.cpp
+--- a/imgui_node_editor.cpp
++++ b/imgui_node_editor.cpp
+@@ -3299,4 +3299,5 @@ ed::NavigateAction::NavigateAction(EditorContext* editor, ImGuiEx::Canvas& canvas):
+     m_IsActive(false),
+     m_Zoom(1),
++    m_ZoomWheelRemainder(0.0f),
+     m_VisibleRect(),
+     m_Scroll(0, 0),
+@@ -3441,13 +3441,24 @@ bool ed::NavigateAction::HandleZoom(const Control& control)
+     auto& io = ImGui::GetIO();
+ 
+-    if (!io.MouseWheel || (!allowOffscreen && !Editor->IsHoveredWithoutOverlapp()))// && !ImGui::IsAnyItemActive())
++    if (!allowOffscreen && !Editor->IsHoveredWithoutOverlapp())
++    {
++        m_ZoomWheelRemainder = 0.0f;
++        return false;
++    }
++    if (io.MouseWheel == 0.0f)
+         return false;
+ 
++    // Preserve browser/trackpad deltas until they add up to a zoom step.
++    m_ZoomWheelRemainder += io.MouseWheel;
++    auto steps = static_cast<int>(m_ZoomWheelRemainder);
++    if (steps == 0)
++        return false;
++    m_ZoomWheelRemainder -= static_cast<float>(steps);
++
+     auto savedScroll = m_Scroll;
+     auto savedZoom   = m_Zoom;
+ 
+     m_Animation.Finish();
+ 
+     auto mousePos = io.MousePos;
+-    auto steps    = (int)io.MouseWheel;
+     auto newZoom  = MatchZoom(steps, m_ZoomLevels[steps < 0 ? 0 : m_ZoomLevelCount - 1]);

@@ -9,6 +9,7 @@ vcpkg_from_github(
     PATCHES
         fix-vec2-math-operators.patch
         fix-imgui-1919-key-api.patch
+        preserve-fractional-wheel-zoom.patch
 )
 
 file(COPY "${CMAKE_CURRENT_LIST_DIR}/CMakeLists.txt" DESTINATION "${SOURCE_PATH}")
