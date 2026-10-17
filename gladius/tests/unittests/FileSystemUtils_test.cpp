@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
+#include <string>
 
 namespace gladius::tests
 {
@@ -139,6 +141,43 @@ namespace gladius::tests
 
         EXPECT_TRUE(std::filesystem::exists(
           m_user / "deep" / "nested" / "folder" / "item.3mf"));
+    }
+
+    class SyncEmbeddedExamples_Test : public ::testing::Test
+    {
+      protected:
+        void SetUp() override
+        {
+            m_target = std::filesystem::temp_directory_path() /
+                       "gladius_sync_embedded_examples_test";
+            std::filesystem::remove_all(m_target);
+        }
+
+        void TearDown() override
+        {
+            std::filesystem::remove_all(m_target);
+        }
+
+        std::filesystem::path m_target;
+    };
+
+    TEST_F(SyncEmbeddedExamples_Test, Sync_CopiesEmbeddedTemplateAndIsIdempotent)
+    {
+        EXPECT_GT(syncEmbeddedExamples(m_target), 0u);
+        EXPECT_TRUE(std::filesystem::exists(m_target / "template.3mf"));
+        EXPECT_EQ(syncEmbeddedExamples(m_target), 0u);
+    }
+
+    TEST_F(SyncEmbeddedExamples_Test, Sync_DoesNotOverwriteExistingTemplate)
+    {
+        createTestFile(m_target / "template.3mf", "user-template");
+
+        EXPECT_EQ(syncEmbeddedExamples(m_target), 0u);
+
+        std::ifstream input(m_target / "template.3mf");
+        std::string content((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+        EXPECT_EQ(content, "user-template");
     }
 
     // ────────────────────────────────────────────────────────────────

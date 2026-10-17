@@ -68,12 +68,27 @@ namespace gladius_tests
         // act
         io::ImageStack const imgStack = extractor.loadImageStack({"volume/1/layer_001.png"});
         auto firstImage = imgStack.front();
-        auto pngInfo = extractor.getPNGInfo();
-
-        constexpr auto numChannels = 4; // lodepng always decodes to RGBA
-        auto numPixels = firstImage.getWidth() * firstImage.getHeight();
-        auto numBytes = numPixels * numChannels * pngInfo.color.bitdepth / 8;
+        auto const numPixels = firstImage.getWidth() * firstImage.getHeight();
+        std::size_t numChannels = 0u;
+        switch (firstImage.getFormat())
+        {
+        case io::PixelFormat::GRAYSCALE_8BIT:
+            numChannels = 1u;
+            break;
+        case io::PixelFormat::GRAYSCALE_ALPHA_8BIT:
+            numChannels = 2u;
+            break;
+        case io::PixelFormat::RGB_8BIT:
+            numChannels = 3u;
+            break;
+        case io::PixelFormat::RGBA_8BIT:
+            numChannels = 4u;
+            break;
+        default:
+            FAIL() << "ImageExtractor should decode image layers to 8-bit pixels";
+        }
         // assert
-        EXPECT_EQ(firstImage.getData().size(), numBytes);
+        EXPECT_EQ(firstImage.getBitDepth(), 8u);
+        EXPECT_EQ(firstImage.getData().size(), numPixels * numChannels);
     }
 } // namespace gladius_tests

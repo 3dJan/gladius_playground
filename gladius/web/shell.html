@@ -125,6 +125,17 @@
       var browserImportNames = Object.create(null);
       var browserRuntimeInitialized = false;
       var pendingBrowserStages = [];
+      var browserFilePicker = document.createElement('input');
+      browserFilePicker.type = 'file';
+      browserFilePicker.accept = '.3mf';
+      browserFilePicker.tabIndex = -1;
+      browserFilePicker.setAttribute('aria-hidden', 'true');
+      browserFilePicker.style.position = 'fixed';
+      browserFilePicker.style.left = '-10000px';
+      browserFilePicker.style.width = '1px';
+      browserFilePicker.style.height = '1px';
+      browserFilePicker.style.opacity = '0';
+      document.body.appendChild(browserFilePicker);
 
       function getEmscriptenFileSystem() {
         if (typeof FS !== 'undefined') return FS;
@@ -219,12 +230,27 @@
 
       function stageBrowserFile(file) {
         var displayName = String(file.name || 'dropped-model.3mf');
+        if (!/\.3mf$/i.test(displayName)) {
+          window.gladiusSetBrowserFileStatus('Only .3mf files can be opened here.', true);
+          return;
+        }
         file.arrayBuffer().then(function (buffer) {
           stageBrowserBytes(buffer, displayName, 0);
         }).catch(function () {
           window.gladiusSetBrowserFileStatus('Could not read ' + displayName + '.', true);
         });
       }
+
+      browserFilePicker.addEventListener('change', function () {
+        var file = browserFilePicker.files && browserFilePicker.files[0];
+        browserFilePicker.value = '';
+        if (file) stageBrowserFile(file);
+      });
+
+      window.gladiusOpenBrowserFile = function () {
+        browserFilePicker.value = '';
+        browserFilePicker.click();
+      };
 
       function getRemoteBrowserFilename(targetUrl) {
         var pathname = targetUrl.pathname || '';

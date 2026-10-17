@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -29,6 +30,11 @@ namespace gladius::webgpu::tests
     namespace
     {
         constexpr ResourceId IMAGE_RESOURCE_ID = 2u;
+
+        float wordAsFloat(std::uint32_t const word)
+        {
+            return std::bit_cast<float>(word);
+        }
 
         io::ImageStack createTestImageStack()
         {
@@ -87,7 +93,7 @@ namespace gladius::webgpu::tests
         }
 
         std::vector<float> evaluateImageExpression(std::vector<std::array<float, 3>> positions,
-                                                   std::vector<float> const & payload,
+                                                   std::vector<std::uint32_t> const & payload,
                                                    std::string const & expression)
         {
             WebGPUSdfEvaluator evaluator;
@@ -100,7 +106,7 @@ namespace gladius::webgpu::tests
               "fn evaluateModel(position: vec3<f32>) -> vec4<f32> {\n"
                             "    return vec4<f32>(0.0f, 0.0f, 0.0f, " + expression + ");\n"
               "}\n";
-            std::vector<std::vector<float>> payloadTable(IMAGE_RESOURCE_ID + 1u);
+            std::vector<std::vector<std::uint32_t>> payloadTable(IMAGE_RESOURCE_ID + 1u);
             payloadTable[IMAGE_RESOURCE_ID] = payload;
                         compute::SdfEvaluationRequest request;
                         request.positions = std::move(positions);
@@ -114,7 +120,7 @@ namespace gladius::webgpu::tests
         }
 
                 std::vector<float> evaluateImageChannel(std::vector<std::array<float, 3>> positions,
-                                                                                                std::vector<float> const & payload,
+                                                                                                std::vector<std::uint32_t> const & payload,
                                                                                                 std::string_view const channel,
                                                                                                 std::uint32_t const filter,
                                                                                                 std::uint32_t const tileStyle = 2u)
@@ -130,14 +136,15 @@ namespace gladius::webgpu::tests
     {
         auto const payload = io::serializeImageStackPayload(createTestImageStack());
 
-        ASSERT_EQ(payload.size(), io::IMAGE_PAYLOAD_HEADER_FLOATS + 2u * 2u * 2u * 4u);
-        EXPECT_FLOAT_EQ(payload[0], 2.0f);
-        EXPECT_FLOAT_EQ(payload[1], 2.0f);
-        EXPECT_FLOAT_EQ(payload[2], 2.0f);
-        EXPECT_FLOAT_EQ(payload[4], 40.0f / 255.0f);
-        EXPECT_FLOAT_EQ(payload[8], 60.0f / 255.0f);
-        EXPECT_FLOAT_EQ(payload[12], 0.0f);
-        EXPECT_FLOAT_EQ(payload[20], 120.0f / 255.0f);
+        ASSERT_EQ(payload.size(), io::IMAGE_PAYLOAD_HEADER_WORDS + 2u * 2u * 2u * 4u);
+        EXPECT_EQ(payload[0], 2u);
+        EXPECT_EQ(payload[1], 2u);
+        EXPECT_EQ(payload[2], 2u);
+        EXPECT_EQ(payload[3], io::IMAGE_PAYLOAD_ENCODING_RGBA32F);
+        EXPECT_FLOAT_EQ(wordAsFloat(payload[4]), 40.0f / 255.0f);
+        EXPECT_FLOAT_EQ(wordAsFloat(payload[8]), 60.0f / 255.0f);
+        EXPECT_FLOAT_EQ(wordAsFloat(payload[12]), 0.0f);
+        EXPECT_FLOAT_EQ(wordAsFloat(payload[20]), 120.0f / 255.0f);
     }
 
     TEST(ImagePayloadSerializer, SerializeOneBitGrayscale_MatchesLegacyChannelConversion)
@@ -150,11 +157,56 @@ namespace gladius::webgpu::tests
 
         auto const payload = io::serializeImageStackPayload(stack);
 
-        ASSERT_EQ(payload.size(), io::IMAGE_PAYLOAD_HEADER_FLOATS + 4u);
-        EXPECT_FLOAT_EQ(payload[4], 128.0f / 255.0f);
-        EXPECT_FLOAT_EQ(payload[5], 1.0f);
-        EXPECT_FLOAT_EQ(payload[6], 1.0f);
-        EXPECT_FLOAT_EQ(payload[7], 1.0f);
+        ASSERT_EQ(payload.size(), io::IMAGE_PAYLOAD_HEADER_WORDS + 4u);
+        EXPECT_EQ(payload[3], io::IMAGE_PAYLOAD_ENCODING_RGBA32F);
+        EXPECT_FLOAT_EQ(wordAsFloat(payload[4]), 128.0f / 255.0f);
+        EXPECT_FLOAT_EQ(wordAsFloat(payload[5]), 1.0f);
+        EXPECT_FLOAT_EQ(wordAsFloat(payload[6]), 1.0f);
+        EXPECT_FLOAT_EQ(wordAsFloat(payload[7]), 1.0f);
+    }
+
+    TEST(ImagePayloadSerializer, SerializeOpaqueGrayscaleRgba_PacksFourSamplesPerWord)
+    {
+        io::ImageStack stack(IMAGE_RESOURCE_ID);
+        for (unsigned char layer = 0u; layer < 2u; ++layer)
+        {
+            io::ImageData data;
+            for (unsigned char pixel = 0u; pixel < 4u; ++pixel)
+            {
+                auto const value = static_cast<unsigned char>(layer * 4u + pixel + 1u);
+                data.push_back(value);
+                data.push_back(value);
+                data.push_back(value);
+                data.push_back(255u);
+            }
+            io::Image image(data, 2u, 2u);
+            image.setFormat(io::PixelFormat::RGBA_8BIT);
+            stack.push_back(image);
+        }
+
+        auto const payload = io::serializeImageStackPayload(stack);
+
+        ASSERT_EQ(payload.size(), io::IMAGE_PAYLOAD_HEADER_WORDS + 2u);
+        EXPECT_EQ(payload[0], 2u);
+        EXPECT_EQ(payload[1], 2u);
+        EXPECT_EQ(payload[2], 2u);
+        EXPECT_EQ(payload[3], io::IMAGE_PAYLOAD_ENCODING_PACKED_GRAYSCALE8);
+        EXPECT_EQ(payload[4], 0x02010403u);
+        EXPECT_EQ(payload[5], 0x06050807u);
+    }
+
+    TEST(ImagePayloadSerializer, SerializeGrayscale8Bit_PacksSamplesAndPadsFinalWord)
+    {
+        io::Image image(io::ImageData{10u, 20u, 30u}, 3u, 1u);
+        image.setFormat(io::PixelFormat::GRAYSCALE_8BIT);
+        io::ImageStack stack(IMAGE_RESOURCE_ID);
+        stack.push_back(image);
+
+        auto const payload = io::serializeImageStackPayload(stack);
+
+        ASSERT_EQ(payload.size(), io::IMAGE_PAYLOAD_HEADER_WORDS + 1u);
+        EXPECT_EQ(payload[3], io::IMAGE_PAYLOAD_ENCODING_PACKED_GRAYSCALE8);
+        EXPECT_EQ(payload[4], 0x001E140Au);
     }
 
     TEST(ToWgslVisitor, VisitImageSampler_EmitsImageHookAndOutputs)
@@ -232,6 +284,38 @@ namespace gladius::webgpu::tests
         EXPECT_NEAR(linear[0], 70.0f / 255.0f, 1.0e-6f);
     }
 
+    TEST(ImageStackWebGPU, PackedGrayscaleNearestAndLinearSampling_MatchKnownValues)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        io::Image image(io::ImageData{0u, 64u, 128u, 255u}, 2u, 2u);
+        image.setFormat(io::PixelFormat::GRAYSCALE_8BIT);
+        io::ImageStack stack(IMAGE_RESOURCE_ID);
+        stack.push_back(image);
+        auto const payload = io::serializeImageStackPayload(stack);
+        ASSERT_EQ(payload[3], io::IMAGE_PAYLOAD_ENCODING_PACKED_GRAYSCALE8);
+
+        auto const nearest = evaluateImageChannel({{0.0f, 0.0f, 0.0f},
+                                                   {0.75f, 0.75f, 0.0f}},
+                                                  payload,
+                                                  "x",
+                                                  0u);
+        if (nearest.empty())
+        {
+            GTEST_SKIP() << "WebGPU device unavailable";
+        }
+        ASSERT_EQ(nearest.size(), 2u);
+        EXPECT_NEAR(nearest[0], 128.0f / 255.0f, 1.0e-6f);
+        EXPECT_NEAR(nearest[1], 64.0f / 255.0f, 1.0e-6f);
+
+        auto const linear = evaluateImageChannel({{0.25f, 0.25f, 0.0f}}, payload, "x", 1u);
+        ASSERT_EQ(linear.size(), 1u);
+        EXPECT_NEAR(linear[0], 111.75f / 255.0f, 1.0e-6f);
+    }
+
     TEST(ImageStackWebGPU, TileStyles_RepeatMirrorAndClampMatchOpenClBehavior)
     {
         if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
@@ -278,16 +362,14 @@ namespace gladius::webgpu::tests
         EXPECT_FALSE(snapshot.imageResources.empty());
         EXPECT_NE(snapshot.analyticEvaluatorWgsl.find("gladiusSampleImage("), std::string::npos);
 
-                auto const payloadIterator = std::find_if(snapshot.imageResources.begin(),
-                                                                                                    snapshot.imageResources.end(),
-                                                                                                    [](compute::MeshResourcePayload const & payload)
-                                                                                                    { return payload.isValid(); });
-                ASSERT_NE(payloadIterator, snapshot.imageResources.end());
-                auto const [payloadMin, payloadMax] = std::minmax_element(
-                    payloadIterator->data.begin() + io::IMAGE_PAYLOAD_HEADER_FLOATS,
-                    payloadIterator->data.end());
-                EXPECT_LT(*payloadMin, 0.5f);
-                EXPECT_GT(*payloadMax, 0.5f);
+        auto const payloadIterator = std::find_if(snapshot.imageResources.begin(),
+                                                  snapshot.imageResources.end(),
+                                                  [](compute::ImageResourcePayload const & payload)
+                                                  { return payload.isValid(); });
+        ASSERT_NE(payloadIterator, snapshot.imageResources.end());
+        ASSERT_GT(payloadIterator->data.size(), io::IMAGE_PAYLOAD_HEADER_WORDS);
+        EXPECT_TRUE(payloadIterator->data[3] == io::IMAGE_PAYLOAD_ENCODING_RGBA32F ||
+                    payloadIterator->data[3] == io::IMAGE_PAYLOAD_ENCODING_PACKED_GRAYSCALE8);
 
                 std::vector<std::array<float, 3>> probePositions;
                 for (float z = 45.0f; z <= 55.0f; z += 1.0f)
@@ -300,7 +382,7 @@ namespace gladius::webgpu::tests
                                 }
                         }
                 }
-                std::vector<std::vector<float>> imagePayloadTable;
+            std::vector<std::vector<std::uint32_t>> imagePayloadTable;
                 imagePayloadTable.reserve(snapshot.imageResources.size());
                 for (auto const & image : snapshot.imageResources)
                 {
