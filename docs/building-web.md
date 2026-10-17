@@ -6,7 +6,8 @@ native `linux-webgpu-releaseWithDebug` targets are unchanged.
 ## Prerequisites
 
 Install and activate the Emscripten SDK, then ensure `EMSDK` points to the SDK
-root. The preset uses the SDK's CMake toolchain directly.
+root. The preset uses the SDK's CMake toolchain directly. Python 3 is also
+required at configure time to extract preview PNGs from the bundled 3MF files.
 
 ## Configure and build
 
@@ -25,18 +26,26 @@ and a compatible adapter.
 The browser build uses the real GLFW/ImGui application and WebGPU backend.
 WebGPU adapter and device acquisition is asynchronous in the browser, and the
 application defers compute-dependent UI setup until the device is ready.
-Browser file pickers and persistent settings still need browser-specific
-adapters; native file dialogs, desktop persistence, MCP, OpenCL, OpenVDB/NanoVDB,
-and desktop packaging remain excluded. A local `.3mf` can be opened by dragging
-it onto the Gladius canvas. The browser stages the file in its session-local
-virtual filesystem, and `Download 3MF` downloads the edited Gladius project,
-including its graph and resources, as a new `.3mf` file. Imported files keep
-their original filename when possible; new documents use `gladius-model.3mf`.
-The virtual filesystem is not persistent across page reloads, and browser
-Save As does not provide a custom filename picker yet.
+The welcome screen lists the shipped example projects and offers a New Project
+action that loads the embedded template. Shipped 3MF examples and the template
+are packaged through CMRC and copied into the browser's virtual filesystem for
+the existing path-based document loader. Their embedded preview PNGs are
+packaged separately and decoded incrementally for the welcome-screen gallery,
+without parsing full 3MF files on the browser thread. The web welcome screen
+omits recent files and backups.
 
-Native-only features remain outside this target: OpenCL, OpenVDB/NanoVDB, MCP,
-desktop file dialogs, native filesystem persistence, and desktop packaging.
+Use **Open Existing** or **File → Open** to choose a local `.3mf` with the
+browser file picker. Dragging a local `.3mf` onto the Gladius canvas and opening
+a shared URL (described below) remain available. Imported files are staged in
+the session-local virtual filesystem. `Download 3MF` downloads the edited
+Gladius project, including its graph and resources, as a new `.3mf` file.
+Imported files keep their original filename when possible; new documents use
+`gladius-model.3mf`.
+
+Native file dialogs, desktop persistence, MCP, OpenCL, OpenVDB/NanoVDB, and
+desktop packaging remain excluded. The virtual filesystem is not persistent
+across page reloads, and browser Save As does not provide a custom filename
+picker yet.
 
 ## Opening a shared 3MF URL
 
