@@ -9,7 +9,7 @@ description: >-
   scaffold and metadata.
 metadata:
   author: gladius
-  version: "4.1"
+  version: "4.2"
   requires: gladius-mcp-server
 ---
 
@@ -211,6 +211,30 @@ create_function_from_snippet(
 
 Then wire `main` to call it using `set_function_snippet` or `set_program_snippet`.
 
+#### Output naming and verification
+
+Choose the output name by meaning, not just its data type:
+
+| Function role | Output |
+|---------------|--------|
+| Position/domain transformation (twist, bend, rotation, repetition) | `vec3 result` |
+| Signed-distance shape, primitive, or CSG operation | `float shape` |
+| Color function | `vec3 color` |
+
+`output_type="vec3"` specifies the type but does **not** guarantee the output
+identifier: the single-function creation tool can still default to `shape`.
+Inspect `get_function_snippet().outputs` and the saved entry's
+`get_library_entry_info().functions` before declaring the item complete.
+A transformation must expose `result`, not `shape`, `pos`, or `Vector`.
+
+When renaming an existing output, update both its identifier and display name,
+the corresponding outputs on all calling FunctionCall nodes, and their consumer
+references. Keep scalar SDF outputs such as `box.shape` and `main.shape` unchanged;
+the levelset still references main's `shape` channel. Stage the change, preserve
+metadata and thumbnail, then reopen, validate, render, and test a fresh import.
+For native package edits, use lib3mf to write and reopen the final 3MF; ZIP
+integrity alone does not establish that Gladius can load the package.
+
 #### Simple math: `create_function_from_expression`
 
 For single-expression SDFs (no `length()`, `vec3()`, or multi-line):
@@ -269,9 +293,9 @@ evaluate_function(
   "function_name": "twist",
   "output_type": "vec3",
   "results": [
-    {"inputs": {"pos": [0, 0, 0]}, "outputs": {"Vector": [0, 0, 0]}},
-    {"inputs": {"pos": [10, 0, 0]}, "outputs": {"Vector": [10, 0, 0]}},
-    {"inputs": {"pos": [0, 0, 20]}, "outputs": {"Vector": [0, 0, 20]}}
+    {"inputs": {"pos": [0, 0, 0]}, "outputs": {"result": [0, 0, 0]}},
+    {"inputs": {"pos": [10, 0, 0]}, "outputs": {"result": [10, 0, 0]}},
+    {"inputs": {"pos": [0, 0, 20]}, "outputs": {"result": [0, 0, 20]}}
   ]
 }
 ```
@@ -589,8 +613,9 @@ instead of using raw `min`/`max`.
   not `a`, `b`, `c`.
 - **main should demonstrate the function** with reasonable default parameter
   values that produce a visible shape.
-- **Position modifiers return `vec3`**, SDF shapes return `float`. Match the
-  return type to the function's role.
+- **Position modifiers expose `vec3 result`**, SDF shapes expose `float shape`,
+  and color functions expose `vec3 color`. Verify the saved output name as well
+  as its type; see Output naming and verification above.
 - **Cross-function calls use `name_ID` syntax** — e.g., `box_4(...)` calls the
   function named "box" at resource ID 4.
 - **Template function IDs you can reuse:** ID 1 (honeycomb by default), and
