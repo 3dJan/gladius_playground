@@ -67,3 +67,5 @@ obj/
 *.exe
 gladius/webgpu_dumps/frame_compute_composed.wgsl
 gladius/webgpu_dumps/slice_compute_composed.wgsl
+.serena/
+gladius/.serena/
