@@ -4,7 +4,6 @@
 #include "mcp/MCPServer.h"
 #endif
 #include "Document.h"
-#include "compute/ComputeBackendSettings.h"
 #include "ui/MainWindow.h"
 
 #include <filesystem>
@@ -50,11 +49,8 @@ namespace gladius
 #endif
     {
         m_headlessMode = headlessMode;
-        if (backendOverride.has_value())
-        {
-            compute::setConfiguredComputeBackend(m_configManager, *backendOverride);
-        }
         m_mainWindow.setConfigManager(m_configManager);
+        m_mainWindow.setComputeBackendOverride(backendOverride);
         wireMeshSdfSettings();
         if (!m_headlessMode)
         {

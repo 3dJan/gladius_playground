@@ -50,4 +50,23 @@ namespace gladius::compute
 
         return false;
     }
+
+    std::vector<ComputeBackendKind> getComputeBackendAttemptOrder(
+      ComputeBackendKind const preferredBackend)
+    {
+        auto const alternateBackend = preferredBackend == ComputeBackendKind::OpenCL
+                                        ? ComputeBackendKind::WebGPU
+                                        : ComputeBackendKind::OpenCL;
+
+        std::vector<ComputeBackendKind> backends;
+        if (isComputeBackendBuilt(preferredBackend))
+        {
+            backends.push_back(preferredBackend);
+        }
+        if (isComputeBackendBuilt(alternateBackend))
+        {
+            backends.push_back(alternateBackend);
+        }
+        return backends;
+    }
 }

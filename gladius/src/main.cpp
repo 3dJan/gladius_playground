@@ -22,7 +22,7 @@ void printUsage()
     std::cout << "  --mcp-stdio          Enable MCP server with stdio transport (for VS Code)\n";
 #endif
     std::cout << "  --headless          Run without starting the UI (headless mode)\n";
-    std::cout << "  --compute-backend=<opencl|webgpu>  Select the rendering backend\n";
+    std::cout << "  --compute-backend=<opencl|webgpu>  Prefer backend; try alternate on init failure\n";
     std::cout
       << "  --debug-opencl      Enable OpenCL debug output (kernel validation, buffer checks)\n";
     std::cout << "  --help              Show this help message\n";

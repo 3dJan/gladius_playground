@@ -69,6 +69,38 @@ namespace gladius::compute::tests
 #endif
     }
 
+    TEST(ComputeBackend, GetComputeBackendAttemptOrder_WithEitherPreference_TriesBuiltBackendsOnce)
+    {
+        auto const openCLBuilt = isComputeBackendBuilt(ComputeBackendKind::OpenCL);
+        auto const webGPUBuilt = isComputeBackendBuilt(ComputeBackendKind::WebGPU);
+
+        for (auto const preferredBackend : {ComputeBackendKind::OpenCL, ComputeBackendKind::WebGPU})
+        {
+            auto const attemptOrder = getComputeBackendAttemptOrder(preferredBackend);
+
+            EXPECT_EQ(attemptOrder.size(), static_cast<std::size_t>(openCLBuilt + webGPUBuilt));
+            if (attemptOrder.empty())
+            {
+                EXPECT_FALSE(openCLBuilt);
+                EXPECT_FALSE(webGPUBuilt);
+                continue;
+            }
+
+            auto const expectedFirst = isComputeBackendBuilt(preferredBackend)
+                                         ? preferredBackend
+                                         : (preferredBackend == ComputeBackendKind::OpenCL
+                                              ? ComputeBackendKind::WebGPU
+                                              : ComputeBackendKind::OpenCL);
+            EXPECT_EQ(attemptOrder.front(), expectedFirst);
+            EXPECT_TRUE(isComputeBackendBuilt(attemptOrder.front()));
+            if (attemptOrder.size() == 2u)
+            {
+                EXPECT_NE(attemptOrder[0], attemptOrder[1]);
+                EXPECT_TRUE(isComputeBackendBuilt(attemptOrder[1]));
+            }
+        }
+    }
+
     TEST(ComputeBackendSettings, UnavailableConfiguredBackend_FallsBackToBuiltBackend)
     {
         ConfigManager configManager;

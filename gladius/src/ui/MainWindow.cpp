@@ -670,105 +670,120 @@ namespace gladius::ui
             return; // Already started or completed
         }
 
-        auto configuredBackend = getExplicitlyConfiguredBackend();
-        if (configuredBackend.has_value() && m_configManager != nullptr &&
-            !compute::isComputeBackendBuilt(*configuredBackend))
-        {
-            auto const fallbackBackend = compute::getConfiguredComputeBackend(*m_configManager);
-            if (fallbackBackend != *configuredBackend)
-            {
-                if (m_logger)
-                {
-                    m_logger->addEvent(
-                      {fmt::format("Configured compute backend '{}' is unavailable in this build; "
-                                   "falling back to '{}'",
-                                   compute::toString(*configuredBackend),
-                                   compute::toString(fallbackBackend)),
-                       events::Severity::Warning});
-                }
-                configuredBackend = fallbackBackend;
-            }
-        }
-
+        m_computeAvailable = false;
+        auto const configuredBackend = getExplicitlyConfiguredBackend();
     #if defined(GLADIUS_ENABLE_OPENCL)
-        m_computeBackendAtStartup =
-          configuredBackend.value_or(compute::ComputeBackendKind::OpenCL);
+        constexpr auto defaultBackend = compute::ComputeBackendKind::OpenCL;
     #else
-        m_computeBackendAtStartup = compute::ComputeBackendKind::WebGPU;
+        constexpr auto defaultBackend = compute::ComputeBackendKind::WebGPU;
     #endif
+        auto const preferredBackend = configuredBackend.value_or(
+          m_configManager != nullptr ? compute::getConfiguredComputeBackend(*m_configManager)
+                                     : defaultBackend);
+        m_computeBackendAttemptOrder = compute::getComputeBackendAttemptOrder(preferredBackend);
+        m_computeBackendAttemptIndex = 0;
+        m_computeBackendInitializationErrors.clear();
+        m_computeBackendAtStartup = m_computeBackendAttemptOrder.empty()
+                                      ? std::optional<compute::ComputeBackendKind>{preferredBackend}
+                                      : std::optional<compute::ComputeBackendKind>{
+                                          m_computeBackendAttemptOrder.front()};
 
-        if (configuredBackend == compute::ComputeBackendKind::WebGPU
-#if !defined(GLADIUS_ENABLE_OPENCL)
-            || !configuredBackend.has_value()
-#endif
-        )
+        if (configuredBackend.has_value() && !compute::isComputeBackendBuilt(*configuredBackend) &&
+            !m_computeBackendAttemptOrder.empty() && m_logger)
         {
-            m_computeInitState = ComputeInitState::InProgress;
-            try
-            {
-                m_runtime = compute::ApplicationComputeRuntime::createWebGPU();
-                if (!m_runtime->isAvailable())
-                {
-#ifdef __EMSCRIPTEN__
-                    if (auto const context = m_runtime->getWebGPUContext();
-                        context && context->isInitializing())
-                    {
-                        m_computeInitState = ComputeInitState::InProgress;
-                        return;
-                    }
-#endif
-                    throw std::runtime_error(m_runtime->getErrorMessage());
-                }
-
-                finalizeWebGPUInitialization();
-            }
-            catch (std::exception const & exception)
-            {
-                m_runtime.reset();
-                setComputeUnavailable(
-                  std::string{"WebGPU initialization failed: "} + exception.what(), true);
-                m_computeInitState = ComputeInitState::Finalized;
-#ifdef __EMSCRIPTEN__
-                // Hide the canvas and rely on the on-page status indicator so
-                // the user gets clear feedback when WebGPU is unavailable.
-                EM_ASM({
-                    var status = document.getElementById('gladius-status');
-                    if (status)
-                    {
-                        status.textContent = 'WebGPU unavailable';
-                        status.dataset.ready = 'false';
-                    }
-                    var canvas = document.getElementById('gladius-canvas');
-                    if (canvas) canvas.style.display = 'none';
-                });
-#endif
-            }
-            if (m_logger)
-            {
-                if (!m_computeErrorMessage.empty())
-                {
-                    m_logger->addEvent({m_computeErrorMessage, events::Severity::Warning});
-                }
-            }
-            if (m_onComputeReadyCallback)
-            {
-                m_onComputeReadyCallback();
-            }
-            return;
+            m_logger->addEvent(
+              {fmt::format("Configured compute backend '{}' is not built; trying '{}' instead",
+                           compute::toString(*configuredBackend),
+                           compute::toString(m_computeBackendAttemptOrder.front())),
+               events::Severity::Warning});
         }
 
-        if (configuredBackend.has_value() && !compute::isComputeBackendBuilt(*configuredBackend))
+        startNextComputeBackendAttempt();
+    }
+
+    void MainWindow::startNextComputeBackendAttempt()
+    {
+        if (m_computeBackendAttemptIndex >= m_computeBackendAttemptOrder.size())
         {
             m_computeInitState = ComputeInitState::Finalized;
-            setComputeUnavailable(
-              "The explicitly selected compute backend '" +
-                std::string{compute::toString(*configuredBackend)} +
-                "' is not available in this build. No other backend was selected.",
-              true);
+            auto const errorMessage = m_computeBackendInitializationErrors.empty()
+                                        ? "No supported compute backend is available in this build."
+                                        : "No compute backend could be initialized:\n" +
+                                            m_computeBackendInitializationErrors;
+            setComputeUnavailable(errorMessage, true);
+            m_welcomeScreen.hide();
             if (m_logger)
             {
                 m_logger->addEvent({m_computeErrorMessage, events::Severity::Warning});
             }
+#ifdef __EMSCRIPTEN__
+            // Keep the browser status visible when no backend can initialize.
+            EM_ASM({
+                var status = document.getElementById('gladius-status');
+                if (status)
+                {
+                    status.textContent = 'Compute backend unavailable';
+                    status.dataset.ready = 'false';
+                }
+                var canvas = document.getElementById('gladius-canvas');
+                if (canvas) canvas.style.display = 'none';
+            });
+#endif
+            if (m_onComputeReadyCallback)
+            {
+                m_onComputeReadyCallback();
+            }
+            return;
+        }
+
+        auto const backend = m_computeBackendAttemptOrder[m_computeBackendAttemptIndex++];
+        m_computeInitState = ComputeInitState::InProgress;
+        if (m_logger)
+        {
+            m_logger->addEvent(
+              {fmt::format("Initializing {} compute backend", compute::toString(backend)),
+               events::Severity::Info});
+        }
+
+        if (backend == compute::ComputeBackendKind::WebGPU)
+        {
+            std::unique_ptr<compute::IBackendRuntime> runtime;
+            try
+            {
+                runtime = compute::ApplicationComputeRuntime::createWebGPU();
+                if (!runtime->isAvailable())
+                {
+#ifdef __EMSCRIPTEN__
+                    if (auto const context = runtime->getWebGPUContext();
+                        context && context->isInitializing())
+                    {
+                        m_runtime = std::move(runtime);
+                        return;
+                    }
+#endif
+                    auto const errorMessage = runtime->getErrorMessage().empty()
+                                                ? "WebGPU runtime is unavailable"
+                                                : runtime->getErrorMessage();
+                    throw std::runtime_error(errorMessage);
+                }
+            }
+            catch (std::exception const & exception)
+            {
+                runtime.reset();
+                handleComputeBackendInitializationFailure(backend, exception.what());
+                return;
+            }
+
+            m_runtime = std::move(runtime);
+            try
+            {
+                finalizeWebGPUInitialization();
+            }
+            catch (std::exception const & exception)
+            {
+                handleComputeBackendFinalizationFailure(backend, exception.what());
+                return;
+            }
             if (m_onComputeReadyCallback)
             {
                 m_onComputeReadyCallback();
@@ -777,60 +792,114 @@ namespace gladius::ui
         }
 
     #if defined(GLADIUS_ENABLE_OPENCL)
-        m_computeInitState = ComputeInitState::InProgress;
-
         // Phase 1: Run the slow device enumeration on a background thread
         // The GL context is NOT required for this phase
-        m_computeInitFuture = std::async(
-          std::launch::async,
-          []() -> ComputeEnumResult
-          {
-              ComputeEnumResult result;
-              try
+        try
+        {
+            m_computeInitFuture = std::async(
+              std::launch::async,
+              []() -> ComputeEnumResult
               {
-                  // This is the slow part - OpenCL platform/device enumeration
-                  std::ostringstream logStream;
-                  auto accelerators = queryAccelerators(logStream);
+                  ComputeEnumResult result;
+                  try
+                  {
+                      // This is the slow part - OpenCL platform/device enumeration
+                      std::ostringstream logStream;
+                      auto accelerators = queryAccelerators(logStream);
 
-                  if (accelerators.empty())
+                      if (accelerators.empty())
+                      {
+                          result.success = false;
+                          result.errorMessage = "No suitable OpenCL devices found";
+                          return result;
+                      }
+
+                      // Sort by performance estimation (best first)
+                      std::stable_sort(std::begin(accelerators),
+                                       std::end(accelerators),
+                                       [](Accelerator const & lhs, Accelerator const & rhs)
+                                       {
+                                           return lhs.capabilities.performanceEstimation >
+                                                  rhs.capabilities.performanceEstimation;
+                                       });
+
+                      result.accelerators = std::move(accelerators);
+                      result.success = true;
+                  }
+                  catch (GladiusException const & e)
                   {
                       result.success = false;
-                      result.errorMessage = "No suitable OpenCL devices found";
-                      return result;
+                      result.errorMessage = e.what();
                   }
-
-                  // Sort by performance estimation (best first)
-                  std::stable_sort(std::begin(accelerators),
-                                   std::end(accelerators),
-                                   [](Accelerator const & lhs, Accelerator const & rhs)
-                                   {
-                                       return lhs.capabilities.performanceEstimation >
-                                              rhs.capabilities.performanceEstimation;
-                                   });
-
-                  result.accelerators = std::move(accelerators);
-                  result.success = true;
-              }
-              catch (GladiusException const & e)
-              {
-                  result.success = false;
-                  result.errorMessage = e.what();
-              }
-              catch (std::exception const & e)
-              {
-                  result.success = false;
-                  result.errorMessage = e.what();
-              }
-              return result;
-          });
+                  catch (std::exception const & e)
+                  {
+                      result.success = false;
+                      result.errorMessage = e.what();
+                  }
+                  return result;
+              });
+        }
+        catch (std::exception const & exception)
+        {
+            handleComputeBackendInitializationFailure(backend, exception.what());
+        }
 #else
+        handleComputeBackendInitializationFailure(backend, "OpenCL backend is not built");
+#endif
+    }
+
+    void MainWindow::handleComputeBackendInitializationFailure(
+      compute::ComputeBackendKind const backend,
+      std::string errorMessage)
+    {
+        if (errorMessage.empty())
+        {
+            errorMessage = "No error details were provided";
+        }
+        auto const failure = fmt::format("{} initialization failed: {}",
+                                         compute::toString(backend),
+                                         errorMessage);
+        if (!m_computeBackendInitializationErrors.empty())
+        {
+            m_computeBackendInitializationErrors += "\n";
+        }
+        m_computeBackendInitializationErrors += failure;
+        m_runtime.reset();
+
+        if (m_logger)
+        {
+            m_logger->addEvent({failure, events::Severity::Warning});
+            if (m_computeBackendAttemptIndex < m_computeBackendAttemptOrder.size())
+            {
+                m_logger->addEvent(
+                  {fmt::format("Trying {} as the alternate compute backend",
+                               compute::toString(
+                                 m_computeBackendAttemptOrder[m_computeBackendAttemptIndex])),
+                   events::Severity::Info});
+            }
+        }
+        startNextComputeBackendAttempt();
+    }
+
+    void MainWindow::handleComputeBackendFinalizationFailure(
+      compute::ComputeBackendKind const backend,
+      std::string errorMessage)
+    {
         m_computeInitState = ComputeInitState::Finalized;
-        setComputeUnavailable("No supported compute backend is available in this build.", true);
+        setComputeUnavailable(
+          fmt::format("{} initialized, but application setup failed: {}",
+                      compute::toString(backend),
+                      errorMessage),
+          true);
+        m_welcomeScreen.hide();
+        if (m_logger)
+        {
+            m_logger->addEvent({m_computeErrorMessage, events::Severity::Error});
+        }
         if (m_onComputeReadyCallback)
         {
             m_onComputeReadyCallback();
         }
-#endif
     }
 
     void MainWindow::finalizeWebGPUInitialization()
@@ -863,7 +932,8 @@ namespace gladius::ui
     void MainWindow::pollComputeInit()
     {
 #ifdef __EMSCRIPTEN__
-        if (m_computeInitState == ComputeInitState::InProgress && m_runtime)
+        if (m_computeInitState == ComputeInitState::InProgress && m_runtime &&
+            m_runtime->getBackendKind() == compute::ComputeBackendKind::WebGPU)
         {
             // Browser adapter/device requests use AllowSpontaneous callbacks.
             // Calling Instance::ProcessEvents() here can block the browser event
@@ -871,17 +941,30 @@ namespace gladius::ui
             auto const context = m_runtime->getWebGPUContext();
             if (context && context->isInitializing())
             {
-                (void) context->completeDeviceInitialization();
+                try
+                {
+                    (void) context->completeDeviceInitialization();
+                }
+                catch (std::exception const & exception)
+                {
+                    handleComputeBackendInitializationFailure(
+                      compute::ComputeBackendKind::WebGPU, exception.what());
+                    return;
+                }
             }
             bool const runtimeAvailable = m_runtime->isAvailable();
             if (runtimeAvailable)
             {
-                finalizeWebGPUInitialization();
-                if (m_logger)
+                try
                 {
-                    m_logger->addEvent({"WebGPU initialized successfully", events::Severity::Info});
+                    finalizeWebGPUInitialization();
                 }
-                m_computeInitState = ComputeInitState::Finalized;
+                catch (std::exception const & exception)
+                {
+                    handleComputeBackendFinalizationFailure(
+                      compute::ComputeBackendKind::WebGPU, exception.what());
+                    return;
+                }
                 if (m_onComputeReadyCallback)
                 {
                     m_onComputeReadyCallback();
@@ -892,16 +975,13 @@ namespace gladius::ui
                 bool const contextInitializing = context && context->isInitializing();
                 if (!contextInitializing)
                 {
-                    m_computeInitState = ComputeInitState::Finalized;
-                    setComputeUnavailable(
-                      m_runtime->getErrorMessage().empty()
-                        ? "WebGPU initialization failed"
-                        : m_runtime->getErrorMessage(),
-                      true);
-                    if (m_onComputeReadyCallback)
+                    auto errorMessage = m_runtime->getErrorMessage();
+                    if (errorMessage.empty())
                     {
-                        m_onComputeReadyCallback();
+                        errorMessage = "WebGPU initialization failed";
                     }
+                    handleComputeBackendInitializationFailure(
+                      compute::ComputeBackendKind::WebGPU, std::move(errorMessage));
                 }
             }
             return;
@@ -926,93 +1006,99 @@ namespace gladius::ui
             return; // Still in progress
         }
 
-        // Future is ready - get the result and finalize on main thread
+        // Future is ready - get the result and finalize on the main thread.
         m_computeInitState = ComputeInitState::Completed;
 
+        ComputeEnumResult result;
         try
         {
-            auto result = m_computeInitFuture.get();
+            result = m_computeInitFuture.get();
+        }
+        catch (std::exception const & exception)
+        {
+            handleComputeBackendInitializationFailure(
+              compute::ComputeBackendKind::OpenCL, exception.what());
+            return;
+        }
 
-            if (result.success && !result.accelerators.empty())
+        if (!result.success || result.accelerators.empty())
+        {
+            auto const errorMessage = result.errorMessage.empty()
+                                        ? "No suitable OpenCL devices found"
+                                        : result.errorMessage;
+            handleComputeBackendInitializationFailure(
+              compute::ComputeBackendKind::OpenCL, errorMessage);
+            return;
+        }
+
+        std::shared_ptr<ComputeCore> candidateCore;
+        std::unique_ptr<compute::IBackendRuntime> candidateRuntime;
+        try
+        {
+            // Phase 2: Create the OpenCL context on the main thread (GL context is current).
+            auto const & selectedAccelerator = result.accelerators.front();
+            auto context = std::make_shared<ComputeContext>(
+              EnableGLOutput::enabled, selectedAccelerator);
+            context->setLogger(m_logger);
+            context->setDebugOutputEnabled(m_openclDebugEnabled);
+            gladius::setGlobalLogger(m_logger);
+
+            if (!context->isValid())
             {
-                // Phase 2: Create the OpenCL context on the main thread (GL context is current)
-                auto const & selectedAccelerator = result.accelerators.front();
-
-                auto context = std::make_shared<ComputeContext>(
-                  EnableGLOutput::enabled, selectedAccelerator);
-                context->setLogger(m_logger);
-                context->setDebugOutputEnabled(m_openclDebugEnabled);
-                gladius::setGlobalLogger(m_logger);
-
-                if (!context->isValid())
-                {
-                    throw OpenCLContextCreationError("Context invalid after initialization");
-                }
-
-                m_core = std::make_shared<ComputeCore>(
-                  context, RequiredCapabilities::OpenGLInterop, m_logger);
-                m_runtime = compute::ApplicationComputeRuntime::createOpenCL(m_core);
-                m_doc = std::make_shared<Document>(m_core);
-                m_computeAvailable = true;
-                m_computeErrorMessage.clear();
-
-                // Load render settings now that compute is available
-                if (m_configManager)
-                {
-                    loadRenderSettings();
-                }
-
-                // Complete full setup with compute
-                setup(m_core, m_doc, m_logger);
-
-                // Open the startup file now that compute is available
-                if (m_startupFile)
-                {
-                    loadFileDeferred(*m_startupFile);
-                    m_startupFile.reset();
-                }
-
-                if (m_logger)
-                {
-                    m_logger->addEvent({"OpenCL initialized successfully", events::Severity::Info});
-                }
-
-                                auto const configuredBackend = m_configManager != nullptr
-                                                                                                 ? compute::getConfiguredComputeBackend(*m_configManager)
-                                                                                                 : compute::ComputeBackendKind::OpenCL;
-                                if (m_logger)
-                                {
-                                        m_logger->addEvent({"OpenCL compute core active; viewport configured=" +
-                                                                                    std::string(compute::toString(configuredBackend)),
-                                                                                events::Severity::Info});
-                                }
+                throw OpenCLContextCreationError("Context invalid after initialization");
             }
-            else
-            {
-                m_computeAvailable = false;
-                m_computeErrorMessage = result.errorMessage;
-                m_showComputeErrorModal = true;
-                m_welcomeScreen.hide();
 
-                if (m_logger)
-                {
-                    m_logger->addEvent({std::string("Compute disabled: ") + result.errorMessage,
-                                        events::Severity::Warning});
-                }
+            candidateCore = std::make_shared<ComputeCore>(
+              context, RequiredCapabilities::OpenGLInterop, m_logger);
+            candidateRuntime = compute::ApplicationComputeRuntime::createOpenCL(candidateCore);
+            if (!candidateRuntime->isAvailable())
+            {
+                auto const errorMessage = candidateRuntime->getErrorMessage().empty()
+                                            ? "OpenCL runtime is unavailable"
+                                            : candidateRuntime->getErrorMessage();
+                throw std::runtime_error(errorMessage);
             }
         }
-        catch (const std::exception & e)
+        catch (std::exception const & exception)
         {
-            m_computeAvailable = false;
-            m_computeErrorMessage = e.what();
-            m_showComputeErrorModal = true;
-            m_welcomeScreen.hide();
+            candidateRuntime = nullptr;
+            candidateCore = nullptr;
+            handleComputeBackendInitializationFailure(
+              compute::ComputeBackendKind::OpenCL, exception.what());
+            return;
+        }
+
+        m_core = std::move(candidateCore);
+        m_runtime = std::move(candidateRuntime);
+        try
+        {
+            m_doc = std::make_shared<Document>(m_core);
+            m_computeAvailable = true;
+            m_computeErrorMessage.clear();
+
+            if (m_configManager)
+            {
+                loadRenderSettings();
+            }
+
+            setup(m_core, m_doc, m_logger);
+
+            if (m_startupFile)
+            {
+                loadFileDeferred(*m_startupFile);
+                m_startupFile.reset();
+            }
 
             if (m_logger)
             {
-                m_logger->addEvent(
-                  {std::string("Compute init error: ") + e.what(), events::Severity::Warning});
+                m_logger->addEvent({"OpenCL initialized successfully", events::Severity::Info});
             }
+        }
+        catch (std::exception const & exception)
+        {
+            handleComputeBackendFinalizationFailure(
+              compute::ComputeBackendKind::OpenCL, exception.what());
+            return;
         }
 
         m_computeInitState = ComputeInitState::Finalized;
@@ -1035,116 +1121,159 @@ namespace gladius::ui
 
         m_logger = std::move(logger);
         m_initialized = true;
+        m_computeAvailable = false;
+        auto const configuredBackend = getExplicitlyConfiguredBackend();
+#if defined(GLADIUS_ENABLE_OPENCL)
+        constexpr auto defaultBackend = compute::ComputeBackendKind::OpenCL;
+#else
+        constexpr auto defaultBackend = compute::ComputeBackendKind::WebGPU;
+#endif
+        auto const preferredBackend = configuredBackend.value_or(
+          m_configManager != nullptr ? compute::getConfiguredComputeBackend(*m_configManager)
+                                     : defaultBackend);
+        m_computeBackendAttemptOrder = compute::getComputeBackendAttemptOrder(preferredBackend);
+        m_computeBackendAttemptIndex = 0;
+        m_computeBackendInitializationErrors.clear();
+        m_computeBackendAtStartup = m_computeBackendAttemptOrder.empty()
+                                      ? std::optional<compute::ComputeBackendKind>{preferredBackend}
+                                      : std::optional<compute::ComputeBackendKind>{
+                                          m_computeBackendAttemptOrder.front()};
 
-                if (auto const configuredBackend = getExplicitlyConfiguredBackend();
-                        configuredBackend.has_value() && !compute::isComputeBackendBuilt(*configuredBackend) &&
-                        *configuredBackend != compute::ComputeBackendKind::WebGPU)
+        if (configuredBackend.has_value() && !compute::isComputeBackendBuilt(*configuredBackend) &&
+            !m_computeBackendAttemptOrder.empty() && m_logger)
         {
-                        setComputeUnavailable(
-                            "The explicitly selected compute backend '" +
-                                std::string{compute::toString(*configuredBackend)} +
-                                "' is not available in this build. OpenCL was not initialized.",
-                            false);
-            if (m_logger)
-            {
-                m_logger->addEvent({m_computeErrorMessage, events::Severity::Warning});
-            }
-            return;
+            m_logger->addEvent(
+              {fmt::format("Configured compute backend '{}' is not built; trying '{}' instead",
+                           compute::toString(*configuredBackend),
+                           compute::toString(m_computeBackendAttemptOrder.front())),
+               events::Severity::Warning});
         }
 
-        if (getExplicitlyConfiguredBackend() == compute::ComputeBackendKind::WebGPU
-    #if !defined(GLADIUS_ENABLE_OPENCL)
-            || !getExplicitlyConfiguredBackend().has_value()
-    #endif
-        )
+        for (std::size_t index = 0; index < m_computeBackendAttemptOrder.size(); ++index)
         {
+            auto const backend = m_computeBackendAttemptOrder[index];
+            m_computeBackendAttemptIndex = index + 1;
+            if (m_logger)
+            {
+                m_logger->addEvent(
+                  {fmt::format("Initializing {} headless compute backend",
+                               compute::toString(backend)),
+                   events::Severity::Info});
+            }
+
             try
             {
-                m_runtime = compute::ApplicationComputeRuntime::createWebGPU();
-                if (!m_runtime->isAvailable())
+                if (backend == compute::ComputeBackendKind::WebGPU)
                 {
-                    throw std::runtime_error(m_runtime->getErrorMessage());
+                    auto runtime = compute::ApplicationComputeRuntime::createWebGPU();
+                    if (!runtime->isAvailable())
+                    {
+                        auto const errorMessage = runtime->getErrorMessage().empty()
+                                                    ? "WebGPU runtime is unavailable"
+                                                    : runtime->getErrorMessage();
+                        throw std::runtime_error(errorMessage);
+                    }
+                    m_core.reset();
+                    m_runtime = std::move(runtime);
+                    m_doc = std::make_shared<Document>(m_logger);
                 }
-                m_core.reset();
-                m_doc = std::make_shared<Document>(m_logger);
+                else
+                {
+#if defined(GLADIUS_ENABLE_OPENCL)
+                    // Headless OpenCL does not require GL interop.
+                    auto context = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+                    context->setLogger(m_logger);
+                    gladius::setGlobalLogger(m_logger);
+                    context->setDebugOutputEnabled(m_openclDebugEnabled);
+                    if (!context->isValid())
+                    {
+                        throw OpenCLContextCreationError(
+                          "Context invalid after initialization (headless)");
+                    }
+
+                    m_core = std::make_shared<ComputeCore>(
+                      context, RequiredCapabilities::ComputeOnly, m_logger);
+                    m_runtime = compute::ApplicationComputeRuntime::createOpenCL(m_core);
+                    if (!m_runtime->isAvailable())
+                    {
+                        auto const errorMessage = m_runtime->getErrorMessage().empty()
+                                                    ? "OpenCL runtime is unavailable"
+                                                    : m_runtime->getErrorMessage();
+                        throw std::runtime_error(errorMessage);
+                    }
+                    m_doc = std::make_shared<Document>(m_core);
+#else
+                    throw std::runtime_error("OpenCL backend is not built");
+#endif
+                }
+
                 m_doc->setBackendRuntime(m_runtime.get());
                 m_doc->setUiMode(false);
                 m_computeAvailable = true;
                 m_computeErrorMessage.clear();
+                return;
+            }
+            catch (GladiusException const & exception)
+            {
+                auto const failure = fmt::format("{} headless initialization failed: {}",
+                                                 compute::toString(backend),
+                                                 exception.what());
+                if (!m_computeBackendInitializationErrors.empty())
+                {
+                    m_computeBackendInitializationErrors += "\n";
+                }
+                m_computeBackendInitializationErrors += failure;
+                m_doc.reset();
+                m_runtime.reset();
+                m_core.reset();
+                if (m_logger)
+                {
+                    m_logger->addEvent({failure, events::Severity::Warning});
+                }
             }
             catch (std::exception const & exception)
             {
+                auto const failure = fmt::format("{} headless initialization failed: {}",
+                                                 compute::toString(backend),
+                                                 exception.what());
+                if (!m_computeBackendInitializationErrors.empty())
+                {
+                    m_computeBackendInitializationErrors += "\n";
+                }
+                m_computeBackendInitializationErrors += failure;
+                m_doc.reset();
                 m_runtime.reset();
-                m_computeAvailable = false;
-                m_computeErrorMessage = exception.what();
+                m_core.reset();
                 if (m_logger)
                 {
-                    m_logger->addEvent({std::string("Headless WebGPU disabled: ") + exception.what(),
-                                        events::Severity::Warning});
+                    m_logger->addEvent({failure, events::Severity::Warning});
                 }
             }
-            return;
         }
 
-        #if !defined(GLADIUS_ENABLE_OPENCL)
-            setComputeUnavailable("No compute backend is available in this build", false);
-            return;
-        #else
-        // Initialize compute stack without OpenGL interop for headless safety
-        try
+        auto const errorMessage = m_computeBackendInitializationErrors.empty()
+                                    ? "No supported compute backend is available in this build."
+                                    : "No compute backend could be initialized:\n" +
+                                        m_computeBackendInitializationErrors;
+        setComputeUnavailable(errorMessage, false);
+        if (m_logger)
         {
-            auto context = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
-            context->setLogger(m_logger);
-            gladius::setGlobalLogger(m_logger);
-            context->setDebugOutputEnabled(m_openclDebugEnabled);
-            if (!context->isValid())
-            {
-                throw OpenCLContextCreationError("Context invalid after initialization (headless)");
-            }
-
-            m_core =
-              std::make_shared<ComputeCore>(context, RequiredCapabilities::ComputeOnly, m_logger);
-            m_runtime = compute::ApplicationComputeRuntime::createOpenCL(m_core);
-            m_doc = std::make_shared<Document>(m_core);
-                        m_doc->setBackendRuntime(m_runtime.get());
-
-            // Explicitly mark document as non-UI mode to disable backups and UI-only behaviors
-            m_doc->setUiMode(false);
-
-            m_computeAvailable = true;
-            m_computeErrorMessage.clear();
+            m_logger->addEvent({m_computeErrorMessage, events::Severity::Warning});
         }
-        catch (const GladiusException & e)
-        {
-            m_computeAvailable = false;
-            m_computeErrorMessage = e.what();
-            if (m_logger)
-            {
-                m_logger->addEvent({std::string("Headless compute disabled: ") + e.what(),
-                                    events::Severity::Warning});
-            }
-        }
-        catch (const std::exception & e)
-        {
-            m_computeAvailable = false;
-            m_computeErrorMessage = e.what();
-            if (m_logger)
-            {
-                m_logger->addEvent({std::string("Headless compute disabled: ") + e.what(),
-                                    events::Severity::Warning});
-            }
-        }
-#endif
     }
 
     bool MainWindow::isWebGPUBackendRequested() const
     {
-        auto const configuredBackend = getExplicitlyConfiguredBackend();
-        return configuredBackend == compute::ComputeBackendKind::WebGPU;
+        return m_computeBackendAtStartup.has_value() &&
+               *m_computeBackendAtStartup == compute::ComputeBackendKind::WebGPU;
     }
 
     std::optional<compute::ComputeBackendKind> MainWindow::getExplicitlyConfiguredBackend() const
     {
+        if (m_computeBackendOverride.has_value())
+        {
+            return m_computeBackendOverride;
+        }
         if (m_configManager == nullptr)
         {
             return std::nullopt;
@@ -3707,10 +3836,10 @@ namespace gladius::ui
                                        ImGuiWindowFlags_AlwaysAutoResize |
                                          ImGuiWindowFlags_NoSavedSettings))
             {
-                bool const webGpuRequested = isWebGPUBackendRequested();
+                bool const retryWebGpu = isWebGPUBackendRequested();
                 ImGui::TextWrapped(
-                  "Gladius couldn't initialize the selected compute backend. The UI stays usable, "
-                  "but rendering and slicing are disabled.");
+                                    "Gladius couldn't initialize an available compute backend. "
+                  "Rendering and slicing are disabled.");
                 ImGui::Separator();
 
                 if (!m_computeErrorMessage.empty())
@@ -3730,23 +3859,22 @@ namespace gladius::ui
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                if (webGpuRequested)
+                ImGui::TextWrapped("Troubleshooting:");
+                ImGui::BulletText("Check GPU availability and drivers for the backends listed above.");
+                auto const openCLBuilt =
+                  compute::isComputeBackendBuilt(compute::ComputeBackendKind::OpenCL);
+                auto const webGPUBuilt =
+                  compute::isComputeBackendBuilt(compute::ComputeBackendKind::WebGPU);
+                if (openCLBuilt)
                 {
-                    ImGui::TextWrapped(
-                      "WebGPU is selected explicitly, so Gladius will not silently fall back to "
-                        "OpenCL. Check the WebGPU device and Dawn initialization details above, "
-                        "then retry or select another backend explicitly.");
-                }
-                else
-                {
-                    // Provide helpful troubleshooting guidance
-                    ImGui::TextWrapped("Common solutions:");
-                    ImGui::BulletText("Install OpenCL drivers for your GPU (NVIDIA, AMD, or Intel)");
                     ImGui::BulletText(
-                      "On Linux: Install ocl-icd-opencl-dev and vendor-specific drivers");
-                    ImGui::BulletText("Check if other OpenCL applications work (e.g., clinfo)");
-                    ImGui::BulletText("Restart the application after installing drivers");
+                      "For OpenCL, verify the vendor runtime is installed (on Linux, run clinfo).");
                 }
+                if (webGPUBuilt)
+                {
+                    ImGui::BulletText("For WebGPU, check that Dawn can see a compatible adapter.");
+                }
+                ImGui::BulletText("Restart Gladius after updating GPU drivers.");
 
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -3756,7 +3884,7 @@ namespace gladius::ui
                 {
                     try
                     {
-                        if (webGpuRequested)
+                        if (retryWebGpu)
                         {
                             m_runtime = compute::ApplicationComputeRuntime::createWebGPU();
                             if (!m_runtime->isAvailable())
@@ -3808,7 +3936,7 @@ namespace gladius::ui
                         if (m_logger)
                         {
                             m_logger->addEvent(
-                              {webGpuRequested ? "WebGPU initialized successfully!"
+                              {retryWebGpu ? "WebGPU initialized successfully!"
                                                : "OpenCL initialized successfully!",
                                events::Severity::Info});
                         }

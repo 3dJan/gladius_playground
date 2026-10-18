@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace gladius::compute
 {
@@ -29,4 +30,12 @@ namespace gladius::compute
      * @brief Returns whether this binary contains the requested backend.
      */
     [[nodiscard]] bool isComputeBackendBuilt(ComputeBackendKind backend) noexcept;
+
+        /**
+         * @brief Returns the built backend attempts in preference order.
+         *
+         * The preferred backend is tried first when available, followed by the other backend.
+         */
+        [[nodiscard]] std::vector<ComputeBackendKind> getComputeBackendAttemptOrder(
+            ComputeBackendKind preferredBackend);
 }

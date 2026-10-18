@@ -90,6 +90,12 @@ namespace gladius::ui
             m_recentFilesManager = std::make_unique<RecentFilesManager>(m_configManager);
         }
 
+        /// Apply a transient command-line preference without changing saved settings.
+        void setComputeBackendOverride(std::optional<compute::ComputeBackendKind> backendOverride)
+        {
+            m_computeBackendOverride = backendOverride;
+        }
+
         void setup(std::shared_ptr<ComputeCore> core,
                    std::shared_ptr<Document> doc,
                    events::SharedLogger logger);
@@ -308,8 +314,13 @@ namespace gladius::ui
         std::shared_ptr<void> m_core;
     #endif
         std::unique_ptr<compute::IBackendRuntime> m_runtime;
-        /// Backend attempted during startup, used for restart guidance before a runtime is active.
+        /// First resolved backend attempted during startup, used before a runtime is active.
         std::optional<compute::ComputeBackendKind> m_computeBackendAtStartup;
+        /// Transient command-line choice; never persisted as the user's backend preference.
+        std::optional<compute::ComputeBackendKind> m_computeBackendOverride;
+        std::vector<compute::ComputeBackendKind> m_computeBackendAttemptOrder;
+        size_t m_computeBackendAttemptIndex{0};
+        std::string m_computeBackendInitializationErrors;
         bool m_fileChanged{false};
         std::atomic<bool> m_dirty{true};
         std::atomic<bool> m_parameterDirty{false};
@@ -504,16 +515,29 @@ namespace gladius::ui
         /// @brief Start async compute initialization
         void startAsyncComputeInit();
 
+        /// @brief Start the next built backend in the bounded startup attempt order.
+        void startNextComputeBackendAttempt();
+
+        /// @brief Record an initialization failure and try the next backend, if any.
+                void handleComputeBackendInitializationFailure(
+                    compute::ComputeBackendKind backend,
+                    std::string errorMessage);
+
+        /// @brief Report setup failures that occur after a backend runtime has been activated.
+                void handleComputeBackendFinalizationFailure(
+                    compute::ComputeBackendKind backend,
+                    std::string errorMessage);
+
         /// @brief Finalize a WebGPU runtime after its device callback completes.
         void finalizeWebGPUInitialization();
 
         /// @brief Poll and finalize async compute initialization (called from render loop)
         void pollComputeInit();
 
-        /// @brief Returns whether WebGPU was explicitly selected.
+        /// @brief Returns whether WebGPU is the first resolved startup attempt.
         [[nodiscard]] bool isWebGPUBackendRequested() const;
 
-        /// @brief Returns the explicitly persisted backend, if one was configured.
+        /// @brief Returns the transient override or explicitly persisted backend preference.
         [[nodiscard]] std::optional<compute::ComputeBackendKind>
         getExplicitlyConfiguredBackend() const;
 
