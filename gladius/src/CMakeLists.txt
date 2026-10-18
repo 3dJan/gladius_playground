@@ -1,4 +1,10 @@
 set(BINARY ${CMAKE_PROJECT_NAME})
+
+set(GLADIUS_TARGET_IS_X86 FALSE)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|x86|x64|AMD64|amd64|i[3-6]86)$")
+    set(GLADIUS_TARGET_IS_X86 TRUE)
+endif()
+
 file(GLOB SOURCES LIST_DIRECTORIES true *.h *.cpp)
 
 # This standalone browser diagnostic has Emscripten-only dependencies and is
@@ -299,10 +305,10 @@ target_precompile_headers(${BINARY}_lib_mcp PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
 # is compiled with its own /Fd path.
 target_precompile_headers(${BINARY} PRIVATE ${GLADIUS_CORE_PCH_HEADERS})
 
-# Enable AVX2 SIMD instructions for Phase 3 optimization
+# Enable AVX2 SIMD instructions only for x86 targets.
 # PUBLIC so consumers (tests, etc.) see the same Eigen alignment as the library,
 # avoiding ODR violations from mismatched struct layouts.
-if (NOT WIN32 AND NOT EMSCRIPTEN)
+if (GLADIUS_TARGET_IS_X86 AND NOT WIN32 AND NOT EMSCRIPTEN)
     target_compile_options(${BINARY}_lib PUBLIC -mavx2 -mfma)
     target_compile_options(${BINARY}_lib_mcp PUBLIC -mavx2 -mfma)
     target_compile_options(${BINARY} PRIVATE -mavx2 -mfma)
@@ -365,7 +371,7 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(gladiusmcp PUBLIC ${BINARY}_lib_mcp ${DEPENDENCIES_MCP})
     add_dependencies(gladiusmcp ${BINARY}_lib_mcp)
     target_precompile_headers(gladiusmcp PRIVATE ${GLADIUS_MCP_PCH_HEADERS})
-    if (NOT WIN32)
+    if (NOT WIN32 AND GLADIUS_TARGET_IS_X86)
         target_compile_options(gladiusmcp PRIVATE -mavx2 -mfma)
     endif()
     install(PROGRAMS "$<TARGET_FILE:gladiusmcp>" DESTINATION ${INSTALL_PREFIX}/ OPTIONAL)

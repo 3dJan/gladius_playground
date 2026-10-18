@@ -174,6 +174,23 @@
             }
         },
         {
+            "name": "linux-arm64-webgpu-releaseWithDebug",
+            "displayName": "Linux ARM64 WebGPU RelWithDebInfo",
+            "description": "Cross-compile Linux ARM64 with Clang and WebGPU; set GLADIUS_ARM64_SYSROOT",
+            "inherits": "linux-webgpu-releaseWithDebug",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "value": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
+                    "type": "FILEPATH"
+                },
+                "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/linux-aarch64-clang.cmake",
+                "VCPKG_TARGET_TRIPLET": "arm64-linux",
+                "VCPKG_HOST_TRIPLET": "x64-linux",
+                "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
+                "VCPKG_INSTALLED_DIR": "${sourceDir}/vcpkg_installed"
+            }
+        },
+        {
             "name": "web-base",
             "displayName": "WebAssembly browser base",
             "description": "Configure the browser target with the active Emscripten SDK",
@@ -259,6 +276,12 @@
             "name": "linux-webgpu-releaseWithDebug",
             "displayName": "Linux RelWithDebInfo (WebGPU only)",
             "configurePreset": "linux-webgpu-releaseWithDebug",
+            "jobs": 8
+        },
+        {
+            "name": "linux-arm64-webgpu-releaseWithDebug",
+            "displayName": "Linux ARM64 WebGPU RelWithDebInfo",
+            "configurePreset": "linux-arm64-webgpu-releaseWithDebug",
             "jobs": 8
         },
         {

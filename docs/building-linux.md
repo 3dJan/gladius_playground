@@ -6,6 +6,9 @@ prior knowledge of Python or another language is enough to follow along.
 
 > **Note:** Gladius requires an OpenCL-capable GPU or a CPU-based OpenCL runtime.
 > It is tested on **Debian 12 (Bookworm)** and **Ubuntu 22.04 / 24.04**.
+>
+> To cross-compile for Linux ARM64 from Debian x86_64, see
+> [Building for Linux ARM64](building-linux-arm64.md).
 
 ---
 

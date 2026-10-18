@@ -7,8 +7,10 @@
 
 #pragma once
 
-// Enable Phase 3 optimizations (temporarily disabled to bypass compile issue)
+// Phase 3 uses x86 CPUID and AVX2; keep it disabled on other architectures.
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
 #define ENABLE_PHASE3_SIMD
+#endif
 
 #include "BeamLatticeResource.h"
 #include "io/vdb.h"

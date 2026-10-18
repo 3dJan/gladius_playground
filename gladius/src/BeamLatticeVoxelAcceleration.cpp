@@ -9,7 +9,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#ifdef ENABLE_PHASE3_SIMD
 #include <immintrin.h> // For SIMD intrinsics
+#endif
 #include <iostream>
 #include <mutex> // For thread-safe operations
 #include <openvdb/openvdb.h>
@@ -17,10 +19,12 @@
 #include <openvdb/tools/Composite.h>
 #include <thread> // For parallelization
 
+#ifdef ENABLE_PHASE3_SIMD
 #ifdef _WIN32
 #include <intrin.h>
 #else
 #include <cpuid.h>
+#endif
 #endif
 
 namespace gladius
