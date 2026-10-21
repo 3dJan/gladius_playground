@@ -344,7 +344,16 @@ cmrc_add_resources(gladius_resources
   src/imgui.ini
 )
 if(EMSCRIPTEN)
+  file(GLOB_RECURSE GLADIUS_LICENSE_FILES CONFIGURE_DEPENDS
+    LIST_DIRECTORIES false
+    RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    "components/licenses/*"
+  )
   cmrc_add_resources(gladius_resources ${GLADIUS_LIBRARY_FILES} ${GLADIUS_EXAMPLE_FILES})
+  cmrc_add_resources(gladius_resources
+    WHENCE "${CMAKE_CURRENT_SOURCE_DIR}/components"
+    ${GLADIUS_LICENSE_FILES}
+  )
 endif()
 if (MSVC)
     set_property(TARGET gladius_resources PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
