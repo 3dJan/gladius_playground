@@ -88,7 +88,7 @@ endif()
 
 set(CPACK_PACKAGE_VERSION_MAJOR "1")
 set(CPACK_PACKAGE_VERSION_MINOR "2")
-set(CPACK_PACKAGE_VERSION_PATCH "15")
+set(CPACK_PACKAGE_VERSION_PATCH "16")
 
 # Set the version of the package in src/version.h
 configure_file(
