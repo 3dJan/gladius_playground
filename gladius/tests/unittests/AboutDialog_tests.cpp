@@ -84,5 +84,33 @@ namespace gladius::tests
         gladius::ui::CopyRightInfo info{vendorDir};
 
         EXPECT_EQ(info.getOrLoadCopyrightText(), "No LICENSE file found");
+        EXPECT_EQ(info.getOrLoadCopyrightText(), "No LICENSE file found");
+    }
+
+    TEST_F(CopyRightInfoTest, Info_WithSupplementaryCopyingFiles_IncludesAllNotices)
+    {
+        auto const vendorDir = m_licenseDir / "eigen3";
+        writeTextFile(vendorDir / "LICENSE", "Primary MPL notice");
+        writeTextFile(vendorDir / "COPYING.APACHE", "Apache notice");
+        writeTextFile(vendorDir / "COPYING.BSD", "BSD notice");
+
+        gladius::ui::CopyRightInfo info{vendorDir};
+        auto const text = info.getOrLoadCopyrightText();
+
+        EXPECT_NE(text.find("Primary MPL notice"), std::string::npos);
+        EXPECT_NE(text.find("COPYING.APACHE"), std::string::npos);
+        EXPECT_NE(text.find("Apache notice"), std::string::npos);
+        EXPECT_NE(text.find("COPYING.BSD"), std::string::npos);
+        EXPECT_NE(text.find("BSD notice"), std::string::npos);
+    }
+
+    TEST_F(CopyRightInfoTest, Info_WithStagedProjectLicense_LoadsLicenseText)
+    {
+        auto const projectLicense = m_licenseDir.parent_path() / "copyright" / "LICENSE";
+        writeTextFile(projectLicense, "Gladius BSD license text");
+
+        gladius::ui::CopyRightInfo info{projectLicense.parent_path()};
+
+        EXPECT_EQ(info.getOrLoadCopyrightText(), "Gladius BSD license text");
     }
 } // namespace gladius::tests

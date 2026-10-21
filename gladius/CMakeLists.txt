@@ -343,6 +343,12 @@ cmrc_add_resources(gladius_resources
   examples/template.3mf
   src/imgui.ini
 )
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/src/copyright")
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.txt"
+  "${CMAKE_CURRENT_BINARY_DIR}/src/copyright/LICENSE"
+  COPYONLY
+)
 if(EMSCRIPTEN)
   file(GLOB_RECURSE GLADIUS_LICENSE_FILES CONFIGURE_DEPENDS
     LIST_DIRECTORIES false
@@ -353,6 +359,10 @@ if(EMSCRIPTEN)
   cmrc_add_resources(gladius_resources
     WHENCE "${CMAKE_CURRENT_SOURCE_DIR}/components"
     ${GLADIUS_LICENSE_FILES}
+  )
+  cmrc_add_resources(gladius_resources
+    WHENCE "${CMAKE_CURRENT_BINARY_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/src/copyright/LICENSE"
   )
 endif()
 if (MSVC)

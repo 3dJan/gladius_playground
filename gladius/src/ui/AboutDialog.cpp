@@ -1,5 +1,6 @@
 #include "AboutDialog.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -49,6 +50,44 @@ namespace gladius::ui
 #else
             return readFileOrReturnEmpty(path);
 #endif
+        }
+
+        std::vector<std::filesystem::path> getSupplementaryCopyrightFiles(
+          std::filesystem::path const & directory)
+        {
+            std::vector<std::filesystem::path> files;
+#ifdef __EMSCRIPTEN__
+            auto const resourceDirectory = directory.generic_string();
+            auto const resources = cmrc::gladius_resources::get_filesystem();
+            if (!resources.is_directory(resourceDirectory))
+            {
+                return files;
+            }
+
+            for (auto const entry : resources.iterate_directory(resourceDirectory))
+            {
+                auto const filename = std::string(entry.filename());
+                if (entry.is_file() && filename.starts_with("COPYING."))
+                {
+                    files.emplace_back(directory / filename);
+                }
+            }
+#else
+            std::error_code error;
+            std::filesystem::directory_iterator entry{directory, error};
+            std::filesystem::directory_iterator const end;
+            while (!error && entry != end)
+            {
+                auto const filename = entry->path().filename().string();
+                if (entry->is_regular_file(error) && filename.starts_with("COPYING."))
+                {
+                    files.emplace_back(entry->path());
+                }
+                entry.increment(error);
+            }
+#endif
+            std::sort(files.begin(), files.end());
+            return files;
         }
     }
 
@@ -103,16 +142,31 @@ namespace gladius::ui
     {
         if (m_licenseText.has_value())
         {
-            return m_licenseText.value_or("No url file found");
+            return m_licenseText->empty() ? "No LICENSE file found" : m_licenseText.value();
         }
 
         auto const licensePath = m_path / "LICENSE";
-        if (isCopyrightAssetFile(licensePath))
+        if (!isCopyrightAssetFile(licensePath))
         {
-            m_licenseText = readCopyrightAssetOrReturnEmpty(licensePath);
+            m_licenseText = "No LICENSE file found";
+            return m_licenseText.value();
         }
 
-        return m_licenseText.value_or("No LICENSE file found");
+        auto licenseText = readCopyrightAssetOrReturnEmpty(licensePath);
+        for (auto const & supplementaryPath : getSupplementaryCopyrightFiles(m_path))
+        {
+            auto const supplementaryText = readCopyrightAssetOrReturnEmpty(supplementaryPath);
+            if (supplementaryText.empty())
+            {
+                continue;
+            }
+
+            licenseText += "\n\n" + supplementaryPath.filename().string() + ":\n";
+            licenseText += supplementaryText;
+        }
+
+        m_licenseText = std::move(licenseText);
+    return m_licenseText->empty() ? "No LICENSE file found" : m_licenseText.value();
     }
 
     CopyRightInfoCache::CopyRightInfoCache(std::filesystem::path licenseDir)
@@ -174,10 +228,11 @@ namespace gladius::ui
     AboutDialog::AboutDialog()
 #ifdef __EMSCRIPTEN__
         : m_copyRightInfoCache("licenses")
+        , m_copyRight("copyright")
 #else
         : m_copyRightInfoCache(getAppDir() / "licenses")
-#endif
         , m_copyRight(getAppDir() / "copyright")
+#endif
     {
     }
 
