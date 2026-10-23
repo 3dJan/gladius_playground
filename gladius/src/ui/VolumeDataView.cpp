@@ -1,5 +1,6 @@
 #include "VolumeDataView.h"
 
+#include "VolumeDataTranslucencyView.h"
 #include "Document.h"
 #include "MeshResource.h"
 #include "ResourceKey.h" // Include ResourceKey header
@@ -131,6 +132,11 @@ namespace gladius::ui
                         }
                     }
                 }
+
+                // Translucency section - stored as a generic volumetric property so it
+                // survives 3MF round trips until lib3mf supports <v:translucency>.
+                propertiesChanged |=
+                  VolumeDataTranslucencyView::renderTranslucencySection(document, model3mf, volumeData);
 
                 ImGui::EndTable();
             }

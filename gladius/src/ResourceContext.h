@@ -9,6 +9,7 @@
 
 #include <CL/cl_platform.h>
 
+#include <atomic>
 #include <chrono>
 #include <vector>
 
@@ -58,6 +59,19 @@ namespace gladius
 
         Resolutions & getMipMapResolutions();
         RenderingSettings & getRenderingSettings();
+
+        /**
+         * @brief True when the published render model source defines a real translucency entry point.
+         *
+         * The static render kernels always call `translucencyModel()`, but an opaque model only gets
+         * a stub, and the command-stream preview cannot express the channel at all. Dispatches must
+         * not enable RF_ENABLE_TRANSLUCENCY for such a source, so the flag is published here next to
+         * the settings it guards instead of only living in ComputeCore.
+         */
+        [[nodiscard]] bool isTranslucencyEntryPointActive() const;
+
+        /// @brief Publish whether the current render source can answer the translucency channel.
+        void setTranslucencyEntryPointActive(bool active);
 
         DepthBuffer & getDistanceToBottom();
         DepthBuffer & getDistanceToTop();
@@ -177,6 +191,9 @@ namespace gladius
 
         bool m_resizeOfBuildAreaBufferRequired = true;
         bool m_resizeOfDistanceMapsRequired = true;
+
+        /// @brief Whether the published render source defines a usable translucency entry point.
+        std::atomic_bool m_translucencyEntryPointActive{false};
     };
 
     using SharedResources = std::shared_ptr<ResourceContext>;

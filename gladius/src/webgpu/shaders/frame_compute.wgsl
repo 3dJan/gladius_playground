@@ -9,6 +9,7 @@ struct FrameUniforms {
     flags_mode_reserved: vec4<u32>,
     clipping_box_min: vec4<f32>,
     clipping_box_max: vec4<f32>,
+    translucency_params: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -39,6 +40,7 @@ const RF_SHOW_COORDINATE_SYSTEM: u32 = 16u;
 const RF_DISABLE_ADAPTIVE_OMEGA: u32 = 16384u;
 const RF_DISABLE_SHADOWS: u32 = 65536u;
 const RF_DISABLE_AO: u32 = 131072u;
+const RF_ENABLE_TRANSLUCENCY: u32 = 1048576u;
 
 struct SceneSample {
     distance: f32,
@@ -297,31 +299,92 @@ fn shade_surface(position: vec3<f32>, ray_direction: vec3<f32>, base_color: vec3
     return color;
 }
 
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let width = u32(frame.right_and_width.w);
-    let height = u32(frame.up_and_height.w);
-    let first_row = u32(frame.first_row_and_count.x);
-    let row_count = u32(frame.first_row_and_count.y);
-    if (global_id.x >= width || global_id.y >= row_count) {
-        return;
+// Translucency: the graph's scalar channel is an ISO 19307 "translucency alpha" for a
+// reference thickness. Converting it to a Beer-Lambert coefficient keeps the authored
+// quantity intact while letting the marcher integrate along the actual path length:
+//   sigma = -ln(1 - alpha) / d0    =>    T(t) = exp(-sigma * t)
+// so a slab of thickness d0 absorbs exactly the authored alpha.
+fn attenuation_coefficient(position: vec3<f32>, reference_thickness: f32) -> f32 {
+    let alpha = clamp(evaluateTranslucency(position), 0.0f, 0.9999f);
+    return -log(1.0f - alpha) / reference_thickness;
+}
+
+fn translucency_enabled() -> bool {
+    return (frame.flags_mode_reserved.x & RF_ENABLE_TRANSLUCENCY) != 0u &&
+           frame.translucency_params.x > 0.0f;
+}
+
+// Optical depth accumulated while the ray travels through the solid, from the entry
+// crossing at entry_distance to the far boundary. Fixed steps are used on purpose:
+// sphere tracing with |distance| degenerates inside a solid because every step lands
+// back on the boundary.
+struct InteriorResult {
+    transmittance: f32,
+    exit_distance: f32,
+    exited: bool,
+};
+
+fn interior_transmittance(eye: vec3<f32>,
+                          ray_direction: vec3<f32>,
+                          entry_distance: f32,
+                          max_distance: f32) -> InteriorResult {
+    let reference_thickness = max(frame.translucency_params.x, 0.001f);
+    let step_size = max(frame.translucency_params.y, 0.001f);
+    let max_steps = max(u32(frame.translucency_params.z), 1u);
+    let transmittance_floor = clamp(frame.translucency_params.w, 0.0f, 1.0f);
+
+    var distance = entry_distance;
+    var sigma = attenuation_coefficient(eye + ray_direction * distance, reference_thickness);
+    var optical_depth = 0.0f;
+
+    for (var step = 0u; step < max_steps; step++) {
+        var next_distance = distance + step_size;
+        var exit_distance = next_distance;
+        var exited = false;
+        if (evaluateModel(eye + ray_direction * next_distance).w > 0.0f) {
+            // Refine the far crossing so the final partial segment is not over-counted.
+            var low = distance;
+            var high = next_distance;
+            for (var refinement = 0u; refinement < 5u; refinement++) {
+                let middle = (low + high) * 0.5f;
+                if (evaluateModel(eye + ray_direction * middle).w > 0.0f) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            next_distance = low;
+            exit_distance = high;
+            exited = true;
+        }
+        let next_sigma = attenuation_coefficient(eye + ray_direction * next_distance,
+                                                 reference_thickness);
+        optical_depth = optical_depth + (sigma + next_sigma) * 0.5f * (next_distance - distance);
+        if (exited) {
+            return InteriorResult(exp(-optical_depth), exit_distance, true);
+        }
+        distance = next_distance;
+        sigma = next_sigma;
+        if (distance > max_distance || exp(-optical_depth) < transmittance_floor) {
+            break;
+        }
     }
+    return InteriorResult(exp(-optical_depth), distance, false);
+}
 
-    let source_row = global_id.y + first_row;
+struct MarchResult
+{
+    hit: bool,
+    distance: f32,
+};
 
-    let screen = vec2<f32>(
-        f32(global_id.x) / f32(max(width - 1u, 1u)) - 0.5,
-        0.5 - f32(source_row) / f32(max(height - 1u, 1u)));
-    let ray_direction = normalize(
-        frame.forward_and_horizontal_scale.xyz +
-        frame.right_and_width.xyz * (screen.x * frame.forward_and_horizontal_scale.w) +
-        frame.up_and_height.xyz * (screen.y * frame.vertical_scale_and_max_steps.x));
-    let eye = frame.eye_and_max_distance.xyz;
-    let max_distance = frame.eye_and_max_distance.w;
-
+/// Sphere-traces the level set from start_distance to the next surface crossing.
+/// Restartable so that a translucent ray can walk through several shells.
+fn march_surface(eye: vec3<f32>, ray_direction: vec3<f32>, start_distance: f32, max_distance: f32) -> MarchResult
+{
     let initial_close_enough = select(0.001f, 0.01f, frame.flags_mode_reserved.y == 2u);
     let min_step_size = initial_close_enough * 0.01f;
-    var traveled = initial_close_enough;
+    var traveled = max(start_distance, initial_close_enough);
     var previous_signed_distance = 3.402823466e+38f;
     var previous_absolute_distance = 3.402823466e+38f;
     var previous_delta_distance = 0.0f;
@@ -389,9 +452,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             for (var refinement = 0u; refinement < 6u; refinement++) {
                 let middle_distance = (last_good_distance + bad_distance) * 0.5f;
                 let middle_sample = evaluate_surface(eye + ray_direction * middle_distance);
-                if ((previous_signed_distance < 0.0f) != (middle_sample.distance < 0.0f)) {
+                if ((previous_signed_distance < 0.0f) != (middle_sample.distance < 0.0f))
+                {
                     bad_distance = middle_distance;
-                } else {
+                }
+                else
+                {
                     last_good_distance = middle_distance;
                 }
             }
@@ -403,7 +469,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             near_range_factor = 0.1f;
             omega = 1.0f;
             next_step = max(absolute_distance * near_range_factor * omega, min_step_size);
-        } else {
+        }
+        else
+        {
             near_range_factor = min(near_range_factor * 1.05f, 1.0f);
             next_step = max(absolute_distance * near_range_factor * omega, min_step_size);
         }
@@ -423,19 +491,77 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             break;
         }
     }
+    return MarchResult(hit, traveled);
+}
 
-    let pixel_index = global_id.y * width + global_id.x;
-    if (!hit) {
-        output_pixels[pixel_index] = pack_rgba8(vec4<f32>(vec3<f32>(0.1), 1.0));
-        return;
-    }
-
-    let hit_position = eye + ray_direction * traveled;
+fn shade_for_hit(eye: vec3<f32>, ray_direction: vec3<f32>, distance: f32) -> vec3<f32>
+{
+    let hit_position = eye + ray_direction * distance;
     let hit_sample = evaluate_surface(hit_position);
     let use_model_color = hit_sample.object_type == 1.0f && frame.flags_mode_reserved.y != 2u;
     let hit_color = select(hit_sample.color, evaluateModel(hit_position).xyz, use_model_color);
-    let shaded = shade_surface(hit_position, ray_direction, hit_color);
+    return shade_surface(hit_position, ray_direction, hit_color);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let width = u32(frame.right_and_width.w);
+    let height = u32(frame.up_and_height.w);
+    let first_row = u32(frame.first_row_and_count.x);
+    let row_count = u32(frame.first_row_and_count.y);
+    if (global_id.x >= width || global_id.y >= row_count) {
+        return;
+    }
+
+    let source_row = global_id.y + first_row;
+
+    let screen = vec2<f32>(
+        f32(global_id.x) / f32(max(width - 1u, 1u)) - 0.5,
+        0.5 - f32(source_row) / f32(max(height - 1u, 1u)));
+    let ray_direction = normalize(
+        frame.forward_and_horizontal_scale.xyz +
+        frame.right_and_width.xyz * (screen.x * frame.forward_and_horizontal_scale.w) +
+        frame.up_and_height.xyz * (screen.y * frame.vertical_scale_and_max_steps.x));
+    let eye = frame.eye_and_max_distance.xyz;
+    let max_distance = frame.eye_and_max_distance.w;
+
+    let pixel_index = global_id.y * width + global_id.x;
     let background = vec3<f32>(0.1f);
-    let fog = 1.0f - exp(-1.0e-10f * traveled * traveled * traveled);
-    output_pixels[pixel_index] = pack_rgba8(vec4<f32>(mix(shaded, background, fog), 1.0));
+
+    if (!translucency_enabled()) {
+        let march = march_surface(eye, ray_direction, 0.0f, max_distance);
+        if (!march.hit) {
+            output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
+            return;
+        }
+        let shaded = shade_for_hit(eye, ray_direction, march.distance);
+        let fog = 1.0f - exp(-1.0e-10f * march.distance * march.distance * march.distance);
+        output_pixels[pixel_index] = pack_rgba8(vec4<f32>(mix(shaded, background, fog), 1.0));
+        return;
+    }
+
+    // Front-to-back accumulation: every surface is shaded and attenuated by the
+    // optical depth travelled inside the solid before reaching it.
+    let max_surfaces = select(3u, frame.flags_mode_reserved.w, frame.flags_mode_reserved.w > 0u);
+    let transmittance_floor = clamp(frame.translucency_params.w, 0.0f, 1.0f);
+    var transmittance = 1.0f;
+    var accumulated = vec3<f32>(0.0f);
+    var distance = 0.0f;
+    for (var surface = 0u; surface < max_surfaces; surface++) {
+        let march = march_surface(eye, ray_direction, distance, max_distance);
+        if (!march.hit) {
+            accumulated = accumulated + transmittance * background;
+            break;
+        }
+        let shaded = shade_for_hit(eye, ray_direction, march.distance);
+        let fog = 1.0f - exp(-1.0e-10f * march.distance * march.distance * march.distance);
+        accumulated = accumulated + transmittance * mix(shaded, background, fog);
+        let interior = interior_transmittance(eye, ray_direction, march.distance, max_distance);
+        transmittance = transmittance * interior.transmittance;
+        if (!interior.exited || transmittance < transmittance_floor) {
+            break;
+        }
+        distance = interior.exit_distance;
+    }
+    output_pixels[pixel_index] = pack_rgba8(vec4<f32>(accumulated, 1.0));
 }

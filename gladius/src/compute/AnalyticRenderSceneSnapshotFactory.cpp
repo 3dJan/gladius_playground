@@ -11,9 +11,12 @@
 #include "nodes/Assembly.h"
 #include "nodes/GraphFlattener.h"
 #include "nodes/Model.h"
+#include "nodes/ModelUtils.h"
 #include "nodes/Parameter.h"
 #include "nodes/ToWgslVisitor.h"
 
+#include <algorithm>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -105,6 +108,61 @@ namespace gladius::compute
 
             throw std::runtime_error("Analytic render scene supports only float, float3, and Matrix4x4 modifiable parameters");
         }
+
+        /// Result of the optional second codegen pass that emits the translucency entry point.
+        struct TranslucencyEvaluator
+        {
+            std::string source;
+            std::size_t parameterCount{};
+            std::set<nodes::ParameterId> usedParameterIds;
+
+            [[nodiscard]] bool usesParameter(nodes::ParameterId const parameterId) const noexcept
+            {
+                return usedParameterIds.contains(parameterId);
+            }
+        };
+
+        /// @brief Emit `fn evaluateTranslucency` for models exposing a scalar translucency channel.
+        /// An empty result means the model is opaque and the renderer keeps first-hit shading.
+        TranslucencyEvaluator createTranslucencyEvaluator(nodes::Model & model)
+        {
+            TranslucencyEvaluator result;
+            if (!nodes::isQualifiedForTranslucency(model))
+            {
+                return result;
+            }
+
+            try
+            {
+                nodes::ToWgslVisitor visitor;
+                visitor.setEvaluatorChannel(nodes::EvaluatorChannel::Translucency);
+                model.visitNodes(visitor);
+
+                std::ostringstream evaluator;
+                visitor.write(evaluator);
+                result.source = evaluator.str();
+                if (result.source.empty())
+                {
+                    return {};
+                }
+
+                result.parameterCount = visitor.getRequiredParameterCount();
+                for (auto const & [parameterId, parameter] : model.getConstParameterRegistry())
+                {
+                    if (parameter != nullptr && parameter->getId() == parameterId &&
+                        visitor.usesParameter(parameterId))
+                    {
+                        result.usedParameterIds.insert(parameterId);
+                    }
+                }
+            }
+            catch (std::exception const &)
+            {
+                // A graph the WGSL backend cannot express stays opaque instead of failing the snapshot.
+                return {};
+            }
+            return result;
+        }
     }
 
     RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(nodes::Model & model,
@@ -118,19 +176,31 @@ namespace gladius::compute
         std::ostringstream evaluator;
         visitor.write(evaluator);
 
-        std::vector<float> parameterValues(visitor.getRequiredParameterCount(), 0.0f);
+        auto const translucencyEvaluator = createTranslucencyEvaluator(model);
+
+        auto const requiredCount =
+            std::max(visitor.getRequiredParameterCount(), translucencyEvaluator.parameterCount);
+        std::vector<float> parameterValues(requiredCount, 0.0f);
         std::vector<bool> assignedValues(parameterValues.size(), false);
         for (auto const & [parameterId, parameter] : model.getConstParameterRegistry())
         {
-            if (parameter != nullptr && parameter->getId() == parameterId && visitor.usesParameter(parameterId))
+            bool const used = (parameter != nullptr) && (parameter->getId() == parameterId) &&
+                              (visitor.usesParameter(parameterId) ||
+                               translucencyEvaluator.usesParameter(parameterId));
+            if (!used)
             {
-                writeParameterValues(*parameter, parameterValues, assignedValues);
+                continue;
             }
+            writeParameterValues(*parameter, parameterValues, assignedValues);
         }
 
         return {.sceneGeneration = sceneGeneration,
-                .requiredCapabilities = RendererCapability::AnalyticRendering,
+                .requiredCapabilities = translucencyEvaluator.source.empty()
+                                          ? RendererCapability::AnalyticRendering
+                                          : RendererCapability::AnalyticRendering |
+                                              RendererCapability::TranslucentRendering,
                 .analyticEvaluatorWgsl = evaluator.str(),
+                .translucencyEvaluatorWgsl = translucencyEvaluator.source,
                 .parameterValues = std::move(parameterValues)};
     }
 

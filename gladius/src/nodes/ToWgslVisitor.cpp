@@ -1,6 +1,7 @@
 #include "ToWgslVisitor.h"
 
 #include "DerivedNodes.h"
+#include "Model.h"
 #include "Parameter.h"
 
 #include <fmt/format.h>
@@ -49,6 +50,21 @@ namespace gladius::nodes
         m_requiredParameterCount = 0u;
         m_requiredParameterIds.clear();
         m_functionClosed = false;
+        m_channelSelector.setModel(model);
+    }
+
+    void ToWgslVisitor::setEvaluatorChannel(EvaluatorChannel const channel)
+    {
+        m_channelSelector.setChannel(channel);
+        if (channel == EvaluatorChannel::Translucency)
+        {
+            m_channelSelector.setEmittedChannels({std::string{FieldNames::Translucency}});
+        }
+    }
+
+    EvaluatorChannel ToWgslVisitor::getEvaluatorChannel() const noexcept
+    {
+        return m_channelSelector.getChannel();
     }
 
     void ToWgslVisitor::write(std::ostream & out) const
@@ -69,6 +85,12 @@ namespace gladius::nodes
     bool ToWgslVisitor::beginNode(NodeBase const & node)
     {
         if (m_functionClosed)
+        {
+            return false;
+        }
+
+        if (m_channelSelector.getChannel() != EvaluatorChannel::ShapeAndColor
+            && !m_channelSelector.isNeededByChannel(node.getId()))
         {
             return false;
         }
@@ -245,8 +267,22 @@ namespace gladius::nodes
             return;
         }
 
+        if (!m_channelSelector.providesSelectedChannel())
+        {
+            // The model does not provide the selected channel - emit no evaluator at all.
+            m_functionClosed = true;
+            return;
+        }
+
         auto const & position = beginning.getOutputs().at(FieldNames::Pos);
-        m_definition << fmt::format("fn evaluateModel(position: vec3<f32>) -> vec4<f32> {{\n");
+        if (m_channelSelector.getChannel() == EvaluatorChannel::Translucency)
+        {
+            m_definition << fmt::format("fn evaluateTranslucency(position: vec3<f32>) -> f32 {{\n");
+        }
+        else
+        {
+            m_definition << fmt::format("fn evaluateModel(position: vec3<f32>) -> vec4<f32> {{\n");
+        }
         m_definition << fmt::format("let {}: vec3<f32> = position;\n", position.getUniqueName());
     }
 
@@ -254,6 +290,15 @@ namespace gladius::nodes
     {
         if (!beginNode(ending))
         {
+            return;
+        }
+
+        if (m_channelSelector.getChannel() == EvaluatorChannel::Translucency)
+        {
+            // Clamp to the ISO/TS 19307 translucency alpha range instead of trusting the graph.
+            m_definition << fmt::format("return clamp({}, 0.0f, 1.0f);\n}}\n",
+                                        resolveParameter(ending.parameter().at(FieldNames::Translucency)));
+            m_functionClosed = true;
             return;
         }
 

@@ -12,6 +12,7 @@
 #include "compute/ComputeCore.h"
 #endif
 #include "imgui.h"
+#include "RenderTranslucencyControls.h"
 
 namespace gladius::ui
 {
@@ -130,6 +131,24 @@ namespace gladius::ui
                               flagsChanged |= ImGui::CheckboxFlags(
                                 "Show Coordinate System", &renderingFlags, RF_SHOW_COORDINATE_SYSTEM);
 
+                              // Commit these flags before the translucency control edits
+                              // the same settings object below.
+                              if (flagsChanged)
+                              {
+#if defined(GLADIUS_ENABLE_OPENCL)
+                                  if (hasOpenCLCore)
+                                  {
+                                      m_core->getResourceContext()->getRenderingSettings().flags =
+                                        renderingFlags;
+                                  }
+#endif
+                                  if (!hasOpenCLCore && m_neutralBackendActive)
+                                  {
+                                      m_neutralRenderSettings.flags =
+                                        static_cast<std::uint32_t>(renderingFlags);
+                                  }
+                              }
+
                               ImGui::Separator();
                               ImGui::SetNextItemWidth(150.f * m_uiScale);
                               bool const qualityChanged =
@@ -158,6 +177,12 @@ namespace gladius::ui
                                   invalidateView();
                               }
                               m_renderWindowState.renderQuality = quality;
+
+                              if (renderTranslucencyMenuSection())
+                              {
+                                  settingsChanged = true;
+                                  invalidateView();
+                              }
 
                               if (includeAdvancedOptions)
                               {
@@ -209,19 +234,6 @@ namespace gladius::ui
                               }
 
                               ImGui::EndMenu();
-                          }
-
-#if defined(GLADIUS_ENABLE_OPENCL)
-                          if (hasOpenCLCore)
-                          {
-                              m_core->getResourceContext()->getRenderingSettings().flags =
-                                renderingFlags;
-                          }
-#endif
-                          if (!hasOpenCLCore && m_neutralBackendActive)
-                          {
-                              m_neutralRenderSettings.flags =
-                                static_cast<std::uint32_t>(renderingFlags);
                           }
 
                           if (flagsChanged)

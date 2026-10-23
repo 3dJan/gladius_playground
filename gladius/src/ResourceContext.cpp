@@ -35,9 +35,27 @@ namespace gladius
         // mesh_sdf.cl (capped by scene scale to avoid TDR).
         m_renderingSettings.meshFwnBeta = 2.0f;
         m_renderingSettings.meshFwnFarFieldFactor = 0.5f;
+        // Translucency is off by default (RF_ENABLE_TRANSLUCENCY unset), but the kernel
+        // reads these unconditionally, so keep them at the same defaults the filament
+        // optical model and the WebGPU backend use.
+        m_renderingSettings.translucencyReferenceThicknessMm = 0.4f;
+        m_renderingSettings.translucencyInteriorStepSize = 0.1f;
+        m_renderingSettings.translucencyMaxInteriorSteps = 512.f;
+        m_renderingSettings.translucencyFloor = 0.01f;
+        m_renderingSettings.translucencyMaxSurfaces = 3.f;
 
         initResolutions();
         createBuffer();
+    }
+
+    bool ResourceContext::isTranslucencyEntryPointActive() const
+    {
+        return m_translucencyEntryPointActive.load(std::memory_order_acquire);
+    }
+
+    void ResourceContext::setTranslucencyEntryPointActive(bool const active)
+    {
+        m_translucencyEntryPointActive.store(active, std::memory_order_release);
     }
 
     void ResourceContext::initResolutions()

@@ -249,7 +249,7 @@ namespace gladius::compute::tests
 
     TEST(WebGPUShaderAbi, FrameUniforms_HasWebGpuCompatibleLayout)
     {
-        EXPECT_EQ(sizeof(webgpu::FrameUniforms), 160u);
+        EXPECT_EQ(sizeof(webgpu::FrameUniforms), 176u);
         EXPECT_EQ(alignof(webgpu::FrameUniforms), 16u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, eyeAndMaxDistance), 0u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, forwardAndHorizontalScale), 16u);
@@ -261,6 +261,7 @@ namespace gladius::compute::tests
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, flagsModeReserved), 112u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, clippingBoxMin), 128u);
         EXPECT_EQ(offsetof(webgpu::FrameUniforms, clippingBoxMax), 144u);
+        EXPECT_EQ(offsetof(webgpu::FrameUniforms, translucencyParams), 160u);
     }
 
     TEST(WebGPUDispatchPolicy, CalculateSliceDispatchSize_WithPartialWorkgroups_RoundsUp)

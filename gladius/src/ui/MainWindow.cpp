@@ -5088,6 +5088,7 @@ namespace gladius::ui
                 renderJson["sdfVisEnabled"] = hasFlag(RF_SHOW_FIELD);
                 renderJson["showStack"] = hasFlag(RF_SHOW_STACK);
                 renderJson["showCoordinateSystem"] = hasFlag(RF_SHOW_COORDINATE_SYSTEM);
+                renderJson["translucencyEnabled"] = hasFlag(RF_ENABLE_TRANSLUCENCY);
                 renderJson["highQualityEnabled"] = m_renderWindow.isHighQualityRenderingEnabled();
             };
 #if defined(GLADIUS_ENABLE_OPENCL)
@@ -5216,7 +5217,10 @@ namespace gladius::ui
         applyFlag(RF_SHOW_STACK,
                   readBool("showStack", (currentFlags & RF_SHOW_STACK) != 0u));
         applyFlag(RF_SHOW_COORDINATE_SYSTEM,
-                  readBool("showCoordinateSystem", (currentFlags & RF_SHOW_COORDINATE_SYSTEM) != 0u));
+                  readBool("showCoordinateSystem",
+                           (currentFlags & RF_SHOW_COORDINATE_SYSTEM) != 0u));
+        applyFlag(RF_ENABLE_TRANSLUCENCY,
+                  readBool("translucencyEnabled", (currentFlags & RF_ENABLE_TRANSLUCENCY) != 0u));
 
 #if defined(GLADIUS_ENABLE_OPENCL)
         if (m_core)

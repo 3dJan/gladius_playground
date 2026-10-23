@@ -29,6 +29,9 @@ namespace gladius::compute
         Export = 1u << 9u,
         FramePresentation = 1u << 10u,
         BoundingBoxDetermination = 1u << 11u,
+        /// High-quality paths march through the solid and attenuate by the graph's
+        /// translucency channel. Preview paths stay opaque even on such a backend.
+        TranslucentRendering = 1u << 12u,
     };
 
     [[nodiscard]] constexpr RendererCapability operator|(RendererCapability const left,
@@ -180,6 +183,17 @@ namespace gladius::compute
         float weightMidpoint{};
         std::uint32_t maxRaySteps{2000u};
         float maxTravelDistance{100000.0f};
+        /// Reference thickness used to turn the authored translucency alpha into a
+        /// Beer-Lambert attenuation coefficient. Matches the filament optical model.
+        float translucencyReferenceThicknessMm{0.4f};
+        /// Step size used while the ray travels through the solid.
+        float translucencyInteriorStepSize{0.1f};
+        /// Upper bound on interior steps per shell.
+        std::uint32_t translucencyMaxInteriorSteps{512u};
+        /// Front-to-back accumulation stops once the remaining transmittance drops below this.
+        float translucencyFloor{0.01f};
+        /// Upper bound on shaded surfaces per ray while translucency is active.
+        std::uint32_t translucencyMaxSurfaces{3u};
 
         [[nodiscard]] bool isValid() const noexcept
         {
@@ -189,7 +203,11 @@ namespace gladius::compute
                    std::isfinite(meshInflationDistance) && std::isfinite(meshFwnBeta) && meshFwnBeta > 0.0f &&
                    std::isfinite(meshFwnFarFieldFactor) && meshFwnFarFieldFactor >= 0.0f &&
                    std::isfinite(weightDistanceToNeighbor) && std::isfinite(weightMidpoint) &&
-                   maxRaySteps > 0u && std::isfinite(maxTravelDistance) && maxTravelDistance > 0.0f;
+                   maxRaySteps > 0u && std::isfinite(maxTravelDistance) && maxTravelDistance > 0.0f &&
+                   std::isfinite(translucencyReferenceThicknessMm) && translucencyReferenceThicknessMm > 0.0f &&
+                   std::isfinite(translucencyInteriorStepSize) && translucencyInteriorStepSize > 0.0f &&
+                   translucencyMaxInteriorSteps > 0u && std::isfinite(translucencyFloor) &&
+                   translucencyFloor >= 0.0f && translucencyFloor < 1.0f && translucencyMaxSurfaces > 0u;
         }
     };
 

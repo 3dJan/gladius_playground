@@ -12,7 +12,10 @@ namespace gladius::webgpu
     {
       public:
         /// Compose a frame shader without mesh support (analytic only).
-        [[nodiscard]] static std::string compose(std::string_view modelEvaluator);
+        /// \param translucencyEvaluator Optional `fn evaluateTranslucency` entry point emitted by a
+        ///        second codegen pass. Empty keeps the renderer on first-hit opaque shading.
+        [[nodiscard]] static std::string compose(std::string_view modelEvaluator,
+                                                 std::string_view translucencyEvaluator = {});
 
         /// Compose a frame shader including the mesh SDF module. The generated
         /// evaluator may call gladiusSignedDistanceToMesh(pos, resourceId).
@@ -32,6 +35,7 @@ namespace gladius::webgpu
         [[nodiscard]] static std::string composeWithResourceSupport(std::string_view modelEvaluator,
                                                                     bool includeMesh,
                                                                     bool includeBeam,
-                                                                    bool includeImage);
+                                                                    bool includeImage,
+                                                                    std::string_view translucencyEvaluator = {});
     };
 }

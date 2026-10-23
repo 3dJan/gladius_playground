@@ -33,7 +33,8 @@ namespace gladius
               std::uint32_t width,
               std::uint32_t height,
               std::uint64_t sceneGeneration,
-              std::optional<compute::RenderCamera> camera = {});
+              std::optional<compute::RenderCamera> camera = {},
+              compute::RenderSettingsSnapshot settings = {});
         };
     }
 }

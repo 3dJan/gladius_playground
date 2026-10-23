@@ -1,6 +1,7 @@
 #pragma once
 #include <sstream>
 
+#include "EvaluatorChannel.h"
 #include "Model.h"
 #include "NodeBase.h"
 #include "OutputPortReferenceAnalyzer.h"
@@ -24,6 +25,12 @@ namespace gladius::nodes
 
         void setAssembly(Assembly * assembly) override;
         virtual void setModel(Model * const model) override;
+
+        /// @brief Select the End-node output channels emitted by the generated entry point.
+        /// The default emits the shape/color entry point; the translucency channel is emitted as
+        /// a separate scalar entry point because the kernel ABI keeps model() at float4.
+        void setEvaluatorChannel(EvaluatorChannel channel);
+        [[nodiscard]] EvaluatorChannel getEvaluatorChannel() const noexcept;
 
         void write(std::ostream & out) const;
 
@@ -154,6 +161,9 @@ namespace gladius::nodes
         auto isOutPutOfNodeValid(NodeBase const & node) -> bool;
         void assemblyBegin(Begin & beginning);
 
+        /// @brief True when the visitor currently emits the assembly entry point model.
+        [[nodiscard]] bool isAssemblyModel() const;
+
         /// @brief Check if an output should be inlined (used only once)
         bool shouldInlineOutput(NodeBase const & node, std::string const & portName) const;
 
@@ -190,6 +200,7 @@ namespace gladius::nodes
         Assembly * m_assembly{};
         std::set<nodes::NodeId> m_visitedNodes;
         Model * m_currentModel = nullptr;
+        mutable ChannelDependencySelector m_channelSelector;
 
         // Reference analyzer for optimization decisions
         mutable OutputPortReferenceAnalyzer m_referenceAnalyzer;

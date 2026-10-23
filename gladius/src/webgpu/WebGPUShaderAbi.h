@@ -39,10 +39,13 @@ namespace gladius::webgpu
         std::array<std::uint32_t, 4> flagsModeReserved{};
         std::array<float, 4> clippingBoxMin{};
         std::array<float, 4> clippingBoxMax{};
+        /// x: reference thickness in mm, y: interior step size, z: max interior steps, w: transmittance floor.
+        std::array<float, 4> translucencyParams{};
     };
 
     static_assert(alignof(FrameUniforms) == 16u);
     static_assert(offsetof(FrameUniforms, clippingBoxMin) == 128u);
     static_assert(offsetof(FrameUniforms, clippingBoxMax) == 144u);
-    static_assert(sizeof(FrameUniforms) == 160u);
+    static_assert(offsetof(FrameUniforms, translucencyParams) == 160u);
+    static_assert(sizeof(FrameUniforms) == 176u);
 }

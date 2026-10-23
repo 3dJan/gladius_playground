@@ -113,6 +113,15 @@ namespace gladius::nodes
                                           Model & referencedModel,
                                           nodes::Port & coordinateSystemPort,
                                           Matrix4x4 const & transformation);
+
+        /// @brief Wire a function model's scalar translucency channel into the target's End node.
+        /// Creates the "translucency" output channel on the target if it does not exist yet.
+        /// @param channelName Name of the scalar output channel on the referenced model.
+        void appendFunctionForTranslucencyOutput(Model & target,
+                                                 Model & referencedModel,
+                                                 nodes::Port & coordinateSystemPort,
+                                                 Matrix4x4 const & transformation,
+                                                 std::string const & channelName = FieldNames::Translucency);
     };
 
 }

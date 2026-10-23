@@ -51,6 +51,10 @@ namespace gladius::compute
         std::uint64_t sceneGeneration{};
         RendererCapability requiredCapabilities{RendererCapability::AnalyticRendering};
         std::string analyticEvaluatorWgsl;
+        /// Optional WGSL entry point `fn evaluateTranslucency(position: vec3<f32>) -> f32`.
+        /// Empty when the graph does not expose a translucency channel; the renderer then keeps
+        /// the first-hit opaque shading.
+        std::string translucencyEvaluatorWgsl;
         std::vector<float> parameterValues;
         /// Mesh payloads indexed by mesh resource id (sparse; empty entries are invalid).
         std::vector<MeshResourcePayload> meshResources;

@@ -68,6 +68,10 @@ namespace gladius::compute
         float normalOffset{0.001f};
         std::uint32_t renderingFlags{};
         std::uint32_t renderingMode{};
+        /// x: reference thickness mm, y: interior step size, z: max interior steps, w: transmittance floor.
+        std::array<float, 4> translucencyParams{};
+        /// Surfaces shaded per ray while translucency is active; zero selects the shader default.
+        std::uint32_t translucencyMaxSurfaces{};
         std::optional<RenderBounds> modelBounds{};
         std::string shaderSource;
         std::vector<float> parameterValues;

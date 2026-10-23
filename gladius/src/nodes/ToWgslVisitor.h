@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EvaluatorChannel.h"
 #include "NodeBase.h"
 #include "OutputPortReferenceAnalyzer.h"
 #include "Visitor.h"
@@ -10,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace gladius::nodes
 {
@@ -26,6 +28,11 @@ namespace gladius::nodes
         void write(std::ostream & out) const;
         [[nodiscard]] std::size_t getRequiredParameterCount() const noexcept;
         [[nodiscard]] bool usesParameter(ParameterId parameterId) const noexcept;
+
+        /// @brief Select the End-node channel returned by the generated entry point.
+        /// Must be set before the model is visited; defaults to ShapeAndColor.
+        void setEvaluatorChannel(EvaluatorChannel channel);
+        [[nodiscard]] EvaluatorChannel getEvaluatorChannel() const noexcept;
 
         void visit(Begin & beginning) override;
         void visit(End & ending) override;
@@ -100,6 +107,7 @@ namespace gladius::nodes
 
         std::stringstream m_definition;
         std::set<NodeId> m_visitedNodes;
+        mutable ChannelDependencySelector m_channelSelector;
         mutable OutputPortReferenceAnalyzer m_referenceAnalyzer;
         mutable bool m_referenceAnalysisPerformed{};
         mutable std::map<std::pair<NodeId, std::string>, std::string> m_inlineExpressions;

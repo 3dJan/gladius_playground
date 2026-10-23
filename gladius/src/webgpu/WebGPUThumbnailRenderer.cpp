@@ -60,7 +60,8 @@ namespace gladius::webgpu
           std::uint32_t const width,
           std::uint32_t const height,
           std::uint64_t const sceneGeneration,
-          std::optional<compute::RenderCamera> camera)
+          std::optional<compute::RenderCamera> camera,
+          compute::RenderSettingsSnapshot const & settings)
         {
             BoundingBox const cameraBounds{{bounds.min[0], bounds.min[1], bounds.min[2], 0.0f},
                                            {bounds.max[0], bounds.max[1], bounds.max[2], 0.0f}};
@@ -90,7 +91,7 @@ namespace gladius::webgpu
                     .frustum = {.horizontalScale = 0.5f,
                                 .verticalScale = 0.5f * static_cast<float>(height) /
                                                  static_cast<float>(width)},
-                    .settings = {},
+                    .settings = settings,
                     .modelBounds = bounds,
                     .viewport = {.width = width,
                                  .height = height,
@@ -107,7 +108,8 @@ namespace gladius::webgpu
       std::uint32_t const width,
       std::uint32_t const height,
       std::uint64_t const sceneGeneration,
-      std::optional<compute::RenderCamera> camera)
+      std::optional<compute::RenderCamera> camera,
+      compute::RenderSettingsSnapshot settings)
     {
         if (width == 0u || height == 0u)
         {
@@ -141,8 +143,8 @@ namespace gladius::webgpu
 
         auto const generation = session.getSceneGeneration();
         auto const bounds = determineBounds(session, generation);
-        auto submission =
-          session.submitFrame(createRequest(bounds, width, height, generation, std::move(camera)));
+        auto submission = session.submitFrame(
+          createRequest(bounds, width, height, generation, std::move(camera), settings));
         submission->wait();
         if (submission->getStatus() != compute::RenderSubmissionStatus::Succeeded)
         {

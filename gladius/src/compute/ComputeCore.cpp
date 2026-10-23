@@ -36,6 +36,7 @@
 #include "compute/ManifoldDualContouringProgram.h"
 #include "gpgpu.h"
 #include "nodes/OptimizeOutputs.h"
+#include "nodes/TranslucencyCodeGenerator.h"
 #include "nodes/Validator.h"
 #include "slicer/GridContourBuilder.h"
 
@@ -990,6 +991,7 @@ namespace gladius
                                    m_resources->getEyePosition(),
                                    m_resources->getModelViewPerspectiveMat()};
         inputs.settings.time_s = m_resources->getTime_s();
+        applyTranslucencyAvailability(inputs.settings);
         return std::make_shared<RenderSession>(m_sceneState, std::move(inputs));
     }
 
@@ -1007,6 +1009,7 @@ namespace gladius
                                    m_resources->getEyePosition(),
                                    m_resources->getModelViewPerspectiveMat()};
         inputs.settings.time_s = m_resources->getTime_s();
+        applyTranslucencyAvailability(inputs.settings);
         return std::make_shared<RenderSession>(m_sceneState, std::move(inputs));
     }
 
@@ -1030,6 +1033,11 @@ namespace gladius
         m_resources = m_sceneState->getResources();
         m_primitives = m_sceneState->getPrimitives();
         m_programs = &m_sceneState->getProgramManager();
+
+        // Availability belongs to the published source, so it travels with the generation's
+        // resources: a fresh generation starts out without a translucency entry point.
+        m_translucencyActive.store(m_resources->isTranslucencyEntryPointActive(),
+                                   std::memory_order_release);
     }
 
     void ComputeCore::setComputeContext(std::shared_ptr<ComputeContext> context)
@@ -1223,7 +1231,11 @@ namespace gladius
                                       nodes::ToOclVisitor visitor;
                                       assembly->visitNodes(visitor);
                                       visitor.write(optimizedKernelStream);
-                                      result.source = optimizedKernelStream.str();
+                                      auto const translucency =
+                                        nodes::createTranslucencyKernelSource(*assembly);
+                                      result.source =
+                                        optimizedKernelStream.str() + translucency.source;
+                                      result.translucencyActive = translucency.active;
                                   }
                                   catch (std::exception const & e)
                                   {
@@ -1284,9 +1296,25 @@ namespace gladius
             logMsg(fmt::format("Optimized source generation job {} finished: {} bytes",
                                result.generation,
                                result.source.size()));
+            setTranslucencyAvailability(result.translucencyActive);
             m_programs->setOptimizedModelSource(std::move(result.source), true, true);
             m_programs->setCompiledParameterSignature(std::move(result.parameterSignature));
         }
+    }
+
+    void ComputeCore::setTranslucencyAvailability(bool const active)
+    {
+        m_translucencyActive.store(active, std::memory_order_release);
+        m_resources->setTranslucencyEntryPointActive(active);
+    }
+
+    void ComputeCore::applyTranslucencyAvailability(RenderingSettings & settings) const
+    {
+        if (m_translucencyActive.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        settings.flags &= ~RF_ENABLE_TRANSLUCENCY;
     }
 
     void ComputeCore::refreshProgram(nodes::SharedAssembly assembly)
@@ -1315,6 +1343,7 @@ namespace gladius
         invalidatePreCompSdf("refreshProgram");
         auto commandStreamKernel = std::optional<std::string>{};
         auto optimizedKernel = std::optional<std::string>{};
+        auto translucencyKernel = std::optional<nodes::TranslucencyKernelSource>{};
         bool const generateOptimizedSourceAsync =
           m_codeGenerator == CodeGenerator::Automatic &&
           m_programs->isOptimizedRenderCompilationDeferred();
@@ -1340,7 +1369,9 @@ namespace gladius
 
             getResourceContext()->getCommandBuffer().write();
 
-            commandStreamKernel = modelKernel.str();
+            // Command-stream evaluation cannot express the translucency channel, so the preview
+            // source gets the stub entry point the static render kernels always call.
+            commandStreamKernel = modelKernel.str() + nodes::createOpaqueTranslucencyKernelSource();
         }
 
         if (m_codeGenerator == CodeGenerator::Code ||
@@ -1352,6 +1383,7 @@ namespace gladius
             visitor.write(optimizedKernelStream);
 
             optimizedKernel = optimizedKernelStream.str();
+            translucencyKernel = nodes::createTranslucencyKernelSource(*assembly);
         }
 
         if (m_codeGenerator == CodeGenerator::Automatic)
@@ -1373,6 +1405,9 @@ namespace gladius
                                    commandStreamKernel->size()));
                 startOptimizedSourceGeneration(
                   assembly, parameterSignature, optimizedSourceGeneration);
+                // Only the command-stream preview source is published so far, and it cannot
+                // express the channel; the async job publishes the real availability.
+                setTranslucencyAvailability(false);
                 return;
             }
 
@@ -1381,7 +1416,9 @@ namespace gladius
                 logMsg("Automatic code generation failed to create both render sources");
                 return;
             }
-            m_programs->setModelSources(*optimizedKernel, *commandStreamKernel, true);
+            m_programs->setModelSources(*optimizedKernel + translucencyKernel->source,
+                                        *commandStreamKernel,
+                                        true);
         }
         else if (m_codeGenerator == CodeGenerator::CommandStream)
         {
@@ -1399,12 +1436,23 @@ namespace gladius
                 logMsg("Optimized code generation failed to create a render source");
                 return;
             }
-            m_programs->setModelSource(*optimizedKernel);
+            m_programs->setModelSource(*optimizedKernel + translucencyKernel->source);
         }
 
         // Capture parameter signature after code generation for fast-path validation
         m_programs->setCompiledParameterSignature(parameterSignature);
         logMsg(fmt::format("Captured parameter signature: {}", parameterSignature.toString()));
+        if (translucencyKernel.has_value())
+        {
+            setTranslucencyAvailability(translucencyKernel->active);
+            logMsg(fmt::format("Translucency entry point {}",
+                               translucencyKernel->active ? "generated" : "inactive (opaque model)"));
+        }
+        else
+        {
+            // Command-stream evaluation cannot express the channel, so nothing is translucent.
+            setTranslucencyAvailability(false);
+        }
     }
 
     void ComputeCore::tryRefreshProgramProtected(nodes::SharedAssembly assembly)
@@ -2099,6 +2147,7 @@ namespace gladius
         inputs.settings.time_s = m_resources->getTime_s();
         m_lastUsedApproximation = AM_HYBRID;
         m_lastUsedHQApproximation = AM_HYBRID;
+        applyTranslucencyAvailability(inputs.settings);
         (*renderProgram)
           ->renderScene(m_ComputeContext->GetQueue(),
                         *m_primitives,
@@ -2155,6 +2204,7 @@ namespace gladius
         inputs.settings.time_s = m_resources->getTime_s();
         m_lastUsedApproximation = AM_HYBRID;
         m_lastUsedHQApproximation = AM_HYBRID;
+        applyTranslucencyAvailability(inputs.settings);
 
         // Render directly to the target CL image buffer (no GL involved)
         cl::Event const renderEvent =
@@ -2213,6 +2263,7 @@ namespace gladius
           settings, m_resources->getEyePosition(), m_resources->getModelViewPerspectiveMat()};
         inputs.settings.z_mm = m_sliceHeight_mm;
         inputs.settings.time_s = m_resources->getTime_s();
+        applyTranslucencyAvailability(inputs.settings);
         cl::Event const renderEvent =
           (*renderProgram)
             ->renderSceneAsync(
@@ -2414,6 +2465,7 @@ namespace gladius
         inputs.settings.approximation = AM_HYBRID;
         inputs.settings.z_mm = m_sliceHeight_mm;
         inputs.settings.time_s = m_resources->getTime_s();
+        applyTranslucencyAvailability(inputs.settings);
 
         cl::Event const renderEvent =
           getBestRenderProgram()->renderSceneWithDistanceInitAsync(commandQueue,
@@ -2483,6 +2535,7 @@ namespace gladius
         inputs.settings.approximation = AM_HYBRID;
         inputs.settings.z_mm = m_sliceHeight_mm;
         inputs.settings.time_s = m_resources->getTime_s();
+        applyTranslucencyAvailability(inputs.settings);
 
         cl::Event const renderEvent =
           getBestRenderProgram()->renderSceneWithMetricsAsync(commandQueue,
@@ -2658,6 +2711,7 @@ namespace gladius
         applyCamera(thumbnailCamera);
 
         m_resources->getRenderingSettings().approximation = AM_FULL_MODEL;
+        applyTranslucencyAvailability(m_resources->getRenderingSettings());
         getBestRenderProgram()->renderScene(
           *m_primitives, *m_thumbnailImageHighRes, 0, 0, m_thumbnailImageHighRes->getHeight());
 

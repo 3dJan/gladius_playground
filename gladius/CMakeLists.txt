@@ -185,6 +185,11 @@ endif()
 # Include coverage support after project declaration so compiler info is available
 include(cmake/Coverage.cmake)
 
+# Scale build concurrency to the host (cores and physical memory) instead of a
+# fixed job count that throttles big machines and overwhelms small ones.
+include(cmake/ParallelBuild.cmake)
+gladius_configure_build_parallelism()
+
 # Ensure the 'install' target depends on building all targets first
 # (so CPack does not try to install artifacts that were not built yet).
 set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY OFF)
@@ -195,12 +200,17 @@ if (MSVC)
     add_compile_options(/bigobj /utf-8 /Zc:__cplusplus /Zm200 /WX)
 
     if(CMAKE_GENERATOR MATCHES "Ninja")
-      set(GLADIUS_MSVC_COMPILE_JOBS "2" CACHE STRING "Maximum concurrent MSVC compile jobs for Ninja builds")
-      set(GLADIUS_MSVC_HEAVY_COMPILE_JOBS "1" CACHE STRING "Maximum concurrent memory-heavy MSVC compile jobs for Ninja builds")
+      # Pool sizes come from ParallelBuild.cmake, which derives them from the
+      # host's cores and RAM. Pin them with GLADIUS_MSVC_COMPILE_JOB_POOL /
+      # GLADIUS_MSVC_HEAVY_COMPILE_JOB_POOL (0 keeps the detected value).
+      set(compileJobPool "${GLADIUS_RESOLVED_COMPILE_POOL}")
+      set(heavyCompileJobPool "${GLADIUS_RESOLVED_HEAVY_POOL}")
 
+      # Linking a static-library-heavy target peaks far higher than compiling,
+      # so keep a single linker at a time regardless of host size.
       set_property(GLOBAL PROPERTY JOB_POOLS
-        gladius_msvc_compile_pool=${GLADIUS_MSVC_COMPILE_JOBS}
-        gladius_msvc_heavy_compile_pool=${GLADIUS_MSVC_HEAVY_COMPILE_JOBS}
+        gladius_msvc_compile_pool=${compileJobPool}
+        gladius_msvc_heavy_compile_pool=${heavyCompileJobPool}
         gladius_msvc_link_pool=1)
       set(CMAKE_JOB_POOL_COMPILE gladius_msvc_compile_pool)
       set(CMAKE_JOB_POOL_LINK gladius_msvc_link_pool)
@@ -422,6 +432,7 @@ if(GLADIUS_ENABLE_OPENCL)
   configure_file(src/kernel/sdf.cl src/kernel/sdf.cl COPYONLY)
   configure_file(src/kernel/sdf.h src/kernel/sdf.h COPYONLY)
   configure_file(src/kernel/rendering.cl src/kernel/rendering.cl COPYONLY)
+  configure_file(src/kernel/translucency.cl src/kernel/translucency.cl COPYONLY)
   configure_file(src/kernel/sdf_generator.cl src/kernel/sdf_generator.cl COPYONLY)
   configure_file(src/kernel/manifold_dual_contouring.cl src/kernel/manifold_dual_contouring.cl COPYONLY)
 

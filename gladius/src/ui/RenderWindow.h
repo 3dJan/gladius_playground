@@ -12,6 +12,7 @@
 #include "render/NeutralRenderScheduler.h"
 #include "render/FramePresenter.h"
 #include "render/RealtimeRaymarchController.h"
+#include "RenderTranslucencyControls.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -452,6 +453,17 @@ namespace gladius::ui
         CameraState getCurrentCameraState();
         void onCameraManuallyMoved();
         [[nodiscard]] bool isNeutralDocumentReady();
+
+        /// @brief Translucency state of whichever render backend currently owns the view.
+        [[nodiscard]] compute::TranslucencyConfig readActiveTranslucency() const;
+        /// @brief Push translucency state back to the owning render backend.
+        /// @return true when a value actually changed
+        bool applyActiveTranslucency(compute::TranslucencyConfig const & config);
+        /**
+         * @brief Draw the translucency section of the rendering menu.
+         * @return true when the user changed a value, i.e. the view has to be invalidated
+         */
+        bool renderTranslucencyMenuSection();
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
         compute::RenderSettingsSnapshot m_neutralRenderSettings{

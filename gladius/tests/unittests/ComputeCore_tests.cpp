@@ -674,6 +674,30 @@ namespace gladius_tests
                               .parameterGeneration = 13u}));
       }
 
+      TEST_F(ComputeCore_Test, OpenCLRenderRequestFactory_TranslucencyRequestedWithoutEntryPoint_ClearsFlag)
+      {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto core = createCore();
+        auto resources = core->getResourceContext();
+        ASSERT_NE(resources, nullptr);
+
+        auto & settings = resources->getRenderingSettings();
+        settings.flags = RF_ENABLE_TRANSLUCENCY;
+
+        auto const viewport =
+          compute::RenderViewport{.width = 8u, .height = 8u, .firstRow = 0u, .endRow = 8u};
+        auto const requestWithoutEntryPoint =
+          compute::OpenCLRenderRequestFactory::create(*resources, viewport, {});
+        EXPECT_EQ(requestWithoutEntryPoint.settings.flags, 0u);
+
+        resources->setTranslucencyEntryPointActive(true);
+        auto const requestWithEntryPoint =
+          compute::OpenCLRenderRequestFactory::create(*resources, viewport, {});
+        EXPECT_EQ(requestWithEntryPoint.settings.flags,
+                  static_cast<std::uint32_t>(RF_ENABLE_TRANSLUCENCY));
+      }
+
     TEST_F(ComputeCore_Test, OpenCLComputeRenderer_WithCompiledModel_ReadsBackProgressiveFrame)
     {
         SKIP_IF_OPENCL_UNAVAILABLE();

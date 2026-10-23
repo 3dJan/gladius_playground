@@ -1427,6 +1427,22 @@ namespace gladius::ui
                                                                         &renderingFlags,
                                                                         RF_SHOW_COORDINATE_SYSTEM);
 
+                                                                    // Commit these flags before the translucency control edits
+                                                                    // the same settings object below.
+                                                                    if (flagsChanged)
+                                                                    {
+                                                                        if (hasOpenCLCore)
+                                                                        {
+                                                                            m_core->getResourceContext()->getRenderingSettings().flags =
+                                                                              renderingFlags;
+                                                                        }
+                                                                        else if (m_neutralBackendActive)
+                                                                        {
+                                                                            m_neutralRenderSettings.flags =
+                                                                              static_cast<std::uint32_t>(renderingFlags);
+                                                                        }
+                                                                    }
+
                                                                     ImGui::Separator();
                                   ImGui::SetNextItemWidth(150.f * m_uiScale);
                                   bool qualityChanged =
@@ -1453,6 +1469,12 @@ namespace gladius::ui
                                       invalidateView();
                                   }
                                   m_renderWindowState.renderQuality = quality;
+
+                                  if (renderTranslucencyMenuSection())
+                                  {
+                                      settingsChanged = true;
+                                      invalidateView();
+                                  }
 
                                   ImGui::Separator();
                                   if (ImGui::BeginMenu("Realtime Raymarch"))
@@ -1494,17 +1516,6 @@ namespace gladius::ui
                                   }
 
                                   ImGui::EndMenu();
-                              }
-
-                              if (hasOpenCLCore)
-                              {
-                                  m_core->getResourceContext()->getRenderingSettings().flags =
-                                    renderingFlags;
-                              }
-                              else if (m_neutralBackendActive)
-                              {
-                                  m_neutralRenderSettings.flags =
-                                    static_cast<std::uint32_t>(renderingFlags);
                               }
 
                               if (flagsChanged)

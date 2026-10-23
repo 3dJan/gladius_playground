@@ -56,7 +56,8 @@ namespace gladius::webgpu
     {
         auto scene = createAnalyticScene(model);
 
-        frameRequest.shaderSource = WebGPUFrameShaderComposer::compose(scene.analyticEvaluatorWgsl);
+        frameRequest.shaderSource = WebGPUFrameShaderComposer::compose(scene.analyticEvaluatorWgsl,
+                                                                      scene.translucencyEvaluatorWgsl);
         frameRequest.parameterValues = std::move(scene.parameterValues);
         return frameRequest;
     }
@@ -65,7 +66,8 @@ namespace gladius::webgpu
                                                                        compute::FrameRequest frameRequest)
     {
         auto scene = compute::AnalyticRenderSceneSnapshotFactory::create(assembly, 1u);
-        frameRequest.shaderSource = WebGPUFrameShaderComposer::compose(scene.analyticEvaluatorWgsl);
+        frameRequest.shaderSource = WebGPUFrameShaderComposer::compose(scene.analyticEvaluatorWgsl,
+                                                                      scene.translucencyEvaluatorWgsl);
         frameRequest.parameterValues = std::move(scene.parameterValues);
         return frameRequest;
     }

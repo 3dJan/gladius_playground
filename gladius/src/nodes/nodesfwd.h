@@ -259,6 +259,8 @@ namespace gladius::nodes
         static auto constexpr Green = "green";
         static auto constexpr Blue = "blue";
         static auto constexpr Alpha = "alpha";
+        /// \brief Name of the scalar translucency output channel (ISO/TS 19307 alpha in [0,1]).
+        static auto constexpr Translucency = "translucency";
         static auto constexpr UVW = "uvw";
         static auto constexpr TileStyleU = "tilestyle_u";
         static auto constexpr TileStyleV = "tilestyle_v";

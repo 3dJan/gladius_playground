@@ -42,6 +42,9 @@ namespace gladius
                          "mesh_sdf.cl",
                          "sdf.cl",
                          "rendering.cl",
+                         // Must follow rendering.cl (it reuses determineColor/modelInternal) and
+                         // precede renderer.cl, whose kernels call the compositor defined here.
+                         "translucency.cl",
                          "renderer.cl"};
     }
 

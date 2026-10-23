@@ -2,6 +2,7 @@
 
 #include "ResourceContext.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace gladius::compute
@@ -41,6 +42,15 @@ namespace gladius::compute
         auto const & sourceSettings = resources.getRenderingSettings();
         auto const aspectRatio = static_cast<float>(viewport.width) / static_cast<float>(viewport.height);
 
+        // A scene without a translucency entry point must stay opaque even when the user switched
+        // the feature on - its generated channel is a zero stub, which would attenuate nothing and
+        // instead make the model read as fully transparent.
+        auto flags = static_cast<std::uint32_t>(sourceSettings.flags);
+        if (!resources.isTranslucencyEntryPointActive())
+        {
+            flags &= ~static_cast<std::uint32_t>(RF_ENABLE_TRANSLUCENCY);
+        }
+
         return RenderRequest{
           .camera = {.eyePosition = {eye.x, eye.y, eye.z},
                      .forwardDirection = {matrix.s8, matrix.s9, matrix.sa},
@@ -49,7 +59,7 @@ namespace gladius::compute
           .frustum = {.horizontalScale = 0.5f, .verticalScale = 0.5f / aspectRatio},
           .settings = {.timeSeconds = resources.getTime_s(),
                        .sliceHeight = sourceSettings.z_mm,
-                       .flags = static_cast<std::uint32_t>(sourceSettings.flags),
+                       .flags = flags,
                        .mode = toRenderMode(sourceSettings.approximation),
                        .quality = sourceSettings.quality,
                        .normalOffset = sourceSettings.normalOffset,
@@ -58,7 +68,14 @@ namespace gladius::compute
                        .meshFwnBeta = sourceSettings.meshFwnBeta,
                        .meshFwnFarFieldFactor = sourceSettings.meshFwnFarFieldFactor,
                        .weightDistanceToNeighbor = sourceSettings.weightDistToNb,
-                       .weightMidpoint = sourceSettings.weightMidPoint},
+                       .weightMidpoint = sourceSettings.weightMidPoint,
+                       .translucencyReferenceThicknessMm = sourceSettings.translucencyReferenceThicknessMm,
+                       .translucencyInteriorStepSize = sourceSettings.translucencyInteriorStepSize,
+                       .translucencyMaxInteriorSteps =
+                         static_cast<std::uint32_t>(std::max(sourceSettings.translucencyMaxInteriorSteps, 1.f)),
+                       .translucencyFloor = sourceSettings.translucencyFloor,
+                       .translucencyMaxSurfaces =
+                         static_cast<std::uint32_t>(std::max(sourceSettings.translucencyMaxSurfaces, 1.f))},
           .viewport = viewport,
           .freshness = freshness};
     }

@@ -24,6 +24,7 @@
 #include "io/ShellExporter.h"
 #endif
 #include "compute/ApplicationComputeRuntime.h"
+#include "compute/TranslucencyConfig.h"
 #if defined(GLADIUS_ENABLE_WEBGPU)
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
 #include "compute/IBoundsService.h"
@@ -83,6 +84,40 @@ namespace gladius
     namespace
     {
         constexpr double kNanoVdbBudgetUtilization = 0.5;
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        /**
+         * @brief Renders an OpenCL thumbnail, optionally overriding the translucency part of the
+         * core's rendering settings for this single render only.
+         *
+         * The OpenCL backend keeps its rendering settings in its resource context instead of
+         * receiving them per dispatch, so a one-off request has to be pushed and popped.
+         */
+        [[nodiscard]] PlainImage
+          renderOpenClThumbnailPng(ComputeCore & core,
+                                   std::optional<compute::RenderSettingsSnapshot> const & settings)
+        {
+            if (!settings.has_value())
+            {
+                return core.createThumbnailPng();
+            }
+
+            auto & renderingSettings = core.getResourceContext()->getRenderingSettings();
+            auto const backup = compute::readTranslucency(renderingSettings);
+            compute::applyTranslucency(renderingSettings, compute::readTranslucency(*settings));
+            try
+            {
+                auto const image = core.createThumbnailPng();
+                compute::applyTranslucency(renderingSettings, backup);
+                return image;
+            }
+            catch (...)
+            {
+                compute::applyTranslucency(renderingSettings, backup);
+                throw;
+            }
+        }
+#endif
 
 #if defined(GLADIUS_ENABLE_OPENCL)
         [[nodiscard]] NanoVdbBuildPolicy
@@ -2225,7 +2260,8 @@ namespace gladius
     PlainImage Document::createThumbnailPng(
       std::uint32_t const width,
       std::uint32_t const height,
-      std::optional<compute::RenderCamera> camera)
+      std::optional<compute::RenderCamera> camera,
+      std::optional<compute::RenderSettingsSnapshot> settings)
     {
         if (width == 0u || height == 0u)
         {
@@ -2234,6 +2270,9 @@ namespace gladius
 
 #if !defined(GLADIUS_ENABLE_WEBGPU)
         (void) camera;
+#endif
+#if !defined(GLADIUS_ENABLE_OPENCL)
+        (void) settings;
 #endif
 
         if (m_backendRuntime != nullptr)
@@ -2266,7 +2305,8 @@ namespace gladius
                       width,
                       height,
                       generation,
-                      std::move(camera));
+                      std::move(camera),
+                      settings.value_or(compute::RenderSettingsSnapshot{}));
                 }
                 throw std::runtime_error("WebGPU thumbnail context is unavailable");
 #else
@@ -2276,7 +2316,7 @@ namespace gladius
 #if defined(GLADIUS_ENABLE_OPENCL)
                 if (auto core = m_backendRuntime->getOpenCLCore())
                 {
-                    return core->createThumbnailPng();
+                    return renderOpenClThumbnailPng(*core, settings);
                 }
                 throw std::runtime_error("OpenCL thumbnail core is unavailable");
 #else
@@ -2289,7 +2329,7 @@ namespace gladius
 #if defined(GLADIUS_ENABLE_OPENCL)
         if (m_core)
         {
-            return m_core->createThumbnailPng();
+            return renderOpenClThumbnailPng(*m_core, settings);
         }
 #endif
 

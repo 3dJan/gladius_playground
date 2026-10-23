@@ -571,9 +571,10 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                   .flagsModeReserved = {request.renderingFlags,
                                         request.renderingMode,
                                         request.modelBounds.has_value() ? 1u : 0u,
-                                        0u},
+                                        request.translucencyMaxSurfaces},
                   .clippingBoxMin = {},
-                  .clippingBoxMax = {}};
+                  .clippingBoxMax = {},
+                  .translucencyParams = request.translucencyParams};
                 if (request.modelBounds.has_value())
                 {
                     uniforms.clippingBoxMin = {request.modelBounds->min[0],

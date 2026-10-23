@@ -19,6 +19,9 @@
 #include "MeshBVH.h"
 #include "Parameter.h"
 #include "Profiling.h"
+#include "ResourceIdUtil.h"
+#include "VolumeDataTranslucency.h"
+#include "nodes/ModelUtils.h"
 #include "SpatialMeshResource.h"
 #if defined(GLADIUS_ENABLE_OPENVDB)
 #include "VdbImporter.h"
@@ -1771,47 +1774,149 @@ namespace gladius::io
         }
     }
 
+    void Importer3mf::logImportError(std::string const & message) const
+    {
+        if (m_eventLogger)
+        {
+            m_eventLogger->addEvent({message, events::Severity::Error});
+        }
+    }
+
+    void Importer3mf::logImportWarning(std::string const & message) const
+    {
+        if (m_eventLogger)
+        {
+            m_eventLogger->addEvent({message, events::Severity::Warning});
+        }
+    }
+
+    nodes::Model * Importer3mf::resolveFunctionModel(Lib3MF::PFunctionReference const & reference,
+                                                     Lib3MF::PModel & model,
+                                                     gladius::Document & doc,
+                                                     std::string_view functionDescription) const
+    {
+        auto funcId = reference->GetFunctionResourceID();
+        auto res = model->GetResourceByID(funcId);
+        if (!res)
+        {
+            logImportError(fmt::format("Could not find {} function with unique id {} "
+                                       "to resolve the model id",
+                                       functionDescription,
+                                       funcId));
+            return nullptr;
+        }
+        auto modelFuncId = res->GetModelResourceID();
+
+        auto sharedFunctionModel = doc.getAssembly()->findModel(modelFuncId);
+        if (!sharedFunctionModel)
+        {
+            logImportError(fmt::format("Could not find {} function with id {}",
+                                       functionDescription,
+                                       modelFuncId));
+            return nullptr;
+        }
+        return sharedFunctionModel.get();
+    }
+
+    bool Importer3mf::applyColorProperty(Lib3MF::PVolumeData & volume,
+                                         Lib3MF::PModel & model,
+                                         gladius::Document & doc,
+                                         gladius::nodes::Builder & builder,
+                                         gladius::nodes::Port & coordinateSystemPort)
+    {
+        auto color = volume->GetColor();
+        if (!color)
+        {
+            return false;
+        }
+
+        auto * colorFunction = resolveFunctionModel(color, model, doc, "color");
+        if (colorFunction == nullptr)
+        {
+            return false;
+        }
+
+        try
+        {
+            auto transform = matrix4x4From3mfTransform(color->GetTransform());
+            builder.appendFunctionForColorOutput(
+              *doc.getAssembly()->assemblyModel(), *colorFunction, coordinateSystemPort, transform);
+        }
+        catch (const std::exception & e)
+        {
+            logImportWarning(fmt::format("Could not apply the color function: {}", e.what()));
+            return false;
+        }
+        return true;
+    }
+
+    bool Importer3mf::applyTranslucencyProperty(Lib3MF::PVolumeData & volume,
+                                                Lib3MF::PModel & model,
+                                                gladius::Document & doc,
+                                                gladius::nodes::Builder & builder,
+                                                gladius::nodes::Port & coordinateSystemPort)
+    {
+        auto property = findTranslucencyProperty(volume);
+        if (!property)
+        {
+            return false;
+        }
+
+        auto * translucencyFunction = resolveFunctionModel(property, model, doc, "translucency");
+        if (translucencyFunction == nullptr)
+        {
+            return false;
+        }
+
+        auto channelName = property->GetChannelName();
+        if (channelName.empty())
+        {
+            channelName = nodes::FieldNames::Translucency;
+        }
+
+        auto * assemblyModel = doc.getAssembly()->assemblyModel().get();
+        auto * endNode = assemblyModel->getEndNode();
+        auto * translucencySink =
+          endNode ? endNode->getParameter(nodes::FieldNames::Translucency) : nullptr;
+        if (translucencySink && translucencySink->getSource().has_value())
+        {
+            logImportWarning("Translucency is already defined by another volume data - "
+                             "ignoring this one");
+            return false;
+        }
+
+        try
+        {
+            builder.appendFunctionForTranslucencyOutput(*assemblyModel,
+                                                        *translucencyFunction,
+                                                        coordinateSystemPort,
+                                                        matrix4x4From3mfTransform(
+                                                          property->GetTransform()),
+                                                        channelName);
+        }
+        catch (const std::exception & e)
+        {
+            logImportWarning(fmt::format("Could not apply the translucency function: {}",
+                                         e.what()));
+            return false;
+        }
+        return true;
+    }
+
     void Importer3mf::addVolumeData(Lib3MF::PVolumeData & volume,
                                     Lib3MF::PModel & model,
                                     gladius::Document & doc,
                                     gladius::nodes::Builder & builder,
                                     gladius::nodes::Port & coordinateSystemPort)
     {
-        auto color = volume->GetColor();
-        if (color)
+        // Color and translucency are independent channels - a failure in one must not
+        // prevent the other from being wired into the assembly.
+        bool const colorApplied = applyColorProperty(volume, model, doc, builder, coordinateSystemPort);
+        bool const translucencyApplied =
+          applyTranslucencyProperty(volume, model, doc, builder, coordinateSystemPort);
+
+        if (colorApplied || translucencyApplied)
         {
-            auto funcId = color->GetFunctionResourceID();
-            auto res = model->GetResourceByID(funcId);
-            if (!res)
-            {
-                if (m_eventLogger)
-                {
-                    m_eventLogger->addEvent(
-                      {fmt::format("Could not find color function with unique id {} "
-                                   "to resolve the model id",
-                                   funcId),
-                       events::Severity::Error});
-                }
-                return;
-            }
-            auto modelFuncId = res->GetModelResourceID();
-
-            auto colorFunction = doc.getAssembly()->findModel(modelFuncId);
-            if (!colorFunction)
-            {
-                if (m_eventLogger)
-                {
-                    m_eventLogger->addEvent(
-                      {fmt::format("Could not find color function with id {}", modelFuncId),
-                       events::Severity::Error});
-                }
-                return;
-            }
-
-            auto transform = matrix4x4From3mfTransform(color->GetTransform());
-            builder.appendFunctionForColorOutput(
-              *doc.getAssembly()->assemblyModel(), *colorFunction, coordinateSystemPort, transform);
-
             doc.getAssembly()->updateInputsAndOutputs();
         }
     }

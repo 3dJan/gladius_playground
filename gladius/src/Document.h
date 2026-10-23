@@ -218,10 +218,13 @@ namespace gladius
         /// @brief Renders and encodes a thumbnail using the selected backend.
         [[nodiscard]] PlainImage createThumbnailPng(std::uint32_t size = 256);
         /// @brief Renders a PNG using the selected backend and requested view.
+        /// @param settings backend-neutral settings; only the translucency part is applied to an
+        ///        OpenCL core, because that backend keeps its rendering settings in its resources.
         [[nodiscard]] PlainImage createThumbnailPng(
           std::uint32_t width,
           std::uint32_t height,
-          std::optional<compute::RenderCamera> camera = {});
+          std::optional<compute::RenderCamera> camera = {},
+          std::optional<compute::RenderSettingsSnapshot> settings = {});
         /// @return The selected backend, or no value if no runtime/core is available.
         [[nodiscard]] std::optional<compute::ComputeBackendKind> getBackendKind() const noexcept;
 

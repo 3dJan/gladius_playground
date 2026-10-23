@@ -7,6 +7,7 @@
 #include "../../Application.h"
 #include "../../Document.h"
 #include "compute/RenderContracts.h"
+#include "compute/TranslucencyConfig.h"
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -113,6 +114,73 @@ namespace gladius
                         .upDirection = up};
             }
 
+            /**
+             * @brief Read the translucency knobs of a render request.
+             *
+             * "translucency" switches the front-to-back integrator on; the remaining keys tune how
+             * the interior optical depth is integrated. Out-of-range values are clamped instead of
+             * rejected, mirroring the UI sliders. Returns no value when the caller asked for nothing
+             * translucency-related, so backends keep their own current settings.
+             */
+            [[nodiscard]] std::optional<compute::RenderSettingsSnapshot>
+              parseTranslucencySettings(nlohmann::json const & renderSettings)
+            {
+                static constexpr char const * const keys[] = {"translucency",
+                                                              "translucency_reference_thickness_mm",
+                                                              "translucency_interior_step_mm",
+                                                              "translucency_max_surfaces",
+                                                              "translucency_transmittance_floor",
+                                                              "translucency_max_interior_steps"};
+                bool anyPresent = false;
+                for (auto const * const key : keys)
+                {
+                    anyPresent = anyPresent || renderSettings.contains(key);
+                }
+                if (!anyPresent)
+                {
+                    return std::nullopt;
+                }
+
+                compute::RenderSettingsSnapshot settings{};
+                compute::TranslucencyConfig config = compute::readTranslucency(settings);
+                config.enabled = renderSettings.value("translucency", false);
+                config.referenceThicknessMm = renderSettings.value(
+                  "translucency_reference_thickness_mm", config.referenceThicknessMm);
+                config.interiorStepSizeMm =
+                  renderSettings.value("translucency_interior_step_mm", config.interiorStepSizeMm);
+                config.maxSurfaces =
+                  renderSettings.value("translucency_max_surfaces", config.maxSurfaces);
+                config.transmittanceFloor =
+                  renderSettings.value("translucency_transmittance_floor", config.transmittanceFloor);
+                config.maxInteriorSteps =
+                  renderSettings.value("translucency_max_interior_steps", config.maxInteriorSteps);
+                compute::applyTranslucency(settings, config);
+                return settings;
+            }
+
+            /// @brief Describe the translucency a render actually used, for the tool response.
+            [[nodiscard]] nlohmann::json describeTranslucency(compute::TranslucencyConfig const & config)
+            {
+                return nlohmann::json{{"translucency", config.enabled},
+                                      {"translucency_reference_thickness_mm",
+                                       config.referenceThicknessMm},
+                                      {"translucency_interior_step_mm", config.interiorStepSizeMm},
+                                      {"translucency_max_surfaces", config.maxSurfaces},
+                                      {"translucency_transmittance_floor", config.transmittanceFloor},
+                                      {"translucency_max_interior_steps", config.maxInteriorSteps}};
+            }
+
+            /// @brief Describe the translucency a render actually used, for the tool response.
+            [[nodiscard]] nlohmann::json describeTranslucency(
+              std::optional<compute::RenderSettingsSnapshot> const & settings)
+            {
+                if (!settings.has_value())
+                {
+                    return describeTranslucency(compute::TranslucencyConfig{});
+                }
+                return describeTranslucency(compute::readTranslucency(*settings));
+            }
+
             [[nodiscard]] nlohmann::json renderWebGpuPng(
               Document & document,
               std::string const & outputPath,
@@ -122,7 +190,8 @@ namespace gladius
               float const quality,
               std::optional<compute::RenderCamera> camera,
               std::string const & message,
-              nlohmann::json additionalData = nlohmann::json::object())
+              nlohmann::json additionalData = nlohmann::json::object(),
+              std::optional<compute::RenderSettingsSnapshot> settings = std::nullopt)
             {
                 if (format != "png")
                 {
@@ -130,7 +199,7 @@ namespace gladius
                       "The selected WebGPU thumbnail renderer currently supports PNG output only");
                 }
 
-                auto image = document.createThumbnailPng(width, height, std::move(camera));
+                auto image = document.createThumbnailPng(width, height, std::move(camera), settings);
                 auto const outputFile = std::filesystem::path(outputPath);
                 if (!outputFile.parent_path().empty())
                 {
@@ -226,8 +295,11 @@ namespace gladius
                         auto const height = renderSettings.value("height", 256u);
                         auto const format = renderSettings.value("format", std::string{"png"});
                         auto const quality = renderSettings.value("quality", 0.9f);
+                        auto const translucency = parseTranslucencySettings(renderSettings);
                         auto additionalData = nlohmann::json{
-                          {"cameraSettings", cameraSettings}, {"renderSettings", renderSettings}};
+                          {"cameraSettings", cameraSettings},
+                          {"renderSettings", renderSettings},
+                          {"translucency", describeTranslucency(translucency)}};
                         return renderWebGpuPng(*document,
                                                outputPath,
                                                width,
@@ -236,7 +308,8 @@ namespace gladius
                                                quality,
                                                parseRenderCamera(cameraSettings),
                                                "Camera-based rendering completed successfully",
-                                               std::move(additionalData));
+                                               std::move(additionalData),
+                                               translucency);
                     }
                     catch (std::exception const & error)
                     {
@@ -529,11 +602,14 @@ namespace gladius
                     throw std::runtime_error("No active document");
                 }
                 auto const backend = document->getBackendKind();
+                auto const translucency = parseTranslucencySettings(renderSettings);
                 if (backend.has_value() &&
                     *backend == compute::ComputeBackendKind::WebGPU)
                 {
                     auto additionalData = nlohmann::json{
-                      {"cameraSettings", cameraSettings}, {"renderSettings", renderSettings}};
+                      {"cameraSettings", cameraSettings},
+                      {"renderSettings", renderSettings},
+                      {"translucency", describeTranslucency(translucency)}};
                     return renderWebGpuPng(*document,
                                            outputPath,
                                            width,
@@ -542,7 +618,8 @@ namespace gladius
                                            quality,
                                            parseRenderCamera(cameraSettings),
                                            "Camera-based rendering completed successfully",
-                                           std::move(additionalData));
+                                           std::move(additionalData),
+                                           translucency);
                 }
 
                 // Get validated compute core
@@ -565,6 +642,15 @@ namespace gladius
                 // Store current camera settings to restore later
                 auto originalEyePos = core->getResourceContext()->getEyePosition();
                 auto originalViewMat = core->getResourceContext()->getModelViewPerspectiveMat();
+                auto const originalTranslucency =
+                  compute::readTranslucency(core->getResourceContext()->getRenderingSettings());
+                if (translucency.has_value())
+                {
+                    // The OpenCL backend reads its rendering settings from the resource context,
+                    // so a one-off request has to be pushed for this render and popped afterwards.
+                    compute::applyTranslucency(core->getResourceContext()->getRenderingSettings(),
+                                               compute::readTranslucency(*translucency));
+                }
 
                 try
                 {
@@ -599,12 +685,20 @@ namespace gladius
                     createOutputDirectory(outputPath);
                     core->saveThumbnail(outputPath);
 
+                    // Read back what the render really used - the core clears the flag again when
+                    // the model has no translucency entry point to answer it with.
+                    auto const effective =
+                      compute::readTranslucency(core->getResourceContext()->getRenderingSettings());
+
                     // Restore original camera settings
                     core->getResourceContext()->setEyePosition(originalEyePos);
                     core->getResourceContext()->setModelViewPerspectiveMat(originalViewMat);
+                    compute::applyTranslucency(core->getResourceContext()->getRenderingSettings(),
+                                               originalTranslucency);
 
                     nlohmann::json additionalData = {{"cameraSettings", cameraSettings},
-                                                     {"renderSettings", renderSettings}};
+                                                     {"renderSettings", renderSettings},
+                                                     {"translucency", describeTranslucency(effective)}};
 
                     return createSuccessResponse(
                       "Camera-based rendering completed successfully (using thumbnail system - "
@@ -621,6 +715,8 @@ namespace gladius
                     // Restore original camera settings on error
                     core->getResourceContext()->setEyePosition(originalEyePos);
                     core->getResourceContext()->setModelViewPerspectiveMat(originalViewMat);
+                    compute::applyTranslucency(core->getResourceContext()->getRenderingSettings(),
+                                               originalTranslucency);
                     throw; // Re-throw the exception
                 }
             }

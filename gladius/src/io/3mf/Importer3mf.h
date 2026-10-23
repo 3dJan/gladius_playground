@@ -204,6 +204,52 @@ namespace gladius::io
                            gladius::nodes::Builder & builder,
                            gladius::nodes::Port & coordinateSystemPort);
 
+        /**
+         * @brief Wire the volume data color function into the assembly, if present.
+         *
+         * @return true if a color function was resolved and wired into the assembly
+         */
+        bool applyColorProperty(Lib3MF::PVolumeData & volume,
+                                Lib3MF::PModel & model,
+                                gladius::Document & doc,
+                                gladius::nodes::Builder & builder,
+                                gladius::nodes::Port & coordinateSystemPort);
+
+        /**
+         * @brief Wire the translucency property of a volume data into the assembly, if present.
+         *
+         * The translucency channel is stored as a generic 3MF volumetric property named
+         * "translucency", because lib3mf cannot serialize the dedicated <v:translucency>
+         * element yet. The referenced function's scalar output selected by the property's
+         * channel name is connected to the assembly's translucency output.
+         *
+         * @return true if a translucency property was resolved and wired into the assembly
+         */
+        bool applyTranslucencyProperty(Lib3MF::PVolumeData & volume,
+                                       Lib3MF::PModel & model,
+                                       gladius::Document & doc,
+                                       gladius::nodes::Builder & builder,
+                                       gladius::nodes::Port & coordinateSystemPort);
+
+        /**
+         * @brief Resolve the implicit function referenced by a function reference.
+         *
+         * @param reference The 3MF function reference (color or property)
+         * @param model The 3MF model holding the referenced function resource
+         * @param doc The document whose assembly holds the matching function model
+         * @param functionDescription Used to phrase the error when resolution fails
+         * @return the function model, or nullptr when the reference cannot be resolved
+         */
+        [[nodiscard]] nodes::Model *
+          resolveFunctionModel(Lib3MF::PFunctionReference const & reference,
+                               Lib3MF::PModel & model,
+                               gladius::Document & doc,
+                               std::string_view functionDescription) const;
+
+        void logImportError(std::string const & message) const;
+
+        void logImportWarning(std::string const & message) const;
+
         void addLevelSetObject(Lib3MF::PModel model,
                                ResourceKey const & key,
                                Lib3MF::PLevelSet levelSetObject,

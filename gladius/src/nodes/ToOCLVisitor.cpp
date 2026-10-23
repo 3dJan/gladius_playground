@@ -21,6 +21,21 @@ namespace gladius::nodes
         m_visitedNodes.clear();
         m_referenceAnalysisPerformed = false;
         m_inlineExpressions.clear();
+        m_channelSelector.setModel(model);
+    }
+
+    void ToOclVisitor::setEvaluatorChannel(EvaluatorChannel const channel)
+    {
+        m_channelSelector.setChannel(channel);
+        if (channel == EvaluatorChannel::Translucency)
+        {
+            m_channelSelector.setEmittedChannels({std::string{FieldNames::Translucency}});
+        }
+    }
+
+    EvaluatorChannel ToOclVisitor::getEvaluatorChannel() const noexcept
+    {
+        return m_channelSelector.getChannel();
     }
 
     void ToOclVisitor::write(std::ostream & out) const
@@ -64,9 +79,20 @@ namespace gladius::nodes
         return const_cast<IParameter &>(param).toString();
     }
 
+    bool ToOclVisitor::isAssemblyModel() const
+    {
+        return m_assembly != nullptr && m_currentModel != nullptr &&
+               m_currentModel->getResourceId() == m_assembly->assemblyModel()->getResourceId();
+    }
+
     auto ToOclVisitor::isOutPutOfNodeValid(NodeBase const & node) -> bool
     {
         if (m_endReached)
+        {
+            return false;
+        }
+
+        if (isAssemblyModel() && !m_channelSelector.isNeededByChannel(node.getId()))
         {
             return false;
         }
@@ -213,10 +239,19 @@ namespace gladius::nodes
 
     void ToOclVisitor::assemblyBegin(Begin & beginning)
     {
-        m_declaration << fmt::format("float4 model(float3 {}, PAYLOAD_ARGS);\n",
+        auto const translucencyPass =
+          m_channelSelector.getChannel() == EvaluatorChannel::Translucency;
+        auto const entryPointName = translucencyPass ? "translucencyModel" : "model";
+        auto const returnType = translucencyPass ? "float" : "float4";
+
+        m_declaration << fmt::format("{} {}(float3 {}, PAYLOAD_ARGS);\n",
+                                     returnType,
+                                     entryPointName,
                                      beginning.getOutputs()[FieldNames::Pos].getUniqueName());
 
-        m_definition << fmt::format("float4 model(float3 {},  PAYLOAD_ARGS)\n{{\n",
+        m_definition << fmt::format("{} {}(float3 {},  PAYLOAD_ARGS)\n{{\n",
+                                    returnType,
+                                    entryPointName,
                                     beginning.getOutputs()[FieldNames::Pos].getUniqueName());
 
         for (auto & [name, output] : beginning.getOutputs())
@@ -323,6 +358,15 @@ namespace gladius::nodes
 
         if (isAssembly)
         {
+            if (m_channelSelector.getChannel() == EvaluatorChannel::Translucency)
+            {
+                // Clamp to the ISO/TS 19307 translucency alpha range instead of trusting the graph.
+                m_definition << fmt::format(
+                  "return clamp({0}, 0.f, 1.f);\n}}\n",
+                  resolveParameter(ending.parameter().at(FieldNames::Translucency)));
+                return;
+            }
+
             auto fallBackValue =
               m_assembly->getFallbackValueLevelSet(); // The fallback value is used if shape is not
                                                       // a number or infinity

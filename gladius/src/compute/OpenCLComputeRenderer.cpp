@@ -36,7 +36,8 @@ namespace gladius::compute
             [[nodiscard]] RendererCapability getCapabilities() const noexcept override
             {
                 return RendererCapability::AnalyticRendering | RendererCapability::ProgressiveRendering |
-                       RendererCapability::FramePresentation;
+                       RendererCapability::FramePresentation |
+                       RendererCapability::TranslucentRendering;
             }
 
             [[nodiscard]] SharedRenderSession const & getSession() const noexcept
@@ -64,6 +65,11 @@ namespace gladius::compute
             settings.meshInflationDistance = snapshot.meshInflationDistance;
             settings.meshFwnBeta = snapshot.meshFwnBeta;
             settings.meshFwnFarFieldFactor = snapshot.meshFwnFarFieldFactor;
+            settings.translucencyReferenceThicknessMm = snapshot.translucencyReferenceThicknessMm;
+            settings.translucencyInteriorStepSize = snapshot.translucencyInteriorStepSize;
+            settings.translucencyMaxInteriorSteps = static_cast<float>(snapshot.translucencyMaxInteriorSteps);
+            settings.translucencyFloor = snapshot.translucencyFloor;
+            settings.translucencyMaxSurfaces = static_cast<float>(snapshot.translucencyMaxSurfaces);
             return settings;
         }
 
@@ -256,7 +262,7 @@ namespace gladius::compute
     RendererCapability OpenCLComputeRenderer::getCapabilities() const noexcept
     {
         return RendererCapability::AnalyticRendering | RendererCapability::ProgressiveRendering |
-               RendererCapability::FramePresentation;
+               RendererCapability::FramePresentation | RendererCapability::TranslucentRendering;
     }
 
     bool OpenCLComputeRenderer::isAvailable() const noexcept

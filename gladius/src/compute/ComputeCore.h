@@ -707,6 +707,9 @@ namespace gladius
             std::string source;
             ParameterSignature parameterSignature;
             std::string errorMessage;
+            /// True when the model authored a translucency channel, i.e. the generated
+            /// source carries a real translucencyModel entry point instead of the stub.
+            bool translucencyActive = false;
         };
 
         [[nodiscard]] std::uint64_t beginOptimizedSourceGeneration();
@@ -715,6 +718,19 @@ namespace gladius
                                             ParameterSignature parameterSignature,
                                             std::uint64_t generation);
         void pollOptimizedSourceGeneration();
+
+        /// @brief Clears RF_ENABLE_TRANSLUCENCY when the published render source has no real
+        /// translucency entry point, so the flag never reaches a model that cannot answer it.
+        /// @param settings dispatch local settings to adjust in place
+        void applyTranslucencyAvailability(RenderingSettings & settings) const;
+
+        /**
+         * @brief Publish whether the published render source answers the translucency channel.
+         *
+         * Kept on the shared ResourceContext as well, because request builders outside ComputeCore
+         * (the OpenCL render-request factory used by the UI) must mask RF_ENABLE_TRANSLUCENCY too.
+         */
+        void setTranslucencyAvailability(bool active);
 
         mutable std::recursive_mutex m_computeMutex; // TODO: replace with std::mutex
 
@@ -772,6 +788,10 @@ namespace gladius
         /// @brief Tracks whether the distance init buffer contains valid data
         /// @note Invalidated on parameter changes, camera changes, or resolution changes
         std::atomic_bool m_distanceInitBufferValid{false};
+
+        /// @brief True while the published render source carries a real translucencyModel
+        /// entry point. Set from the code generator, never from the UI settings.
+        std::atomic_bool m_translucencyActive{false};
 
         /// @brief Tracks last used approximation modes for UI status display only
         /// @note Mutable because these are purely diagnostic and set during const render methods

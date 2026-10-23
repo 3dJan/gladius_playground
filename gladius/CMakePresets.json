@@ -24,9 +24,6 @@
                 "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-triplets",
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-            },
-            "environment": {
-                "CMAKE_BUILD_PARALLEL_LEVEL": "8"
             }
         },
         {
@@ -115,9 +112,6 @@
                 "ENABLE_COVERAGE": "OFF",
                 "ENABLE_TRACY": "TRUE",
                 "GLADIUS_ENABLE_WEBGPU": "ON"
-            },
-            "environment": {
-                "CMAKE_BUILD_PARALLEL_LEVEL": "8"
             }
         },
         {
@@ -225,70 +219,58 @@
         {
             "name": "x64-debug",
             "displayName": "x64 Debug",
-            "configurePreset": "x64-debug",
-            "jobs": 2
+            "configurePreset": "x64-debug"
         },
         {
             "name": "x64-release",
             "displayName": "x64 Release",
-            "configurePreset": "x64-release",
-            "jobs": 2
+            "configurePreset": "x64-release"
         },
         {
             "name": "x64-release-debug",
             "displayName": "x64 Release with Debug",
-            "configurePreset": "x64-release-debug",
-            "jobs": 2
+            "configurePreset": "x64-release-debug"
         },
         {
             "name": "x64-release-debug-asan",
             "displayName": "x64 Release with Debug and ASAN",
-            "configurePreset": "x64-release-debug-asan",
-            "jobs": 2
+            "configurePreset": "x64-release-debug-asan"
         },
         {
             "name": "x64-release-debug-noOpenCL",
             "displayName": "x64 Release with Debug (No OpenCL Tests)",
-            "configurePreset": "x64-release-debug-noOpenCL",
-            "jobs": 2
+            "configurePreset": "x64-release-debug-noOpenCL"
         },
         {
             "name": "linux-debug",
-            "configurePreset": "linux-debug",
-            "jobs": 8
+            "configurePreset": "linux-debug"
         },
         {
             "name": "linux-release",
-            "configurePreset": "linux-release",
-            "jobs": 8
+            "configurePreset": "linux-release"
         },
         {
             "name": "linux-releaseWithDebug",
-            "configurePreset": "linux-releaseWithDebug",
-            "jobs": 8
+            "configurePreset": "linux-releaseWithDebug"
         },
         {
             "name": "linux-releaseWithDebug-noOpenCL",
-            "configurePreset": "linux-releaseWithDebug-noOpenCL",
-            "jobs": 8
+            "configurePreset": "linux-releaseWithDebug-noOpenCL"
         },
         {
             "name": "linux-webgpu-releaseWithDebug",
             "displayName": "Linux RelWithDebInfo (WebGPU only)",
-            "configurePreset": "linux-webgpu-releaseWithDebug",
-            "jobs": 8
+            "configurePreset": "linux-webgpu-releaseWithDebug"
         },
         {
             "name": "linux-arm64-webgpu-releaseWithDebug",
             "displayName": "Linux ARM64 WebGPU RelWithDebInfo",
-            "configurePreset": "linux-arm64-webgpu-releaseWithDebug",
-            "jobs": 8
+            "configurePreset": "linux-arm64-webgpu-releaseWithDebug"
         },
         {
             "name": "web-release",
             "displayName": "WebAssembly Release",
-            "configurePreset": "web-release",
-            "jobs": 8
+            "configurePreset": "web-release"
         }
     ],
     "testPresets": [

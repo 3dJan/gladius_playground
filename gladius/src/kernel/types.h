@@ -1,4 +1,3 @@
-
 #ifndef __OPENCL_VERSION__
 #define COMPILING_FOR_HOST
 #include <float.h>
@@ -66,6 +65,10 @@ enum RenderingFlags
     RF_DISABLE_MESH_EARLY_EXIT = (1u << 18)  // Force exact mesh SDF (ignore raymarcher hint)
     ,
     RF_USE_MESH_FWN = (1u << 19)  // Evaluate mesh SDF via Fast Winding Number (Barill et al. 2018)
+    ,
+    /// March through the solid and accumulate Beer-Lambert attenuation from the graph's
+    /// translucency channel. Only the high-quality paths honour it; preview stays opaque.
+    RF_ENABLE_TRANSLUCENCY = (1u << 20)
 };
 
 enum SamplingFilter
@@ -191,13 +194,32 @@ struct RenderingSettings // Note that the alignment has to be considered
     /// expensive winding traversal is skipped. 0 disables the skip (always
     /// run winding — exact). 0.5 is a safe default.
     float meshFwnFarFieldFactor;
+
+    /// Beer-Lambert reference thickness (mm) the authored translucency alpha refers to.
+    /// Turns the ISO 19307 alpha into a volumetric coefficient:
+    /// sigma = -ln(1 - alpha) / translucencyReferenceThicknessMm.
+    /// Must be > 0 for RF_ENABLE_TRANSLUCENCY to have any effect.
+    float translucencyReferenceThicknessMm;
+
+    /// Step size (mm) used while a ray travels through the solid. Fixed stepping is
+    /// required because sphere tracing with |SDF| degenerates inside a solid.
+    float translucencyInteriorStepSize;
+
+    /// Upper bound on interior steps per shell, guarding against unbounded solids.
+    float translucencyMaxInteriorSteps;
+
+    /// Front-to-back accumulation stops once the remaining transmittance drops below this.
+    float translucencyFloor;
+
+    /// Upper bound on shaded surfaces per ray while translucency is active.
+    float translucencyMaxSurfaces;
 };
 
 #ifdef COMPILING_FOR_HOST
 // Lock down the host/device layout: every member is 4 bytes and tightly packed,
 // so any future field additions in this struct must be mirrored in every OpenCL
 // translation unit that declares the same struct (see kernel/sdf.cl and friends).
-static_assert(sizeof(RenderingSettings) == 12 * sizeof(float),
+static_assert(sizeof(RenderingSettings) == 17 * sizeof(float),
               "RenderingSettings layout drift: update kernel-side declarations and bump this assert.");
 #endif
 

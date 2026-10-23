@@ -1,5 +1,6 @@
 #include "webgpu/WebGPUComputeRenderer.h"
 
+#include "kernel/types.h"
 #include "webgpu/WebGPUFrameShaderComposer.h"
 
 #include <atomic>
@@ -23,11 +24,13 @@ namespace gladius::webgpu
                                 if (hasMeshes || hasBeams || hasImages)
                                 {
                                         m_composedShader = WebGPUFrameShaderComposer::composeWithResourceSupport(
-                                            m_snapshot->analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+                                            m_snapshot->analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages,
+                                            m_snapshot->translucencyEvaluatorWgsl);
                                 }
                 else
                 {
-                    m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot->analyticEvaluatorWgsl);
+                    m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot->analyticEvaluatorWgsl,
+                                                                          m_snapshot->translucencyEvaluatorWgsl);
                 }
             }
 
@@ -161,6 +164,12 @@ namespace gladius::webgpu
                                                                std::string const & composedShader,
                                                                compute::RenderRequest const & request)
         {
+            // A scene without a translucency channel must stay opaque even when the user
+            // switched the feature on, so the flag is cleared for those snapshots.
+            auto const translucencyActive = !scene.translucencyEvaluatorWgsl.empty();
+            auto const renderingFlags = translucencyActive
+                                            ? request.settings.flags
+                                            : request.settings.flags & ~static_cast<std::uint32_t>(RF_ENABLE_TRANSLUCENCY);
             return {.width = request.viewport.width,
                     .height = request.viewport.height,
                     .firstRow = request.viewport.firstRow,
@@ -177,8 +186,13 @@ namespace gladius::webgpu
                     .sliceHeight = request.settings.sliceHeight,
                     .quality = request.settings.quality,
                     .normalOffset = request.settings.normalOffset,
-                    .renderingFlags = request.settings.flags,
+                    .renderingFlags = renderingFlags,
                     .renderingMode = static_cast<std::uint32_t>(request.settings.mode),
+                    .translucencyParams = {request.settings.translucencyReferenceThicknessMm,
+                                           request.settings.translucencyInteriorStepSize,
+                                           static_cast<float>(request.settings.translucencyMaxInteriorSteps),
+                                           request.settings.translucencyFloor},
+                    .translucencyMaxSurfaces = translucencyActive ? request.settings.translucencyMaxSurfaces : 0u,
                     .modelBounds = request.modelBounds,
                     .shaderSource = composedShader,
                     .parameterValues = scene.parameterValues,
@@ -239,7 +253,8 @@ namespace gladius::webgpu
                compute::RendererCapability::ImageSampling |
                compute::RendererCapability::ProgressiveRendering |
                compute::RendererCapability::LowResolutionPreview |
-               compute::RendererCapability::FramePresentation;
+               compute::RendererCapability::FramePresentation |
+               compute::RendererCapability::TranslucentRendering;
     }
 
     bool WebGPUComputeRenderer::isAvailable() const noexcept

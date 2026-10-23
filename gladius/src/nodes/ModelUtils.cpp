@@ -1,5 +1,8 @@
 #include "ModelUtils.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace gladius::nodes
 {
     bool isQualifiedForLevelset(Model & model)
@@ -88,5 +91,72 @@ namespace gladius::nodes
         }
 
         return hasScalarParam;
+    }
+
+    bool hasScalarOutputChannel(Model & model, std::string_view channelName)
+    {
+        End * endNode = model.getEndNode();
+        if (endNode == nullptr)
+        {
+            return false;
+        }
+        auto const & params = endNode->parameter();
+        auto const it = params.find(std::string{channelName});
+        return it != params.end() && it->second.getTypeIndex() == ParameterTypeIndex::Float;
+    }
+
+    bool isQualifiedForTranslucency(Model & model)
+    {
+        // Translucency is evaluated at the same positions as the levelset, so require
+        // a Begin node exposing exactly one float3 "pos" output.
+        Begin * beginNode = model.getBeginNode();
+        if (beginNode == nullptr)
+        {
+            return false;
+        }
+        auto const & outputs = beginNode->getOutputs();
+        auto const posPortIt = outputs.find(FieldNames::Pos);
+        if (posPortIt == outputs.end() ||
+            posPortIt->second.getTypeIndex() != ParameterTypeIndex::Float3)
+        {
+            return false;
+        }
+        return hasScalarOutputChannel(model, FieldNames::Translucency);
+    }
+
+    bool isQualifiedForScalarPropertyChannel(Model & model)
+    {
+        Begin * beginNode = model.getBeginNode();
+        if (beginNode == nullptr)
+        {
+            return false;
+        }
+        auto const & outputs = beginNode->getOutputs();
+        auto const posPortIt = outputs.find(FieldNames::Pos);
+        if (posPortIt == outputs.end() ||
+            posPortIt->second.getTypeIndex() != ParameterTypeIndex::Float3)
+        {
+            return false;
+        }
+        return !collectScalarOutputChannelNames(model).empty();
+    }
+
+    std::vector<std::string> collectScalarOutputChannelNames(Model & model)
+    {
+        End * endNode = model.getEndNode();
+        if (endNode == nullptr)
+        {
+            return {};
+        }
+        std::vector<std::string> channelNames;
+        for (auto const & [name, param] : endNode->parameter())
+        {
+            if (param.getTypeIndex() == ParameterTypeIndex::Float)
+            {
+                channelNames.push_back(name);
+            }
+        }
+        std::ranges::sort(channelNames);
+        return channelNames;
     }
 } // namespace gladius::nodes

@@ -542,6 +542,63 @@ namespace gladius::nodes
         colorSink->setInputFromPort(resourceColorPort);
     }
 
+    void Builder::appendFunctionForTranslucencyOutput(Model & target,
+                                                      Model & referencedModel,
+                                                      nodes::Port & coordinateSystemPort,
+                                                      Matrix4x4 const & transformation,
+                                                      std::string const & channelName)
+    {
+        auto resourceNode = target.create<nodes::Resource>();
+        resourceNode->parameter().at(FieldNames::ResourceId) =
+          VariantParameter(referencedModel.getResourceId());
+
+        auto functionCallNode = target.create<nodes::FunctionCall>();
+
+        functionCallNode->parameter()
+          .at(FieldNames::FunctionId)
+          .setInputFromPort(resourceNode->getOutputs().at(FieldNames::Value));
+
+        functionCallNode->updateInputsAndOutputs(referencedModel);
+        target.registerInputs(*functionCallNode);
+        target.registerOutputs(*functionCallNode);
+
+        auto iterPosInput = functionCallNode->parameter().find(FieldNames::Pos);
+        if (iterPosInput == std::end(functionCallNode->parameter()))
+        {
+            throw std::runtime_error("Translucency function has no pos input");
+        }
+
+        auto modelCoordinatesPort =
+          insertTransformation(target, coordinateSystemPort, transformation);
+
+        iterPosInput->second.setInputFromPort(modelCoordinatesPort);
+
+        auto iterOutput = functionCallNode->getOutputs().find(channelName);
+        if (iterOutput == std::end(functionCallNode->getOutputs()))
+        {
+            throw std::runtime_error(
+              fmt::format("Translucency function has no output with the name {}", channelName));
+        }
+        if (iterOutput->second.getTypeIndex() != nodes::ParameterTypeIndex::Float)
+        {
+            throw std::runtime_error(
+              fmt::format("The output {} is not a scalar", channelName));
+        }
+
+        auto translucencySink = target.getEndNode()->getParameter(FieldNames::Translucency);
+        if (!translucencySink)
+        {
+            target.addFunctionOutput(FieldNames::Translucency, VariantParameter(float{0.f}));
+            translucencySink = target.getEndNode()->getParameter(FieldNames::Translucency);
+        }
+        if (!translucencySink)
+        {
+            throw std::runtime_error("End node is required to have a translucency parameter");
+        }
+
+        translucencySink->setInputFromPort(iterOutput->second);
+    }
+
     void Builder::createFunctionFromImage3D(Assembly & assembly,
                                             ResourceId functionModelId,
                                             ResourceId imageResourceId,

@@ -77,8 +77,11 @@ namespace gladius::webgpu
 
         /// Insert the given modules (in order) plus the model evaluator at the
         /// evaluator marker of the frame shader template.
+        /// \param translucencyEvaluator Optional second entry point appended after the model
+        ///        evaluator so it can use the same resource modules and parameter storage.
         std::string composeFrameShader(std::vector<std::string> modules,
-                                       std::string_view const modelEvaluator)
+                                       std::string_view const modelEvaluator,
+                                       std::string_view const translucencyEvaluator = {})
         {
             constexpr std::string_view SHADER_PATH = "src/webgpu/shaders/frame_compute.wgsl";
             constexpr std::string_view EVALUATOR_MARKER = "// GLADIUS_MODEL_EVALUATOR";
@@ -102,6 +105,11 @@ namespace gladius::webgpu
                 replacement += module + "\n";
             }
             replacement += std::string{modelEvaluator};
+            replacement += "\n";
+            replacement += translucencyEvaluator.empty()
+                               ? std::string{"fn evaluateTranslucency(position: vec3<f32>) -> f32 {\n"
+                                             "    return 0.0f;\n}\n"}
+                               : std::string{translucencyEvaluator};
 
             shader.replace(markerPosition, EVALUATOR_MARKER.size(), replacement);
 
@@ -116,9 +124,10 @@ namespace gladius::webgpu
         return composeWithResourceSupport(modelEvaluator, true, false, false);
     }
 
-    std::string WebGPUFrameShaderComposer::compose(std::string_view const modelEvaluator)
+    std::string WebGPUFrameShaderComposer::compose(std::string_view const modelEvaluator,
+                                                   std::string_view const translucencyEvaluator)
     {
-        return composeFrameShader({}, modelEvaluator);
+        return composeFrameShader({}, modelEvaluator, translucencyEvaluator);
     }
 
     std::string WebGPUFrameShaderComposer::composeWithBeamSupport(std::string_view const modelEvaluator)
@@ -142,7 +151,8 @@ namespace gladius::webgpu
             std::string_view const modelEvaluator,
             bool const includeMesh,
             bool const includeBeam,
-            bool const includeImage)
+            bool const includeImage,
+            std::string_view const translucencyEvaluator)
         {
                 std::vector<std::string> modules;
                 if (includeMesh)
@@ -160,6 +170,6 @@ namespace gladius::webgpu
                         modules.push_back(loadEmbeddedModule(
                             "src/webgpu/shaders/image_sampling.wgsl", "// GLADIUS_IMAGE_SAMPLING_MODULE"));
                 }
-        return composeFrameShader(std::move(modules), modelEvaluator);
+        return composeFrameShader(std::move(modules), modelEvaluator, translucencyEvaluator);
     }
 }

@@ -1607,6 +1607,39 @@ namespace gladius::mcp
               {{"type", "boolean"}, {"description", "Enable shadows (default: true)"}}},
              {"enable_lighting",
               {{"type", "boolean"}, {"description", "Enable lighting (default: true)"}}},
+             {"translucency",
+              {{"type", "boolean"},
+               {"description",
+                "March through the solid and attenuate by the model's translucency channel "
+                "(default: false). Only effective when the model authors that channel."}}},
+             {"translucency_reference_thickness_mm",
+              {{"type", "number"},
+               {"minimum", 0.05},
+               {"maximum", 5.0},
+               {"description",
+                "Wall thickness the authored translucency refers to (default: 0.4)"}}},
+             {"translucency_interior_step_mm",
+              {{"type", "number"},
+               {"minimum", 0.01},
+               {"maximum", 2.0},
+               {"description", "Sample spacing while a ray travels through the solid "
+                               "(default: 0.1)"}}},
+             {"translucency_max_surfaces",
+              {{"type", "number"},
+               {"minimum", 1},
+               {"maximum", 8},
+               {"description", "Highest number of shaded shells per ray (default: 3)"}}},
+             {"translucency_transmittance_floor",
+              {{"type", "number"},
+               {"minimum", 0.001},
+               {"maximum", 0.5},
+               {"description", "Accumulation stops below this remaining transmittance "
+                               "(default: 0.01)"}}},
+             {"translucency_max_interior_steps",
+              {{"type", "number"},
+               {"minimum", 8},
+               {"maximum", 4096},
+               {"description", "Guard against rays that never leave the solid (default: 512)"}}},
              // Legacy nested objects (backward compatible)
              {"camera_settings",
               {{"type", "object"}, {"description", "Legacy nested camera parameters"}}},
@@ -1649,7 +1682,13 @@ namespace gladius::mcp
                                        "quality",
                                        "background_color",
                                        "enable_shadows",
-                                       "enable_lighting"})
+                                       "enable_lighting",
+                                       "translucency",
+                                       "translucency_reference_thickness_mm",
+                                       "translucency_interior_step_mm",
+                                       "translucency_max_surfaces",
+                                       "translucency_transmittance_floor",
+                                       "translucency_max_interior_steps"})
               {
                   if (params.contains(key))
                   {

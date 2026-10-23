@@ -50,7 +50,7 @@ void kernel renderScene(__write_only image2d_t result,
       rayCastLegacy(eyePosition, rayDirection, startDistance, PASS_PAYLOAD_ARGS);
 
     float4 const color =
-      determineColor(raycastingResult, eyePosition, rayDirection, PASS_PAYLOAD_ARGS);
+      shadeRayResult(raycastingResult, eyePosition, rayDirection, PASS_PAYLOAD_ARGS);
     write_imagef(result, coord, (float4)(color));
 };
 
@@ -140,7 +140,7 @@ void kernel renderSceneWithDistanceInit(__write_only image2d_t result,
       rayCast(eyePosition, rayDirection, startDistance, useDistanceInit, distanceInitValue, PASS_PAYLOAD_ARGS);
 
     float4 const color =
-      determineColor(raycastingResult, eyePosition, rayDirection, PASS_PAYLOAD_ARGS);
+      shadeRayResult(raycastingResult, eyePosition, rayDirection, PASS_PAYLOAD_ARGS);
     write_imagef(result, coord, (float4)(color));
 };
 
@@ -184,7 +184,7 @@ void kernel renderSceneWithMetrics(__write_only image2d_t result,
       rayCastLegacy(eyePosition, rayDirection, startDistance, PASS_PAYLOAD_ARGS);
 
     float4 const color =
-      determineColor(raycastingResult, eyePosition, rayDirection, PASS_PAYLOAD_ARGS);
+      shadeRayResult(raycastingResult, eyePosition, rayDirection, PASS_PAYLOAD_ARGS);
     write_imagef(result, coord, (float4)(color));
     
     // Collect metrics using atomic operations (T030)
