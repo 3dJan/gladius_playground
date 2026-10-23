@@ -56,7 +56,7 @@ namespace gladius::compute
 
     TranslucencyConfig readTranslucency(RenderSettingsSnapshot const & settings)
     {
-        return {.enabled = (settings.flags & RF_ENABLE_TRANSLUCENCY) != 0u,
+      return {.enabled = (settings.flags & RENDER_FLAG_ENABLE_TRANSLUCENCY) != 0u,
                 .referenceThicknessMm = settings.translucencyReferenceThicknessMm,
                 .interiorStepSizeMm = settings.translucencyInteriorStepSize,
                 .transmittanceFloor = settings.translucencyFloor,
@@ -69,8 +69,8 @@ namespace gladius::compute
         auto const clamped = clampTranslucency(config);
         auto const flags =
           clamped.enabled
-            ? settings.flags | RF_ENABLE_TRANSLUCENCY
-            : settings.flags & ~static_cast<std::uint32_t>(RF_ENABLE_TRANSLUCENCY);
+            ? settings.flags | RENDER_FLAG_ENABLE_TRANSLUCENCY
+            : settings.flags & ~RENDER_FLAG_ENABLE_TRANSLUCENCY;
         auto const maxInteriorSteps = static_cast<std::uint32_t>(clamped.maxInteriorSteps);
         auto const maxSurfaces = static_cast<std::uint32_t>(clamped.maxSurfaces);
 

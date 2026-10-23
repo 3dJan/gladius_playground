@@ -494,10 +494,12 @@ fn march_surface(eye: vec3<f32>, ray_direction: vec3<f32>, start_distance: f32, 
     return MarchResult(hit, traveled);
 }
 
-fn shade_for_hit(eye: vec3<f32>, ray_direction: vec3<f32>, distance: f32) -> vec3<f32>
+fn shade_for_hit(eye: vec3<f32>,
+                 ray_direction: vec3<f32>,
+                 distance: f32,
+                 hit_sample: SceneSample) -> vec3<f32>
 {
     let hit_position = eye + ray_direction * distance;
-    let hit_sample = evaluate_surface(hit_position);
     let use_model_color = hit_sample.object_type == 1.0f && frame.flags_mode_reserved.y != 2u;
     let hit_color = select(hit_sample.color, evaluateModel(hit_position).xyz, use_model_color);
     return shade_surface(hit_position, ray_direction, hit_color);
@@ -534,7 +536,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
             return;
         }
-        let shaded = shade_for_hit(eye, ray_direction, march.distance);
+        let hit_sample = evaluate_surface(eye + ray_direction * march.distance);
+        let shaded = shade_for_hit(eye, ray_direction, march.distance, hit_sample);
         let fog = 1.0f - exp(-1.0e-10f * march.distance * march.distance * march.distance);
         output_pixels[pixel_index] = pack_rgba8(vec4<f32>(mix(shaded, background, fog), 1.0));
         return;
@@ -553,9 +556,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             accumulated = accumulated + transmittance * background;
             break;
         }
-        let shaded = shade_for_hit(eye, ray_direction, march.distance);
+        let hit_sample = evaluate_surface(eye + ray_direction * march.distance);
+        let shaded = shade_for_hit(eye, ray_direction, march.distance, hit_sample);
         let fog = 1.0f - exp(-1.0e-10f * march.distance * march.distance * march.distance);
         accumulated = accumulated + transmittance * mix(shaded, background, fog);
+        // The build plate and helper geometry are solid terminal surfaces, not model volume.
+        if (hit_sample.object_type != 1.0f) {
+            break;
+        }
         let interior = interior_transmittance(eye, ray_direction, march.distance, max_distance);
         transmittance = transmittance * interior.transmittance;
         if (!interior.exited || transmittance < transmittance_floor) {

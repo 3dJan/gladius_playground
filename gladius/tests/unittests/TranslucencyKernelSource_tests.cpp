@@ -32,6 +32,23 @@ namespace gladius::tests
             return buffer.str();
         }
 
+        /// @brief Read the WebGPU frame shader used by the analytic renderer.
+        std::string loadWebGpuFrameShader()
+        {
+            std::filesystem::path const path =
+              std::filesystem::path{GLADIUS_KERNEL_SOURCE_DIR}.parent_path() / "webgpu" /
+              "shaders" / "frame_compute.wgsl";
+            std::ifstream file(path);
+            if (!file)
+            {
+                return {};
+            }
+
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            return buffer.str();
+        }
+
         /**
          * @brief Extract the body of a kernel from a kernel source file.
          * @param source complete kernel source
@@ -91,6 +108,30 @@ namespace gladius::tests
         auto const guardPos = source.find("raycastingResult.type == 1.f");
         ASSERT_NE(guardPos, std::string::npos);
         EXPECT_NE(source.find("renderTranslucentRay", guardPos), std::string::npos);
+    }
+
+    TEST(TranslucencyKernelSource, Compositor_TreatsBuildPlateAsOpaqueTerminalSurface)
+    {
+        auto const source = loadKernelSource("translucency.cl");
+        ASSERT_FALSE(source.empty());
+
+        auto const helperSurfaceGuard = source.find("if (current.type != 1.f)");
+        ASSERT_NE(helperSurfaceGuard, std::string::npos);
+        auto const interiorIntegration = source.find("interiorTransmittance(", helperSurfaceGuard);
+        ASSERT_NE(interiorIntegration, std::string::npos);
+        EXPECT_LT(helperSurfaceGuard, interiorIntegration);
+    }
+
+    TEST(TranslucencyKernelSource, WebGpuCompositor_TreatsBuildPlateAsOpaqueTerminalSurface)
+    {
+        auto const source = loadWebGpuFrameShader();
+        ASSERT_FALSE(source.empty());
+
+        auto const helperSurfaceGuard = source.find("if (hit_sample.object_type != 1.0f)");
+        ASSERT_NE(helperSurfaceGuard, std::string::npos);
+        auto const interiorIntegration = source.find("interior_transmittance(", helperSurfaceGuard);
+        ASSERT_NE(interiorIntegration, std::string::npos);
+        EXPECT_LT(helperSurfaceGuard, interiorIntegration);
     }
 
     TEST(TranslucencyKernelSource, RenderingKernel_DoesNotReferenceTranslucencyEntryPoint)

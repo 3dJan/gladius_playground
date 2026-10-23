@@ -42,7 +42,7 @@
           "docking-experimental",
           "glfw-binding",
           "opengl2-binding",
-          "win32-binding"
+          "test-engine"
         ]
     },
     {
@@ -53,7 +53,7 @@
           "docking-experimental",
           "glfw-binding",
           "opengl2-binding",
-          "win32-binding"
+          "test-engine"
         ]
     },
     "imgui-node-editor",

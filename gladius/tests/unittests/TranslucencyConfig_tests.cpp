@@ -28,11 +28,17 @@ namespace gladius::compute::tests
         auto const snapshot = readTranslucency(RenderSettingsSnapshot{});
         auto const defaults = TranslucencyConfig{};
 
-        EXPECT_FALSE(snapshot.enabled);
+        EXPECT_TRUE(snapshot.enabled);
+        EXPECT_TRUE(defaults.enabled);
+        EXPECT_EQ(snapshot.referenceThicknessMm, 0.44f);
         EXPECT_EQ(snapshot.referenceThicknessMm, defaults.referenceThicknessMm);
+        EXPECT_EQ(snapshot.interiorStepSizeMm, 2.0f);
         EXPECT_EQ(snapshot.interiorStepSizeMm, defaults.interiorStepSizeMm);
+        EXPECT_EQ(snapshot.transmittanceFloor, 0.001f);
         EXPECT_EQ(snapshot.transmittanceFloor, defaults.transmittanceFloor);
+        EXPECT_EQ(snapshot.maxInteriorSteps, 4096.0f);
         EXPECT_EQ(snapshot.maxInteriorSteps, defaults.maxInteriorSteps);
+        EXPECT_EQ(snapshot.maxSurfaces, 8.0f);
         EXPECT_EQ(snapshot.maxSurfaces, defaults.maxSurfaces);
     }
 

@@ -11,6 +11,9 @@
 
 namespace gladius::compute
 {
+    /// Backend-neutral copy of RF_ENABLE_TRANSLUCENCY from kernel/types.h.
+    inline constexpr std::uint32_t RENDER_FLAG_ENABLE_TRANSLUCENCY = 1u << 20u;
+
     /**
      * @brief Backend-neutral feature flags exposed by a physical renderer.
      */
@@ -171,7 +174,7 @@ namespace gladius::compute
     {
         float timeSeconds{};
         float sliceHeight{};
-        std::uint32_t flags{};
+        std::uint32_t flags{RENDER_FLAG_ENABLE_TRANSLUCENCY};
         RenderMode mode{RenderMode::FullModel};
         float quality{1.0f};
         float normalOffset{0.001f};
@@ -185,15 +188,15 @@ namespace gladius::compute
         float maxTravelDistance{100000.0f};
         /// Reference thickness used to turn the authored translucency alpha into a
         /// Beer-Lambert attenuation coefficient. Matches the filament optical model.
-        float translucencyReferenceThicknessMm{0.4f};
+        float translucencyReferenceThicknessMm{0.44f};
         /// Step size used while the ray travels through the solid.
-        float translucencyInteriorStepSize{0.1f};
+        float translucencyInteriorStepSize{2.0f};
         /// Upper bound on interior steps per shell.
-        std::uint32_t translucencyMaxInteriorSteps{512u};
+        std::uint32_t translucencyMaxInteriorSteps{4096u};
         /// Front-to-back accumulation stops once the remaining transmittance drops below this.
-        float translucencyFloor{0.01f};
+        float translucencyFloor{0.001f};
         /// Upper bound on shaded surfaces per ray while translucency is active.
-        std::uint32_t translucencyMaxSurfaces{3u};
+        std::uint32_t translucencyMaxSurfaces{8u};
 
         [[nodiscard]] bool isValid() const noexcept
         {

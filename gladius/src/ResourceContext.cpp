@@ -2,6 +2,7 @@
 #include "ImageRGBA.h"
 #include "Profiling.h"
 #include "ResourceManager.h"
+#include "compute/TranslucencyConfig.h"
 #include "gpgpu.h"
 
 #include <algorithm>
@@ -35,14 +36,8 @@ namespace gladius
         // mesh_sdf.cl (capped by scene scale to avoid TDR).
         m_renderingSettings.meshFwnBeta = 2.0f;
         m_renderingSettings.meshFwnFarFieldFactor = 0.5f;
-        // Translucency is off by default (RF_ENABLE_TRANSLUCENCY unset), but the kernel
-        // reads these unconditionally, so keep them at the same defaults the filament
-        // optical model and the WebGPU backend use.
-        m_renderingSettings.translucencyReferenceThicknessMm = 0.4f;
-        m_renderingSettings.translucencyInteriorStepSize = 0.1f;
-        m_renderingSettings.translucencyMaxInteriorSteps = 512.f;
-        m_renderingSettings.translucencyFloor = 0.01f;
-        m_renderingSettings.translucencyMaxSurfaces = 3.f;
+        // Initialize OpenCL with the same enabled state and knobs as the neutral backend.
+        compute::applyTranslucency(m_renderingSettings, compute::TranslucencyConfig{});
 
         initResolutions();
         createBuffer();

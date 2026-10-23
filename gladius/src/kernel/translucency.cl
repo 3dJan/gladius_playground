@@ -138,6 +138,13 @@ float4 renderTranslucentRay(struct RayCastResult firstResult,
         accumulated +=
           transmittance * determineColor(current, eyePosition, rayDirection, PASS_PAYLOAD_ARGS).xyz;
 
+                // The build plate and other helper geometry are solid terminal surfaces. They may be
+                // visible through a translucent model, but they must not be integrated as model volume.
+                if (current.type != 1.f)
+                {
+                        break;
+                }
+
         struct InteriorTransmittance const interior =
           interiorTransmittance(eyePosition, rayDirection, current.traveledDistance, PASS_PAYLOAD_ARGS);
         transmittance *= interior.transmittance;

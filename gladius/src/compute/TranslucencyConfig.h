@@ -5,6 +5,10 @@
 
 namespace gladius::compute
 {
+        static_assert(RENDER_FLAG_ENABLE_TRANSLUCENCY ==
+                                        static_cast<std::uint32_t>(RF_ENABLE_TRANSLUCENCY),
+                                    "Backend-neutral and kernel translucency flags must stay in sync.");
+
     /// Slider bounds shared by the UI widgets and the MCP input clamping.
     inline constexpr float MIN_REFERENCE_THICKNESS_MM = 0.05f;
     inline constexpr float MAX_REFERENCE_THICKNESS_MM = 5.0f;
@@ -28,17 +32,17 @@ namespace gladius::compute
      */
     struct TranslucencyConfig
     {
-        bool enabled{};
+        bool enabled{true};
         /// Beer-Lambert reference thickness (mm) the authored alpha refers to.
-        float referenceThicknessMm{0.4f};
+        float referenceThicknessMm{0.44f};
         /// Step size (mm) used while a ray travels through the solid.
-        float interiorStepSizeMm{0.1f};
+        float interiorStepSizeMm{2.0f};
         /// Remaining transmittance below which accumulation stops.
-        float transmittanceFloor{0.01f};
+        float transmittanceFloor{0.001f};
         /// Upper bound on interior steps per shell.
-        float maxInteriorSteps{512.f};
+        float maxInteriorSteps{4096.f};
         /// Upper bound on shaded surfaces per ray.
-        float maxSurfaces{3.f};
+        float maxSurfaces{8.f};
     };
 
     /// @brief Clamp every knob into the range the shaders tolerate.

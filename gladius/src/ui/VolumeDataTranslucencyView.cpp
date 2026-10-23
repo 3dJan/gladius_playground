@@ -8,6 +8,7 @@
 #include <fmt/format.h>
 #include <functional>
 #include <lib3mf_implicit.hpp>
+#include <stdexcept>
 #include <vector>
 
 namespace gladius::ui
@@ -163,7 +164,11 @@ namespace gladius::ui
         }
 
         return applyMutation(document, [&]() {
-            io::addTranslucencyProperty(volumeData, candidate->function, candidate->channelName);
+            if (!io::addTranslucencyProperty(volumeData, candidate->function,
+                                             candidate->channelName))
+            {
+                throw std::runtime_error("Failed to create the translucency property");
+            }
         });
     }
 

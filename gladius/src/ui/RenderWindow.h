@@ -467,7 +467,7 @@ namespace gladius::ui
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
         compute::RenderSettingsSnapshot m_neutralRenderSettings{
-          .flags = RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM,
+          .flags = RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM | RF_ENABLE_TRANSLUCENCY,
           .normalOffset = 0.0001f,
           .maxRaySteps = 2000u,
           .maxTravelDistance = 100000.0f};
