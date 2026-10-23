@@ -68,6 +68,7 @@
         "nlohmann-json",
         "brotli",
         "glfw3",
+        "glad",
         "fmt",
         "eigen3",
         "tinyfiledialogs",
@@ -89,6 +90,12 @@
         "openvdb",
         "blosc",
         "boost",
+        "boost-iostreams",
+        "boost-random",
+        "boost-regex",
+        "lz4",
+        "liblzma",
+        "zstd",
         "tbb",
         "openexr",
         "imath",
@@ -114,6 +121,18 @@
         {
           "package": "cpp-base64",
           "reason": "Installed as a utility package but absent from cpp-httplib's imported target link interface."
+        },
+        {
+          "package": "snappy",
+          "reason": "Blosc's config finds Snappy, but blosc_static's imported link interface does not link it. Re-audit if this changes."
+        },
+        {
+          "package": "stb",
+          "reason": "Resolved by imgui's package config but absent from the imported imgui target link interface; bundled imstb headers are covered by imgui/COPYING.stb."
+        },
+        {
+          "package": "egl-registry / opengl-registry",
+          "reason": "Khronos registry data used during package generation/build; not linked or shipped by the Gladius target."
         }
       ]
     }
@@ -128,6 +147,7 @@
     "bzip2": { "share": "bzip2", "notice": "bzip2" },
     "openssl": { "share": "openssl", "notice": "openssl", "shared_licenses": ["apache-2.0"] },
     "glfw3": { "share": "glfw3", "notice": "glfw3", "copyright_optional": true },
+    "glad": { "share": "glad", "notice": "glad", "shared_licenses": ["apache-2.0"] },
     "fmt": { "share": "fmt", "notice": "fmt" },
     "eigen3": { "share": "eigen3", "notice": "eigen3", "additional_files": ["COPYING.README", "COPYING.APACHE", "COPYING.BSD", "COPYING.MINPACK"], "shared_licenses": ["apache-2.0"] },
     "tinyfiledialogs": { "share": "tinyfiledialogs", "notice": "tinyfiledialogs" },
@@ -138,7 +158,7 @@
     "openmesh": { "share": "openmesh", "notice": "openmesh" },
     "lib3mf": { "share": "lib3mf", "notice": "lib3mf" },
     "minizip": { "share": "minizip", "notice": "minizip" },
-    "imgui": { "share": "imgui", "notice": "imgui" },
+    "imgui": { "share": "imgui", "notice": "imgui", "additional_files": ["COPYING.test-engine", "COPYING.stb"] },
     "imgui-node-editor": { "share": "imgui-node-editor", "notice": "imgui-node-editor" },
     "clipper2": { "share": "clipper2", "notice": "clipper2" },
     "nlopt": { "share": "nlopt", "notice": "nlopt" },
@@ -149,10 +169,16 @@
     "openvdb": { "share": "openvdb", "notice": "openvdb" },
     "blosc": { "share": "blosc", "notice": "blosc" },
     "boost": { "share": "boost-headers", "notice": "boost" },
+    "boost-iostreams": { "share": "boost-iostreams", "notice": "boost" },
+    "boost-random": { "share": "boost-random", "notice": "boost" },
+    "boost-regex": { "share": "boost-regex", "notice": "boost" },
     "tbb": { "share": "tbb", "notice": "tbb" },
     "openexr": { "share": "openexr", "notice": "openexr" },
     "imath": { "share": "imath", "notice": "imath" },
+    "lz4": { "share": "lz4", "notice": "lz4" },
     "libdeflate": { "share": "libdeflate", "notice": "libdeflate" },
+    "liblzma": { "share": "liblzma", "notice": "liblzma" },
+    "zstd": { "share": "zstd", "notice": "zstd", "additional_files": ["COPYING.GPLv2"] },
     "openjph": { "share": "openjph", "notice": "openjph" },
     "vulkan-headers": { "share": "vulkan-headers", "notice": "vulkan-headers", "additional_files": ["COPYING.MIT"], "shared_licenses": ["apache-2.0"] },
     "vulkan-utility-libraries": { "share": "vulkan-utility-libraries", "notice": "vulkan-utility-libraries", "shared_licenses": ["apache-2.0"] },
