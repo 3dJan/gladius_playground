@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "web": {
+      "triplet_root": "vcpkg_installed/wasm32-emscripten",
+      "dependencies": [
+        "dawn",
+        "fast-float",
+        "libzip",
+        "bzip2",
+        "openssl",
+        "glfw3",
+        "fmt",
+        "eigen3",
+        "tinyfiledialogs",
+        "platform-folders",
+        "zlib",
+        "lodepng",
+        "pugixml",
+        "openmesh",
+        "lib3mf",
+        "minizip",
+        "imgui",
+        "imgui-node-editor",
+        "clipper2",
+        "nlopt",
+        "muparser",
+        "libcoro",
+        "tracy"
+      ],
+      "excluded": [
+        {
+          "package": "gtest",
+          "reason": "Test dependency; Emscripten excludes the test target."
+        },
+        {
+          "package": "cmakerc",
+          "reason": "Build-time resource compiler, not linked or shipped."
+        },
+        {
+          "package": "pkgconf",
+          "reason": "Build-time package discovery tool."
+        },
+        {
+          "package": "opencl",
+          "reason": "OpenCL backend is disabled for WebAssembly."
+        },
+        {
+          "package": "openvdb",
+          "reason": "OpenVDB backend is disabled for WebAssembly."
+        },
+        {
+          "package": "cpp-httplib / nlohmann-json / brotli",
+          "reason": "The WebAssembly build does not create or link the native gladiusmcp executable."
+        },
+        {
+          "package": "cpp-base64",
+          "reason": "Installed as a utility package but absent from the production Web target link interface."
+        }
+      ]
+    },
+    "linux": {
+      "triplet_root": "out/build/linux-releaseWithDebug/vcpkg_installed/x64-linux",
+      "dependencies": [
+        "dawn",
+        "fast-float",
+        "cpp-httplib",
+        "nlohmann-json",
+        "brotli",
+        "glfw3",
+        "glad",
+        "fmt",
+        "eigen3",
+        "tinyfiledialogs",
+        "platform-folders",
+        "zlib",
+        "lodepng",
+        "pugixml",
+        "openmesh",
+        "lib3mf",
+        "minizip",
+        "imgui",
+        "imgui-node-editor",
+        "clipper2",
+        "nlopt",
+        "muparser",
+        "libcoro",
+        "tracy",
+        "opencl",
+        "openvdb",
+        "blosc",
+        "boost",
+        "boost-iostreams",
+        "boost-random",
+        "boost-regex",
+        "lz4",
+        "liblzma",
+        "zstd",
+        "tbb",
+        "openexr",
+        "imath",
+        "libdeflate",
+        "openjph",
+        "vulkan-headers",
+        "vulkan-utility-libraries",
+        "abseil"
+      ],
+      "excluded": [
+        {
+          "package": "gtest",
+          "reason": "Test-only dependency; not part of the production application link closure."
+        },
+        {
+          "package": "cmakerc / pkgconf",
+          "reason": "Build-time tools, not linked or shipped."
+        },
+        {
+          "package": "OpenCLUtils / OpenCLUtilsCpp",
+          "reason": "The Gladius target links OpenCL::OpenCL; these utility targets were not found in the application link interface. Re-audit if that changes."
+        },
+        {
+          "package": "cpp-base64",
+          "reason": "Installed as a utility package but absent from cpp-httplib's imported target link interface."
+        },
+        {
+          "package": "snappy",
+          "reason": "Blosc's config finds Snappy, but blosc_static's imported link interface does not link it. Re-audit if this changes."
+        },
+        {
+          "package": "stb",
+          "reason": "Resolved by imgui's package config but absent from the imported imgui target link interface; bundled imstb headers are covered by imgui/COPYING.stb."
+        },
+        {
+          "package": "egl-registry / opengl-registry",
+          "reason": "Khronos registry data used during package generation/build; not linked or shipped by the Gladius target."
+        }
+      ]
+    }
+  },
+  "packages": {
+    "dawn": { "share": "dawn", "notice": "dawn" },
+    "fast-float": { "share": "fast-float", "notice": "fast-float", "additional_files": ["COPYING.MIT"], "shared_licenses": ["apache-2.0", "boost-software-license"] },
+    "cpp-httplib": { "share": "cpp-httplib", "notice": "cpp-httplib" },
+    "nlohmann-json": { "share": "nlohmann-json", "notice": "nlohmann-json" },
+    "brotli": { "share": "brotli", "notice": "brotli" },
+    "libzip": { "share": "libzip", "notice": "libzip" },
+    "bzip2": { "share": "bzip2", "notice": "bzip2" },
+    "openssl": { "share": "openssl", "notice": "openssl", "shared_licenses": ["apache-2.0"] },
+    "glfw3": { "share": "glfw3", "notice": "glfw3", "copyright_optional": true },
+    "glad": { "share": "glad", "notice": "glad", "shared_licenses": ["apache-2.0"] },
+    "fmt": { "share": "fmt", "notice": "fmt" },
+    "eigen3": { "share": "eigen3", "notice": "eigen3", "additional_files": ["COPYING.README", "COPYING.APACHE", "COPYING.BSD", "COPYING.MINPACK"], "shared_licenses": ["apache-2.0"] },
+    "tinyfiledialogs": { "share": "tinyfiledialogs", "notice": "tinyfiledialogs" },
+    "platform-folders": { "share": "platform-folders", "notice": "platform_folders" },
+    "zlib": { "share": "zlib", "notice": "zlib" },
+    "lodepng": { "share": "lodepng", "notice": "lodepng" },
+    "pugixml": { "share": "pugixml", "notice": "pugixml" },
+    "openmesh": { "share": "openmesh", "notice": "openmesh" },
+    "lib3mf": { "share": "lib3mf", "notice": "lib3mf" },
+    "minizip": { "share": "minizip", "notice": "minizip" },
+    "imgui": { "share": "imgui", "notice": "imgui", "additional_files": ["COPYING.test-engine", "COPYING.stb"] },
+    "imgui-node-editor": { "share": "imgui-node-editor", "notice": "imgui-node-editor" },
+    "clipper2": { "share": "clipper2", "notice": "clipper2" },
+    "nlopt": { "share": "nlopt", "notice": "nlopt" },
+    "muparser": { "share": "muparser", "notice": "muparser" },
+    "libcoro": { "share": "libcoro", "notice": "libcoro" },
+    "tracy": { "share": "tracy", "notice": "tracy" },
+    "opencl": { "share": "opencl", "notice": "opencl" },
+    "openvdb": { "share": "openvdb", "notice": "openvdb" },
+    "blosc": { "share": "blosc", "notice": "blosc" },
+    "boost": { "share": "boost-headers", "notice": "boost" },
+    "boost-iostreams": { "share": "boost-iostreams", "notice": "boost" },
+    "boost-random": { "share": "boost-random", "notice": "boost" },
+    "boost-regex": { "share": "boost-regex", "notice": "boost" },
+    "tbb": { "share": "tbb", "notice": "tbb" },
+    "openexr": { "share": "openexr", "notice": "openexr" },
+    "imath": { "share": "imath", "notice": "imath" },
+    "lz4": { "share": "lz4", "notice": "lz4" },
+    "libdeflate": { "share": "libdeflate", "notice": "libdeflate" },
+    "liblzma": { "share": "liblzma", "notice": "liblzma" },
+    "zstd": { "share": "zstd", "notice": "zstd", "additional_files": ["COPYING.GPLv2"] },
+    "openjph": { "share": "openjph", "notice": "openjph" },
+    "vulkan-headers": { "share": "vulkan-headers", "notice": "vulkan-headers", "additional_files": ["COPYING.MIT"], "shared_licenses": ["apache-2.0"] },
+    "vulkan-utility-libraries": { "share": "vulkan-utility-libraries", "notice": "vulkan-utility-libraries", "shared_licenses": ["apache-2.0"] },
+    "abseil": { "share": "abseil", "notice": "abseil", "shared_licenses": ["apache-2.0"] }
+  },
+  "shared_licenses": {
+    "apache-2.0": { "notice": "apache-2.0" },
+    "boost-software-license": { "notice": "boost-software-license" }
+  },
+  "assets": [
+    {
+      "path": "components/fonts/Roboto-Medium.ttf",
+      "sha256": "8559132c89ad51d8a2ba5b171887a44a7ba93776e205f553573de228e64b45f8",
+      "notice": "roboto-medium",
+      "shared_licenses": ["apache-2.0"],
+      "provenance": "Verified exact match to Google Fonts commit 90abd17b4f97671435798b6147b698aa9087612f; historical asset is Apache-2.0."
+    },
+    {
+      "path": "components/fonts/fontawesome-free-5.14.0-web/fa-regular-400.ttf",
+      "sha256": "a5e1580acc1d3fbd2d2045b2a85bdb8291c475939e9cb48003afc502499b3f2e",
+      "notice": "fontawesome-free-5.14.0",
+      "provenance": "Bundled metadata and LICENSE.txt identify Font Awesome Free 5.14.0; SHA-256 differs from the upstream 5.14.0 tag file. Provenance needs follow-up."
+    },
+    {
+      "path": "components/fonts/fontawesome-free-5.14.0-web/fa-solid-900.ttf",
+      "sha256": "af849952e881b92cf7206540a91c5feefe23ff5910af83097cbb2eaff614ba20",
+      "notice": "fontawesome-free-5.14.0",
+      "provenance": "Bundled metadata and LICENSE.txt identify Font Awesome Free 5.14.0; SHA-256 differs from the upstream 5.14.0 tag file. Provenance needs follow-up."
+    }
+  ]
+}

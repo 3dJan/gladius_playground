@@ -42,8 +42,7 @@
           "docking-experimental",
           "glfw-binding",
           "opengl2-binding",
-          "win32-binding",
-          "test-engine"
+          "win32-binding"
         ]
     },
     {
@@ -54,8 +53,7 @@
           "docking-experimental",
           "glfw-binding",
           "opengl2-binding",
-          "win32-binding",
-          "test-engine"
+          "win32-binding"
         ]
     },
     "imgui-node-editor",
@@ -106,5 +104,5 @@
   ],
   "name": "gladius",
   "builtin-baseline": "4eb0f7cabb9ca18132d80009312411b9261bba7b",
-  "version-string": "1.2.15"
+  "version-string": "1.2.16"
 }

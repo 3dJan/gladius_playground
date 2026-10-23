@@ -1,0 +1,5 @@
+OpenSSL 3.6.3
+
+The OpenSSL package is licensed under the Apache License, Version 2.0. The package copyright notice and full license text are included by vcpkg; the canonical license is available at https://www.apache.org/licenses/LICENSE-2.0.
+
+This entry records the configured OpenSSL package. It is linked transitively by the configured static libzip target.

@@ -135,6 +135,14 @@ file(COPY ${FONT_FILES}  DESTINATION "misc/fonts/")
 # Ensure licenses are available for dialogs or setup code that scans getAppDir()/licenses
 file(COPY "../../components/licenses" DESTINATION ".")
 
+# The About dialog resolves the project license relative to the test executable.
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/copyright")
+configure_file(
+  "${CMAKE_SOURCE_DIR}/LICENSE.txt"
+  "${CMAKE_CURRENT_BINARY_DIR}/copyright/LICENSE"
+  COPYONLY
+)
+
 # Provide example template used by Document::newFromTemplate()
 file(MAKE_DIRECTORY "examples")
 file(COPY "../../examples/template.3mf" DESTINATION "examples/")

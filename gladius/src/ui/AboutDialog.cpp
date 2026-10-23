@@ -1,8 +1,14 @@
 #include "AboutDialog.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+
+#ifdef __EMSCRIPTEN__
+#include <cmrc/cmrc.hpp>
+CMRC_DECLARE(gladius_resources);
+#endif
 
 #include "../FileSystemUtils.h"
 
@@ -15,6 +21,75 @@
 
 namespace gladius::ui
 {
+    namespace
+    {
+        bool isCopyrightAssetFile(std::filesystem::path const & path)
+        {
+#ifdef __EMSCRIPTEN__
+            auto const resources = cmrc::gladius_resources::get_filesystem();
+            return resources.is_file(path.generic_string());
+#else
+            return std::filesystem::exists(path);
+#endif
+        }
+
+        std::string readCopyrightAssetOrReturnEmpty(std::filesystem::path const & path)
+        {
+#ifdef __EMSCRIPTEN__
+            try
+            {
+                auto const resource =
+                  cmrc::gladius_resources::get_filesystem().open(path.generic_string());
+                return warpTextAfter(std::string(resource.begin(), resource.end()), 200);
+            }
+            catch (std::exception const & e)
+            {
+                std::cerr << "Loading embedded license failed: " << e.what() << "\n";
+                return {};
+            }
+#else
+            return readFileOrReturnEmpty(path);
+#endif
+        }
+
+        std::vector<std::filesystem::path> getSupplementaryCopyrightFiles(
+          std::filesystem::path const & directory)
+        {
+            std::vector<std::filesystem::path> files;
+#ifdef __EMSCRIPTEN__
+            auto const resourceDirectory = directory.generic_string();
+            auto const resources = cmrc::gladius_resources::get_filesystem();
+            if (!resources.is_directory(resourceDirectory))
+            {
+                return files;
+            }
+
+            for (auto const entry : resources.iterate_directory(resourceDirectory))
+            {
+                auto const filename = std::string(entry.filename());
+                if (entry.is_file() && filename.starts_with("COPYING."))
+                {
+                    files.emplace_back(directory / filename);
+                }
+            }
+#else
+            std::error_code error;
+            std::filesystem::directory_iterator entry{directory, error};
+            std::filesystem::directory_iterator const end;
+            while (!error && entry != end)
+            {
+                auto const filename = entry->path().filename().string();
+                if (entry->is_regular_file(error) && filename.starts_with("COPYING."))
+                {
+                    files.emplace_back(entry->path());
+                }
+                entry.increment(error);
+            }
+#endif
+            std::sort(files.begin(), files.end());
+            return files;
+        }
+    }
 
     std::string readFileOrReturnEmpty(std::filesystem::path const & path)
     {
@@ -54,31 +129,65 @@ namespace gladius::ui
             return m_url.value();
         }
 
-        if (std::filesystem::exists(m_path / "url"))
+        auto const urlPath = m_path / "url";
+        if (isCopyrightAssetFile(urlPath))
         {
-            m_url = readFileOrReturnEmpty(m_path / "url");
+            m_url = readCopyrightAssetOrReturnEmpty(urlPath);
         }
 
-        return m_url.value();
+        return m_url.value_or(std::string{});
     }
 
     std::string CopyRightInfo::getOrLoadCopyrightText()
     {
         if (m_licenseText.has_value())
         {
-            return m_licenseText.value_or("No url file found");
+            return m_licenseText->empty() ? "No LICENSE file found" : m_licenseText.value();
         }
 
-        if (std::filesystem::exists(m_path / "LICENSE"))
+        auto const licensePath = m_path / "LICENSE";
+        if (!isCopyrightAssetFile(licensePath))
         {
-            m_licenseText = readFileOrReturnEmpty(m_path / "LICENSE");
+            m_licenseText = "No LICENSE file found";
+            return m_licenseText.value();
         }
 
-        return m_licenseText.value_or("No LICENSE file found");
+        auto licenseText = readCopyrightAssetOrReturnEmpty(licensePath);
+        for (auto const & supplementaryPath : getSupplementaryCopyrightFiles(m_path))
+        {
+            auto const supplementaryText = readCopyrightAssetOrReturnEmpty(supplementaryPath);
+            if (supplementaryText.empty())
+            {
+                continue;
+            }
+
+            licenseText += "\n\n" + supplementaryPath.filename().string() + ":\n";
+            licenseText += supplementaryText;
+        }
+
+        m_licenseText = std::move(licenseText);
+    return m_licenseText->empty() ? "No LICENSE file found" : m_licenseText.value();
     }
 
     CopyRightInfoCache::CopyRightInfoCache(std::filesystem::path licenseDir)
     {
+#ifdef __EMSCRIPTEN__
+        auto const resourcePath = licenseDir.generic_string();
+        auto const resources = cmrc::gladius_resources::get_filesystem();
+        if (!resources.is_directory(resourcePath))
+        {
+            return;
+        }
+
+        for (auto const entry : resources.iterate_directory(resourcePath))
+        {
+            if (entry.is_directory())
+            {
+                m_licenses.emplace_back(
+                  std::filesystem::path{resourcePath} / std::string(entry.filename()));
+            }
+        }
+#else
         std::error_code error;
         if (!std::filesystem::is_directory(licenseDir, error))
         {
@@ -93,6 +202,7 @@ namespace gladius::ui
             }
             m_licenses.emplace_back(dir);
         }
+#endif
     }
 
     CopyRightInfoCache::CopyRigths::const_iterator CopyRightInfoCache::cbegin() const
@@ -116,8 +226,13 @@ namespace gladius::ui
     }
 
     AboutDialog::AboutDialog()
+#ifdef __EMSCRIPTEN__
+        : m_copyRightInfoCache("licenses")
+        , m_copyRight("copyright")
+#else
         : m_copyRightInfoCache(getAppDir() / "licenses")
         , m_copyRight(getAppDir() / "copyright")
+#endif
     {
     }
 
@@ -170,8 +285,11 @@ namespace gladius::ui
             {
                 if (ImGui::CollapsingHeader(cpInfo.getName().c_str()))
                 {
-                    hyperlink(fmt::format("website: {}", cpInfo.getOrLoadUrl()),
-                              cpInfo.getOrLoadUrl());
+                    auto const url = cpInfo.getOrLoadUrl();
+                    if (!url.empty())
+                    {
+                        hyperlink(fmt::format("website: {}", url), url);
+                    }
                     ImGui::Separator();
                     ImGui::TextUnformatted(cpInfo.getOrLoadCopyrightText().c_str());
                 }

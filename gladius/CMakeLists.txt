@@ -88,7 +88,7 @@ endif()
 
 set(CPACK_PACKAGE_VERSION_MAJOR "1")
 set(CPACK_PACKAGE_VERSION_MINOR "2")
-set(CPACK_PACKAGE_VERSION_PATCH "15")
+set(CPACK_PACKAGE_VERSION_PATCH "16")
 
 # Set the version of the package in src/version.h
 configure_file(
@@ -353,8 +353,27 @@ cmrc_add_resources(gladius_resources
   examples/template.3mf
   src/imgui.ini
 )
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/src/copyright")
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.txt"
+  "${CMAKE_CURRENT_BINARY_DIR}/src/copyright/LICENSE"
+  COPYONLY
+)
 if(EMSCRIPTEN)
+  file(GLOB_RECURSE GLADIUS_LICENSE_FILES CONFIGURE_DEPENDS
+    LIST_DIRECTORIES false
+    RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    "components/licenses/*"
+  )
   cmrc_add_resources(gladius_resources ${GLADIUS_LIBRARY_FILES} ${GLADIUS_EXAMPLE_FILES})
+  cmrc_add_resources(gladius_resources
+    WHENCE "${CMAKE_CURRENT_SOURCE_DIR}/components"
+    ${GLADIUS_LICENSE_FILES}
+  )
+  cmrc_add_resources(gladius_resources
+    WHENCE "${CMAKE_CURRENT_BINARY_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/src/copyright/LICENSE"
+  )
 endif()
 if (MSVC)
     set_property(TARGET gladius_resources PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
