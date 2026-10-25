@@ -24,6 +24,7 @@ namespace gladius::ui
       public:
         using ApplyCallback = std::function<void()>;
         using NanoVdbIssueProvider = std::function<NanoVdbBuildIssueSummary()>;
+        using MeshQualityIssueProvider = std::function<MeshQualityIssueSummary()>;
 
         MeshSdfSettingsDialog() = default;
         ~MeshSdfSettingsDialog() = default;
@@ -41,6 +42,9 @@ namespace gladius::ui
 
         /// Provide the callback used to query runtime NanoVDB build issues.
         void setNanoVdbIssueProvider(NanoVdbIssueProvider provider);
+
+        /// Provide the callback used to query runtime mesh-quality diagnostics.
+        void setMeshQualityIssueProvider(MeshQualityIssueProvider provider);
 
         void show();
         void hide();
@@ -60,6 +64,7 @@ namespace gladius::ui
         MeshSdfSettings * m_settings = nullptr;
         ApplyCallback m_applyCallback;
         NanoVdbIssueProvider m_nanovdbIssueProvider;
+        MeshQualityIssueProvider m_meshQualityIssueProvider;
 
         bool m_visible = false;
         bool m_dirty = false;

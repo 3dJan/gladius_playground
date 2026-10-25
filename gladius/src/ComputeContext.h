@@ -1,6 +1,8 @@
 #pragma once
 
 #include "gpgpu.h"
+#include "compute/GpuAccessCoordinator.h"
+#include "compute/OpenClEventRegistry.h"
 
 #include <filesystem>
 #include <memory>
@@ -102,6 +104,19 @@ namespace gladius
         /// @brief Create a new OpenCL command queue for the current context
         /// @return A new command queue
         cl::CommandQueue createQueue() const;
+
+        [[nodiscard]] GpuAccessCoordinator & gpuAccessCoordinator();
+        [[nodiscard]] GpuAccessCoordinator const & gpuAccessCoordinator() const;
+
+        [[nodiscard]] GpuQueueId getGpuQueueId(cl::CommandQueue const & queue) const;
+        [[nodiscard]] GpuEventId recordGpuEvent(cl::Event const & event);
+        [[nodiscard]] std::vector<cl::Event> gpuWaitEvents(std::vector<GpuEventId> const & eventIds) const;
+        void refreshGpuAccessEvents();
+        void waitForGpuEvents(std::vector<GpuEventId> const & eventIds);
+        void waitForGpuResourceIdle(GpuResourceHandle resource);
+        void waitForAllTrackedGpuWork();
+        void setGpuAccessSafeModeEnabled(bool enabled) noexcept;
+        [[nodiscard]] bool isGpuAccessSafeModeEnabled() const noexcept;
 
         [[nodiscard]] bool isValid() const;
 
@@ -229,12 +244,16 @@ namespace gladius
         void initContextWithAccelerator(Accelerator const & accelerator);
         void queryDeviceMemoryCaps();
         bool tryQueryVendorFreeMem(size_t & freeBytesOut) const; // best-effort
+        [[nodiscard]] GpuQueueId registerQueueIdLocked(cl::CommandQueue const & queue) const;
+        void finishAllQueues() const;
 
         std::unique_ptr<cl::Context> m_context;
 
         // queue per thread
         QueuePerThread m_queues;
         mutable std::mutex m_queuesMutex;
+        mutable std::unordered_map<cl_command_queue, GpuQueueId> m_gpuQueueIds;
+        mutable GpuQueueId m_nextGpuQueueId{1u};
 
         cl::Device m_device;
         Capabilities m_capabilities{};
@@ -248,6 +267,7 @@ namespace gladius
 
         // Debug output control (instance-level)
         bool m_debugOutputEnabled{false};
+        bool m_gpuAccessSafeModeEnabled{true};
 
         // Device memory capabilities (queried at init)
         size_t m_deviceGlobalMemBytes{0};
@@ -262,6 +282,9 @@ namespace gladius
 
         // Event logger (optional)
         events::SharedLogger m_logger{};
+
+        std::shared_ptr<GpuAccessCoordinator> m_gpuAccessCoordinator{std::make_shared<GpuAccessCoordinator>()};
+        std::shared_ptr<OpenClEventRegistry> m_openClEventRegistry{std::make_shared<OpenClEventRegistry>()};
     };
 
     using SharedComputeContext = std::shared_ptr<ComputeContext>;

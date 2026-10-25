@@ -1,0 +1,43 @@
+{
+  "backgroundIndex": 3,
+  "illuminationMode": "frontlit",
+  "lutResolution": 16,
+  "materials": [
+    {
+      "name": "SUNLU PETG Cyan",
+      "reflectanceColor": [
+        0.239215686917305,
+        0.7764706015586853,
+        0.9098039269447327
+      ],
+      "transmissionDistance": 6.099999904632568
+    },
+    {
+      "name": "SUNLU PETG Magenta",
+      "reflectanceColor": [
+        0.729411780834198,
+        0.09803921729326248,
+        0.4627451002597809
+      ],
+      "transmissionDistance": 3.799999952316284
+    },
+    {
+      "name": "SUNLU PETG Yellow",
+      "reflectanceColor": [
+        1.0,
+        1.0,
+        0.501960813999176
+      ],
+      "transmissionDistance": 4.0
+    },
+    {
+      "name": "SUNLU PETG White",
+      "reflectanceColor": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "transmissionDistance": 6.199999809265137
+    }
+  ]
+}

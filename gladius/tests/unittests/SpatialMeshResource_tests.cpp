@@ -158,6 +158,34 @@ namespace gladius::tests
         EXPECT_EQ(resource.getTriangleCount(), 1u);
     }
 
+    TEST_F(SpatialMeshResource_Test, MeshQualityDiagnostics_OpenMesh_ExposesRecoveryMessage)
+    {
+        std::vector<float4> vertices = {
+            {0.f, 0.f, 0.f, 0.f},
+            {1.f, 0.f, 0.f, 0.f},
+            {1.f, 1.f, 0.f, 0.f},
+            {0.f, 1.f, 0.f, 0.f},
+        };
+        std::vector<TriangleIndices> indices = {
+            {0, 1, 2},
+            {0, 2, 3},
+        };
+
+        ResourceKey key(ResourceId{4}, ResourceType::Mesh);
+        SpatialMeshResource resource(key, vertices, indices);
+
+        auto const & diagnostics = resource.getMeshQualityDiagnostics();
+        EXPECT_TRUE(resource.hasMeshQualityIssues());
+        EXPECT_EQ(diagnostics.boundaryEdgeCount, 4);
+        EXPECT_EQ(diagnostics.nonManifoldEdgeCount, 0);
+
+        auto const message = resource.formatMeshQualityMessage("open quad");
+        EXPECT_NE(message.find("open quad"), std::string::npos);
+        EXPECT_NE(message.find("4 boundary edges"), std::string::npos);
+        EXPECT_NE(message.find("No repair or fallback was applied silently"), std::string::npos);
+        EXPECT_NE(message.find("Fast Winding Number"), std::string::npos);
+    }
+
     // ========================================================================
     // Unsigned Distance Validation Tests (T043)
     // ========================================================================

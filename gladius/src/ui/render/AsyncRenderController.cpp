@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -45,10 +46,11 @@ namespace gladius::ui::async_rendering
             coro::queue<RenderJob> jobQueue;
             std::atomic<bool> shutdownRequested{false};
             std::atomic<uint64_t> latestEpoch{0};
+            std::atomic<uint64_t> latestViewEpoch{0};
             AsyncRenderController::JobExecutor jobExecutor;
 
             std::mutex resultMutex;
-            std::optional<FrameResultMeta> pendingResult;
+            std::deque<FrameResultMeta> pendingResults;
             std::atomic<bool> hasPendingResult{false};
 
             std::mutex lifecycleMutex;
@@ -60,6 +62,33 @@ namespace gladius::ui::async_rendering
             {
             }
         };
+
+        [[nodiscard]] FrameResultMeta makeCancelledResult(RenderJob const & job)
+        {
+            return FrameResultMeta{.frameId = job.frameHint,
+                                   .epoch = job.epoch,
+                                   .viewEpoch = job.viewEpoch,
+                                   .jobType = job.type,
+                                   .width = job.width,
+                                   .height = job.height,
+                                   .cancelled = true,
+                                   .completedFrame = false,
+                                   .precomputedSdfUpdated = false,
+                                   .startLine = job.startLine,
+                                   .completedLine = job.startLine,
+                                   .computeDurationNs = 0,
+                                   .compilationProgress = 0.0f,
+                                   .compilationSucceeded = false,
+                                   .coordinatorRequestId = job.coordinatorRequestId,
+                                   .coordinatorStamp = job.coordinatorStamp};
+        }
+
+        void publishResult(ControllerStateData & data, FrameResultMeta result)
+        {
+            std::lock_guard<std::mutex> guard(data.resultMutex);
+            data.pendingResults.push_back(std::move(result));
+            data.hasPendingResult.store(true, std::memory_order_release);
+        }
     }
 
     struct AsyncRenderController::ControllerState
@@ -133,9 +162,10 @@ namespace gladius::ui::async_rendering
 
         m_state->data.shutdownRequested.store(false, std::memory_order_release);
         m_state->data.latestEpoch.store(0, std::memory_order_release);
+        m_state->data.latestViewEpoch.store(0, std::memory_order_release);
         {
             std::lock_guard<std::mutex> resultLock(m_state->data.resultMutex);
-            m_state->data.pendingResult.reset();
+            m_state->data.pendingResults.clear();
             m_state->data.hasPendingResult.store(false, std::memory_order_release);
         }
 
@@ -199,6 +229,22 @@ namespace gladius::ui::async_rendering
         }
     }
 
+    void AsyncRenderController::setLatestViewEpoch(uint64_t viewEpoch)
+    {
+        if (!m_state)
+        {
+            return;
+        }
+
+        auto & latestViewEpoch = m_state->data.latestViewEpoch;
+        auto current = latestViewEpoch.load(std::memory_order_acquire);
+        while (viewEpoch > current &&
+               !latestViewEpoch.compare_exchange_weak(
+                 current, viewEpoch, std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+        }
+    }
+
     void AsyncRenderController::setJobExecutor(JobExecutor executor)
     {
         if (!m_state)
@@ -224,15 +270,15 @@ namespace gladius::ui::async_rendering
         }
 
         std::lock_guard<std::mutex> lock(data.resultMutex);
-        if (!data.pendingResult.has_value())
+        if (data.pendingResults.empty())
         {
             data.hasPendingResult.store(false, std::memory_order_release);
             return std::nullopt;
         }
 
-        FrameResultMeta result = std::move(*data.pendingResult);
-        data.pendingResult.reset();
-        data.hasPendingResult.store(false, std::memory_order_release);
+        FrameResultMeta result = std::move(data.pendingResults.front());
+        data.pendingResults.pop_front();
+        data.hasPendingResult.store(!data.pendingResults.empty(), std::memory_order_release);
         return result;
     }
 
@@ -255,9 +301,8 @@ namespace gladius::ui::async_rendering
     {
         // NOTE: No ZoneScoped / DebugText / ZoneScopedN in the outer coroutine scope here.
         // This coroutine crosses thread boundaries via co_await pop() (push() resumes the consumer
-        // inline on the caller's thread) and co_await waitForEvent() (resumes on the OpenCL
-        // callback thread). Tracy zones must begin and end on the same OS thread — any zone that
-        // spans a co_await that changes threads will corrupt Tracy's per-thread zone stack.
+        // inline on the caller's thread). Tracy zones must begin and end on the same OS thread —
+        // any zone that spans a co_await that changes threads will corrupt Tracy's per-thread zone stack.
         // Inner ZoneScopedN blocks (inside the job executors, which don't cross co_await) are fine.
 #ifdef TRACY_ENABLE
         tracy::SetThreadName("AsyncRenderWorker");
@@ -298,10 +343,34 @@ namespace gladius::ui::async_rendering
             // (the UI thread). Without this, the entire job runs on the UI thread, blocking it.
             co_await data->workerPool->schedule();
 
-            auto cancellationCheck = [data, jobEpoch = job.epoch]() -> bool
+            // Pre-execution checks: stale queued work is cancelled before entering the job
+            // executor so obsolete OpenCL kernels are not launched.  The worker still publishes
+            // a cancelled result, allowing the UI/coordinator to clear any in-flight bookkeeping.
+            auto const epochOnlyCheck = [data, jobEpoch = job.epoch]() -> bool
             {
                 return data->shutdownRequested.load(std::memory_order_acquire) ||
                        data->latestEpoch.load(std::memory_order_acquire) > jobEpoch;
+            };
+
+            // In-execution check: also cancels HQ progressive jobs when the view epoch advances
+            // (camera moved), so the GPU is released quickly for realtime rendering.
+            // Realtime jobs are intentionally excluded: they complete fast and are always shown
+            // even with a stale view (allowForcedRealtimeStaleView = true).
+            bool const needsCurrentViewBeforeLaunch = job.type == RenderJobType::HighQuality ||
+                                                      job.type == RenderJobType::StaticFullFrameProbe;
+            auto cancellationCheck = [data,
+                                      jobEpoch = job.epoch,
+                                      jobViewEpoch = job.viewEpoch,
+                                      needsCurrentViewBeforeLaunch]() -> bool
+            {
+                if (data->shutdownRequested.load(std::memory_order_acquire))
+                    return true;
+                if (data->latestEpoch.load(std::memory_order_acquire) > jobEpoch)
+                    return true;
+                if (needsCurrentViewBeforeLaunch && jobViewEpoch > 0 &&
+                    data->latestViewEpoch.load(std::memory_order_acquire) > jobViewEpoch)
+                    return true;
+                return false;
             };
 
             // Preview/streaming jobs must not be skipped here — their executors
@@ -310,8 +379,18 @@ namespace gladius::ui::async_rendering
             // leave those flags stuck at true, preventing any future scheduling.
             bool const isPreviewJob = (job.type == RenderJobType::LowResPreview ||
                                        job.type == RenderJobType::StreamingPreview);
-            if (!isPreviewJob && cancellationCheck())
+            if (!isPreviewJob && epochOnlyCheck())
             {
+                publishResult(*data, makeCancelledResult(job));
+                continue;
+            }
+
+            auto const latestViewEpoch = data->latestViewEpoch.load(std::memory_order_acquire);
+            bool const staleViewBeforeLaunch = needsCurrentViewBeforeLaunch && job.viewEpoch > 0 &&
+                                               latestViewEpoch > job.viewEpoch;
+            if (staleViewBeforeLaunch)
+            {
+                publishResult(*data, makeCancelledResult(job));
                 continue;
             }
 
@@ -327,16 +406,10 @@ namespace gladius::ui::async_rendering
             }
             catch (...)
             {
-                result.epoch = job.epoch;
-                result.frameId = job.frameHint;
-                result.cancelled = true;
+                result = makeCancelledResult(job);
             }
 
-            {
-                std::lock_guard<std::mutex> guard(data->resultMutex);
-                data->pendingResult = std::move(result);
-                data->hasPendingResult.store(true, std::memory_order_release);
-            }
+            publishResult(*data, std::move(result));
         }
 
         {
@@ -357,11 +430,25 @@ namespace gladius::ui::async_rendering
           if (m_stagingWidth != width || m_stagingHeight != height || !m_workerQueue ||
               !m_stagingBuffer)
         {
-            m_stagingBuffer.reset();
-            m_workerQueue.reset();
+            std::lock_guard<std::mutex> lock(m_bufferMutex);
+            bool const hasGpuOwnedFrame = std::any_of(
+              m_frameBuffers.begin(),
+              m_frameBuffers.end(),
+              [](FrameBuffer const & buffer)
+              {
+                  auto const state = buffer.state.load(std::memory_order_acquire);
+                  return state == FrameState::Writing || state == FrameState::Resampling;
+              });
+            if (hasGpuOwnedFrame)
+            {
+                return;
+            }
 
-            // Create dedicated worker command queue (no GL interop needed)
-            m_workerQueue = std::make_unique<cl::CommandQueue>(context.createQueue());
+            m_stagingBuffer.reset();
+            {
+                std::lock_guard<std::mutex> queueLock(m_workerQueueMutex);
+                m_workerQueue = std::make_shared<cl::CommandQueue>(context.createQueue());
+            }
 
             // Create CL-only staging buffer for async rendering
             static cl::ImageFormat const format = {CL_RGBA, CL_FLOAT};
@@ -377,7 +464,6 @@ namespace gladius::ui::async_rendering
             m_stagingHeight = height;
 
             // Initialize frame buffers with GLImageBuffer instances
-            std::lock_guard<std::mutex> lock(m_bufferMutex);
             for (size_t i = 0; i < m_frameBuffers.size(); ++i)
             {
                 auto & fb = m_frameBuffers[i];
@@ -386,12 +472,14 @@ namespace gladius::ui::async_rendering
                 fb.state.store(FrameState::Idle, std::memory_order_release);
                 fb.frameId.store(0, std::memory_order_release);
                 fb.epoch.store(0, std::memory_order_release);
+                fb.viewEpoch.store(0, std::memory_order_release);
                 fb.readyTimestampNs.store(0, std::memory_order_release);
                 fb.publishTimestampNs.store(0, std::memory_order_release);
             }
 
             // First buffer starts as Front
             m_frameBuffers[0].state.store(FrameState::Front, std::memory_order_release);
+            m_framePresentation.reset(m_frameBuffers.size());
             m_frontBufferIndex.store(0, std::memory_order_release);
         }
     }
@@ -399,6 +487,12 @@ namespace gladius::ui::async_rendering
     cl::CommandQueue * AsyncRenderController::workerQueue() noexcept
     {
         return m_workerQueue.get();
+    }
+
+    std::shared_ptr<cl::CommandQueue> AsyncRenderController::workerQueueShared() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_workerQueueMutex);
+        return m_workerQueue;
     }
 
     cl::Image2D * AsyncRenderController::stagingBuffer() noexcept
@@ -446,20 +540,56 @@ namespace gladius::ui::async_rendering
         return nullptr;
     }
 
-    bool AsyncRenderController::tryTransitionBuffer(FrameBuffer * buffer,
-                                                    FrameState expectedState,
-                                                    FrameState newState) noexcept
+    std::optional<size_t>
+    AsyncRenderController::frameBufferIndex(FrameBuffer const * buffer) const noexcept
     {
-        ProfileFunction
+        if (buffer == nullptr)
+        {
+            return std::nullopt;
+        }
 
-          if (!buffer)
+        for (size_t index = 0; index < m_frameBuffers.size(); ++index)
+        {
+            if (&m_frameBuffers[index] == buffer)
+            {
+                return index;
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool AsyncRenderController::tryTransitionBufferLocked(FrameBuffer * buffer,
+                                                          FrameState expectedState,
+                                                          FrameState newState) noexcept
+    {
+        if (buffer == nullptr)
         {
             return false;
         }
 
         FrameState expected = expectedState;
-        return buffer->state.compare_exchange_strong(
+        bool const transitioned = buffer->state.compare_exchange_strong(
           expected, newState, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!transitioned)
+        {
+            return false;
+        }
+
+        if (auto const index = frameBufferIndex(buffer); index.has_value())
+        {
+            [[maybe_unused]] bool const mirrored =
+              m_framePresentation.tryTransitionBuffer(*index, expectedState, newState);
+        }
+        return true;
+    }
+
+    bool AsyncRenderController::tryTransitionBuffer(FrameBuffer * buffer,
+                                                    FrameState expectedState,
+                                                    FrameState newState) noexcept
+    {
+        ProfileFunction
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        return tryTransitionBufferLocked(buffer, expectedState, newState);
     }
 
     FrameBuffer * AsyncRenderController::frontBuffer() noexcept
@@ -473,24 +603,51 @@ namespace gladius::ui::async_rendering
     {
         ProfileFunction std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-        // Find an Idle buffer to write to
-        for (auto & buffer : m_frameBuffers)
+        auto const bufferId =
+          m_framePresentation.acquireWriteBuffer(RenderStamp{.sceneEpoch = epoch});
+        if (!bufferId.has_value() || *bufferId >= m_frameBuffers.size())
         {
-            if (tryTransitionBuffer(&buffer, FrameState::Idle, FrameState::Writing))
-            {
-                buffer.epoch.store(epoch, std::memory_order_release);
-                return &buffer;
-            }
+            return nullptr;
         }
 
-        // No Idle buffer available - this shouldn't happen with triple buffering
-        // but can happen with double buffering if UI is slow
-        return nullptr;
+        auto & buffer = m_frameBuffers[*bufferId];
+        FrameState expected = FrameState::Idle;
+        bool const transitioned = buffer.state.compare_exchange_strong(
+          expected, FrameState::Writing, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!transitioned)
+        {
+            [[maybe_unused]] bool const rolledBack =
+              m_framePresentation.tryTransitionBuffer(*bufferId,
+                                                      FrameState::Writing,
+                                                      FrameState::Idle);
+            return nullptr;
+        }
+
+        buffer.epoch.store(epoch, std::memory_order_release);
+        buffer.viewEpoch.store(0, std::memory_order_release);
+        return &buffer;
     }
 
     void AsyncRenderController::publishFrame(FrameBuffer * buffer,
                                              uint64_t frameId,
-                                             uint64_t epoch) noexcept
+                                             uint64_t epoch,
+                                             uint64_t viewEpoch,
+                                             FramePresentationQuality quality) noexcept
+    {
+        publishFrame(buffer,
+                     frameId,
+                     epoch,
+                     viewEpoch,
+                     RenderStamp{.sceneEpoch = epoch, .viewEpoch = viewEpoch},
+                     quality);
+    }
+
+    void AsyncRenderController::publishFrame(FrameBuffer * buffer,
+                                             uint64_t frameId,
+                                             uint64_t epoch,
+                                             uint64_t viewEpoch,
+                                             RenderStamp const & stamp,
+                                             FramePresentationQuality quality) noexcept
     {
         ProfileFunction if (!buffer)
         {
@@ -501,6 +658,7 @@ namespace gladius::ui::async_rendering
 
         buffer->frameId.store(frameId, std::memory_order_release);
         buffer->epoch.store(epoch, std::memory_order_release);
+        buffer->viewEpoch.store(viewEpoch, std::memory_order_release);
 
         // Get current timestamp (nanoseconds since epoch)
         auto const now = std::chrono::high_resolution_clock::now();
@@ -510,45 +668,132 @@ namespace gladius::ui::async_rendering
 
         // Transition Writing → Ready
         FrameState expected = FrameState::Writing;
-        buffer->state.compare_exchange_strong(
+        bool const transitioned = buffer->state.compare_exchange_strong(
           expected, FrameState::Ready, std::memory_order_release, std::memory_order_acquire);
+        if (transitioned)
+        {
+            if (auto const index = frameBufferIndex(buffer); index.has_value())
+            {
+                [[maybe_unused]] bool const mirrored = m_framePresentation.publishFrame(
+                  *index, frameId, stamp, quality);
+            }
+        }
+    }
+
+    std::optional<PresentationBuffer>
+    AsyncRenderController::mirroredPresentationBuffer(FrameBuffer const * buffer) const noexcept
+    {
+        if (buffer == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        auto const index = frameBufferIndex(buffer);
+        if (!index.has_value())
+        {
+            return std::nullopt;
+        }
+
+        auto const * mirrored = m_framePresentation.buffer(*index);
+        if (mirrored == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        return *mirrored;
+    }
+
+    std::optional<PresentationBuffer>
+    AsyncRenderController::mirroredFrontPresentationBuffer() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        auto const frontId = m_framePresentation.frontBufferId();
+        if (!frontId.has_value())
+        {
+            return std::nullopt;
+        }
+
+        auto const * mirrored = m_framePresentation.buffer(*frontId);
+        if (mirrored == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        return *mirrored;
     }
 
     FrameBuffer * AsyncRenderController::promoteReadyToFront() noexcept
     {
+        return promoteReadyToFront(RenderStamp{}, RenderStampMask::none());
+    }
+
+    FrameBuffer * AsyncRenderController::promoteReadyToFront(RenderStamp const & required,
+                                                            RenderStampMask mask) noexcept
+    {
         ProfileFunction std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-        // Find the newest Ready buffer (highest frameId)
-        FrameBuffer * newestReady = nullptr;
-        uint64_t highestFrameId = 0;
-
-        for (auto & buffer : m_frameBuffers)
-        {
-            if (buffer.state.load(std::memory_order_acquire) == FrameState::Ready)
-            {
-                auto const frameId = buffer.frameId.load(std::memory_order_acquire);
-                if (frameId > highestFrameId)
-                {
-                    highestFrameId = frameId;
-                    newestReady = &buffer;
-                }
-            }
-        }
-
-        if (!newestReady)
+        auto const newestReadyIndex =
+          m_framePresentation.selectBestReadyForPresentation(required, mask);
+        if (!newestReadyIndex.has_value() || *newestReadyIndex >= m_frameBuffers.size())
         {
             return nullptr; // No Ready buffer available
         }
 
+        auto * newestReady = &m_frameBuffers[*newestReadyIndex];
+
         // Transition Ready → Resampling
-        if (!tryTransitionBuffer(newestReady, FrameState::Ready, FrameState::Resampling))
+        FrameState expected = FrameState::Ready;
+        bool const transitioned = newestReady->state.compare_exchange_strong(
+          expected, FrameState::Resampling, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!transitioned)
         {
+            [[maybe_unused]] bool const rolledBack = m_framePresentation.tryTransitionBuffer(
+              *newestReadyIndex, FrameState::Resampling, FrameState::Ready);
             return nullptr; // Lost race
         }
 
         // After resampling completes, we'll transition Resampling → Front
         // and old Front → Idle in a separate call
         return newestReady;
+    }
+
+    bool AsyncRenderController::canPresentFrame(RenderStamp const & candidateStamp,
+                                                FramePresentationQuality candidateQuality,
+                                                RenderStamp const & required,
+                                                RenderStampMask mask) const noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        return m_framePresentation.canPresentCandidate(
+          FramePresentationCandidate{.stamp = candidateStamp, .quality = candidateQuality},
+          required,
+          mask);
+    }
+
+    void AsyncRenderController::discardReadyFrame(uint64_t frameId,
+                                                  uint64_t epoch,
+                                                  uint64_t viewEpoch) noexcept
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+
+        for (auto & buffer : m_frameBuffers)
+        {
+            if (buffer.state.load(std::memory_order_acquire) != FrameState::Ready)
+            {
+                continue;
+            }
+
+            if (buffer.frameId.load(std::memory_order_acquire) != frameId ||
+                buffer.epoch.load(std::memory_order_acquire) != epoch ||
+                buffer.viewEpoch.load(std::memory_order_acquire) != viewEpoch)
+            {
+                continue;
+            }
+
+            [[maybe_unused]] bool const released =
+              tryTransitionBufferLocked(&buffer, FrameState::Ready, FrameState::Idle);
+            return;
+        }
     }
 
     bool AsyncRenderController::finalizeFrontPromotion(FrameBuffer * buffer) noexcept
@@ -575,7 +820,10 @@ namespace gladius::ui::async_rendering
             return false;
         }
 
-        if (!tryTransitionBuffer(&(*it), FrameState::Resampling, FrameState::Front))
+        FrameState expected = FrameState::Resampling;
+        bool const transitioned = it->state.compare_exchange_strong(
+          expected, FrameState::Front, std::memory_order_acq_rel, std::memory_order_acquire);
+        if (!transitioned)
         {
             return false;
         }
@@ -595,6 +843,8 @@ namespace gladius::ui::async_rendering
                                                           std::memory_order_acquire);
         }
 
+        [[maybe_unused]] bool const mirrored = m_framePresentation.finalizeFrontPromotion(newIndex);
+
         it->publishTimestampNs.store(static_cast<uint64_t>(ns), std::memory_order_release);
         return true;
     }
@@ -613,11 +863,13 @@ namespace gladius::ui::async_rendering
             auto const state = buffer.state.load(std::memory_order_acquire);
             auto const bufEpoch = buffer.epoch.load(std::memory_order_acquire);
 
-            // Release Writing buffers from old epochs
-            if (state == FrameState::Writing && bufEpoch <= oldEpoch)
+            // Ready frames are already complete and may be discarded when their epoch is stale.
+            // Writing/Resampling frames are still owned by an OpenCL kernel or the UI upload path;
+            // recycling them here can cause use-after-free/racing writes on the GPU.
+            if (state == FrameState::Ready && bufEpoch <= oldEpoch)
             {
                 [[maybe_unused]] bool const released =
-                  tryTransitionBuffer(&buffer, FrameState::Writing, FrameState::Idle);
+                  tryTransitionBufferLocked(&buffer, FrameState::Ready, FrameState::Idle);
             }
         }
     }
@@ -740,10 +992,12 @@ namespace gladius::ui::async_rendering
             auto const state = buffer.state.load(std::memory_order_acquire);
             auto const bufEpoch = buffer.epoch.load(std::memory_order_acquire);
 
-            // Release Writing buffers from old epochs
-            if (state == FrameState::Writing && bufEpoch <= oldEpoch)
+            // Ready preview frames are complete and may be discarded when stale.
+            // Writing frames are still owned by a worker/GPU operation; recycling them here can
+            // race an in-flight kernel or host download.
+            if (state == FrameState::Ready && bufEpoch <= oldEpoch)
             {
-                auto expected = FrameState::Writing;
+                auto expected = FrameState::Ready;
                 buffer.state.compare_exchange_strong(expected, FrameState::Idle,
                                                      std::memory_order_acq_rel);
             }

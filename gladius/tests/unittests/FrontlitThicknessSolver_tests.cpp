@@ -6,13 +6,302 @@
 #include "io/3mf/FaceThicknessMapper.h"
 #include "io/3mf/FilamentOpticalProperties.h"
 #include "io/3mf/FrontlitThicknessSolver.h"
+#include "io/3mf/ShellMaterialOrdering.h"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <cmath>
+#include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <string>
+#include <vector>
 
 namespace gladius::io::tests
 {
+    namespace
+    {
+        struct BenchmarkMetrics
+        {
+            float meanLinearRgbError = 0.0F;
+            float maxLinearRgbError = 0.0F;
+            float meanDeltaE = 0.0F;
+            float maxDeltaE = 0.0F;
+            float convergenceRate = 0.0F;
+            std::size_t sampleCount = 0U;
+        };
+
+        struct BenchmarkOutcome
+        {
+            OrderedShellMaterials orderedMaterials;
+            BenchmarkMetrics metrics;
+        };
+
+        [[nodiscard]] Eigen::Vector3f hslToSrgb(float hueDegrees, float saturation, float lightness)
+        {
+            float const hue = std::fmod(std::fmod(hueDegrees, 360.0F) + 360.0F, 360.0F) / 60.0F;
+            float const chroma = (1.0F - std::abs(2.0F * lightness - 1.0F)) * saturation;
+            float const x = chroma * (1.0F - std::abs(std::fmod(hue, 2.0F) - 1.0F));
+
+            Eigen::Vector3f rgbPrime = Eigen::Vector3f::Zero();
+            if (hue < 1.0F)
+            {
+                rgbPrime = Eigen::Vector3f{chroma, x, 0.0F};
+            }
+            else if (hue < 2.0F)
+            {
+                rgbPrime = Eigen::Vector3f{x, chroma, 0.0F};
+            }
+            else if (hue < 3.0F)
+            {
+                rgbPrime = Eigen::Vector3f{0.0F, chroma, x};
+            }
+            else if (hue < 4.0F)
+            {
+                rgbPrime = Eigen::Vector3f{0.0F, x, chroma};
+            }
+            else if (hue < 5.0F)
+            {
+                rgbPrime = Eigen::Vector3f{x, 0.0F, chroma};
+            }
+            else
+            {
+                rgbPrime = Eigen::Vector3f{chroma, 0.0F, x};
+            }
+
+            float const match = lightness - 0.5F * chroma;
+            return (rgbPrime.array() + match).matrix().cwiseMax(0.0F).cwiseMin(1.0F);
+        }
+
+        [[nodiscard]] Eigen::Vector3f linearRgbToXyz(Eigen::Vector3f const& linearRgb)
+        {
+            Eigen::Matrix3f const matrix = (Eigen::Matrix3f() <<
+                0.4124564F, 0.3575761F, 0.1804375F,
+                0.2126729F, 0.7151522F, 0.0721750F,
+                0.0193339F, 0.1191920F, 0.9503041F).finished();
+            return matrix * linearRgb;
+        }
+
+        [[nodiscard]] Eigen::Vector3f xyzToLab(Eigen::Vector3f const& xyz)
+        {
+            Eigen::Vector3f scaled = xyz;
+            scaled.x() /= 0.95047F;
+            scaled.y() /= 1.00000F;
+            scaled.z() /= 1.08883F;
+
+            auto const f = [](float value) {
+                float const delta = 6.0F / 29.0F;
+                float const threshold = delta * delta * delta;
+                if (value > threshold)
+                {
+                    return std::cbrt(value);
+                }
+                return value / (3.0F * delta * delta) + 4.0F / 29.0F;
+            };
+
+            float const fx = f(std::max(scaled.x(), 0.0F));
+            float const fy = f(std::max(scaled.y(), 0.0F));
+            float const fz = f(std::max(scaled.z(), 0.0F));
+
+            return Eigen::Vector3f{116.0F * fy - 16.0F, 500.0F * (fx - fy), 200.0F * (fy - fz)};
+        }
+
+        [[nodiscard]] float deltaE76(Eigen::Vector3f const& lhsLinear, Eigen::Vector3f const& rhsLinear)
+        {
+            return (xyzToLab(linearRgbToXyz(lhsLinear)) - xyzToLab(linearRgbToXyz(rhsLinear))).norm();
+        }
+
+        [[nodiscard]] FilamentStack loadFilamentStackFromJson(std::string const& filePath,
+                                                               std::size_t& backgroundIndex,
+                                                               IlluminationMode& illuminationMode)
+        {
+            namespace fs = std::filesystem;
+
+            std::vector<fs::path> const candidates = {
+                fs::path{filePath},
+                fs::path{"testdata"} / fs::path{filePath}.filename(),
+                fs::path{"tests/unittests/testdata"} / fs::path{filePath}.filename(),
+                fs::path{"out/build/linux-releaseWithDebug/tests/unittests/testdata"} / fs::path{filePath}.filename()};
+
+            fs::path resolvedPath;
+            for (fs::path const& candidate : candidates)
+            {
+                if (fs::exists(candidate))
+                {
+                    resolvedPath = candidate;
+                    break;
+                }
+            }
+
+            std::ifstream stream(resolvedPath.empty() ? filePath : resolvedPath.string());
+            EXPECT_TRUE(stream.is_open()) << "Failed to open fixture: " << filePath;
+
+            nlohmann::json json;
+            stream >> json;
+
+            backgroundIndex = json.value("backgroundIndex", std::numeric_limits<std::size_t>::max());
+            std::string const mode = json.value("illuminationMode", std::string{"frontlit"});
+            illuminationMode = (mode == "backlit") ? IlluminationMode::Backlit : IlluminationMode::Frontlit;
+
+            FilamentStack stack;
+            for (auto const& material : json.at("materials"))
+            {
+                auto const reflectance = material.at("reflectanceColor").get<std::vector<float>>();
+                Eigen::Vector3f transmissionDistance = Eigen::Vector3f::Zero();
+                if (material.contains("transmissionDistance"))
+                {
+                    if (material.at("transmissionDistance").is_array())
+                    {
+                        auto const td = material.at("transmissionDistance").get<std::vector<float>>();
+                        if (td.size() == 3U)
+                        {
+                            transmissionDistance = Eigen::Vector3f{td[0], td[1], td[2]};
+                        }
+                    }
+                    else
+                    {
+                        float const td = material.at("transmissionDistance").get<float>();
+                        transmissionDistance = Eigen::Vector3f{td, td, td};
+                    }
+                }
+
+                stack.push_back(FilamentOpticalProperties{
+                    material.value("name", std::string{"Material"}),
+                    Eigen::Vector3f{reflectance.at(0), reflectance.at(1), reflectance.at(2)},
+                    0.6F,
+                    0.4F,
+                    transmissionDistance});
+            }
+
+            return stack;
+        }
+
+        [[nodiscard]] std::vector<Eigen::Vector3f> buildHslWheelSamples()
+        {
+            std::vector<Eigen::Vector3f> samples;
+            std::vector<float> const saturations = {0.55F, 0.80F, 1.0F};
+            std::vector<float> const lightnesses = {0.35F, 0.50F, 0.65F};
+
+            for (float lightness : lightnesses)
+            {
+                for (float saturation : saturations)
+                {
+                    for (int hueIndex = 0; hueIndex < 24; ++hueIndex)
+                    {
+                        float const hue = 360.0F * static_cast<float>(hueIndex) / 24.0F;
+                        samples.push_back(srgbToLinear(hslToSrgb(hue, saturation, lightness)));
+                    }
+                }
+            }
+
+            return samples;
+        }
+
+        [[nodiscard]] BenchmarkMetrics evaluateBenchmarkForOrderedStack(FilamentStack const& stack,
+                                                                         ThicknessConstraints const& constraints,
+                                                                         IlluminationMode mode,
+                                                                         std::size_t backgroundIndex,
+                                                                         std::vector<Eigen::Vector3f> const& samples)
+        {
+            FrontlitThicknessSolver solver(stack, constraints, mode, backgroundIndex);
+
+            BenchmarkMetrics metrics;
+            metrics.sampleCount = samples.size();
+
+            std::size_t convergedCount = 0U;
+            for (Eigen::Vector3f const& target : samples)
+            {
+                ThicknessSolution const solution = solver.solve(target);
+                float const linearRgbError = (solution.achievedColor - target).norm();
+                float const deltaE = deltaE76(solution.achievedColor, target);
+
+                metrics.meanLinearRgbError += linearRgbError;
+                metrics.maxLinearRgbError = std::max(metrics.maxLinearRgbError, linearRgbError);
+                metrics.meanDeltaE += deltaE;
+                metrics.maxDeltaE = std::max(metrics.maxDeltaE, deltaE);
+                if (solution.converged)
+                {
+                    ++convergedCount;
+                }
+            }
+
+            if (!samples.empty())
+            {
+                float const invCount = 1.0F / static_cast<float>(samples.size());
+                metrics.meanLinearRgbError *= invCount;
+                metrics.meanDeltaE *= invCount;
+                metrics.convergenceRate = static_cast<float>(convergedCount) * invCount;
+            }
+
+            return metrics;
+        }
+
+        [[nodiscard]] BenchmarkOutcome benchmarkHeuristicOrder(FilamentStack const& stack,
+                                                                ThicknessConstraints const& constraints,
+                                                                IlluminationMode mode,
+                                                                std::size_t backgroundIndex,
+                                                                std::vector<Eigen::Vector3f> const& samples)
+        {
+            BenchmarkOutcome outcome;
+            outcome.orderedMaterials = ShellMaterialOrdering::reorderForShells(stack, backgroundIndex, mode);
+            outcome.metrics = evaluateBenchmarkForOrderedStack(
+                outcome.orderedMaterials.stack,
+                constraints,
+                mode,
+                outcome.orderedMaterials.backgroundIndex,
+                samples);
+            return outcome;
+        }
+
+        [[nodiscard]] BenchmarkOutcome benchmarkOptimizedOrder(FilamentStack const& stack,
+                                                                ThicknessConstraints const& constraints,
+                                                                IlluminationMode mode,
+                                                                std::size_t backgroundIndex,
+                                                                std::vector<Eigen::Vector3f> const& samples)
+        {
+            BenchmarkOutcome outcome;
+            outcome.orderedMaterials = ShellMaterialOrdering::optimizeGlobalOrderForShells(
+                stack,
+                backgroundIndex,
+                mode,
+                [&](FilamentStack const& candidate, std::size_t candidateBackgroundIndex) {
+                    return evaluateBenchmarkForOrderedStack(
+                        candidate,
+                        constraints,
+                        mode,
+                        candidateBackgroundIndex,
+                        samples).meanDeltaE;
+                });
+
+            outcome.metrics = evaluateBenchmarkForOrderedStack(
+                outcome.orderedMaterials.stack,
+                constraints,
+                mode,
+                outcome.orderedMaterials.backgroundIndex,
+                samples);
+            return outcome;
+        }
+
+        void printBenchmarkOutcome(char const* label, BenchmarkOutcome const& outcome)
+        {
+            std::cout << label << ": order=";
+            for (std::size_t index = 0; index < outcome.orderedMaterials.stack.size(); ++index)
+            {
+                if (index > 0U)
+                {
+                    std::cout << " -> ";
+                }
+                std::cout << outcome.orderedMaterials.stack[index].name;
+            }
+            std::cout << ", meanRGB=" << outcome.metrics.meanLinearRgbError
+                      << ", maxRGB=" << outcome.metrics.maxLinearRgbError
+                      << ", meanDeltaE=" << outcome.metrics.meanDeltaE
+                      << ", maxDeltaE=" << outcome.metrics.maxDeltaE
+                      << ", convergence=" << outcome.metrics.convergenceRate << std::endl;
+        }
+    } // namespace
 
     class FrontlitThicknessSolverTest : public ::testing::Test
     {
@@ -22,21 +311,20 @@ namespace gladius::io::tests
             // Create a simple 3-filament stack: black (bottom), red, white (top)
             m_blackFilament = FilamentOpticalProperties{
                 "Black",
-                Eigen::Vector3f(0.05f, 0.05f, 0.05f), // Very dark
-                0.8f,                                  // High opacity
-                0.4f                                   // Reference thickness
-            };
+                Eigen::Vector3f(0.05f, 0.05f, 0.05f),
+                0.8f,
+                0.4f};
 
             m_redFilament = FilamentOpticalProperties{
                 "Red",
-                Eigen::Vector3f(0.9f, 0.1f, 0.1f), // Bright red
-                0.6f,                               // Medium opacity
+                Eigen::Vector3f(0.9f, 0.1f, 0.1f),
+                0.6f,
                 0.4f};
 
             m_whiteFilament = FilamentOpticalProperties{
                 "White",
-                Eigen::Vector3f(0.95f, 0.95f, 0.95f), // Near white
-                0.7f,                                  // High-ish opacity
+                Eigen::Vector3f(0.95f, 0.95f, 0.95f),
+                0.7f,
                 0.4f};
 
             m_stack.push_back(m_blackFilament);
@@ -50,7 +338,6 @@ namespace gladius::io::tests
         FilamentStack m_stack;
     };
 
-    // Test FilamentOpticalProperties::computeEffectiveOpacity
     TEST_F(FrontlitThicknessSolverTest, EffectiveOpacity_ZeroThickness_ReturnsZero)
     {
         float const opacity = m_blackFilament.computeEffectiveOpacity(0.0f);
@@ -59,11 +346,7 @@ namespace gladius::io::tests
 
     TEST_F(FrontlitThicknessSolverTest, EffectiveOpacity_ReferenceThickness_ReturnsNominalOpacity)
     {
-        // At reference thickness, opacity should be close to the nominal value
         float const opacity = m_blackFilament.computeEffectiveOpacity(m_blackFilament.referenceThickness);
-
-        // Due to exponential model, it won't be exactly m_blackFilament.opacity,
-        // but should be in the same ballpark
         EXPECT_GT(opacity, 0.5f);
         EXPECT_LT(opacity, 1.0f);
     }
@@ -87,16 +370,13 @@ namespace gladius::io::tests
             Eigen::Vector3f(0.5f, 0.5f, 0.5f),
             0.6f,
             0.4f,
-            Eigen::Vector3f(1.0f, 1.0f, 1.0f)}; // TD = 1mm per channel
+            Eigen::Vector3f(1.0f, 1.0f, 1.0f)};
 
         auto const rt = filament.computeKubelkaMunkRT(1.0f);
 
-        // Reflectance should be close to Rinf for moderate thickness with scattering considered
         EXPECT_NEAR(rt.reflectance.x(), 0.5f, 0.02f);
         EXPECT_NEAR(rt.reflectance.y(), 0.5f, 0.02f);
         EXPECT_NEAR(rt.reflectance.z(), 0.5f, 0.02f);
-
-        // Transmittance should be small due to absorption/scattering
         EXPECT_NEAR(rt.transmittance.x(), 0.04f, 0.02f);
         EXPECT_NEAR(rt.transmittance.y(), 0.04f, 0.02f);
         EXPECT_NEAR(rt.transmittance.z(), 0.04f, 0.02f);
@@ -126,27 +406,19 @@ namespace gladius::io::tests
         EXPECT_NEAR(predicted.z(), rt.reflectance.z(), 1e-3f);
     }
 
-    // Test FrontlitThicknessSolver::predictColor
     TEST_F(FrontlitThicknessSolverTest, PredictColor_AllZeroThickness_ReturnsBlackOrDefault)
     {
         FrontlitThicknessSolver solver(m_stack);
-
         std::vector<float> thicknesses = {0.0f, 0.0f, 0.0f};
         Eigen::Vector3f const predicted = solver.predictColor(thicknesses);
-
-        // With all zero thicknesses, no color is visible - should be black or near-black
         EXPECT_LT(predicted.norm(), 0.1f);
     }
 
     TEST_F(FrontlitThicknessSolverTest, PredictColor_OnlyTopLayerThick_ReturnsTopColor)
     {
         FrontlitThicknessSolver solver(m_stack);
-
-        // Only the white (top) layer has thickness
         std::vector<float> thicknesses = {0.0f, 0.0f, 5.0f};
         Eigen::Vector3f const predicted = solver.predictColor(thicknesses);
-
-        // Should be dominated by white
         EXPECT_GT(predicted.x(), 0.8f);
         EXPECT_GT(predicted.y(), 0.8f);
         EXPECT_GT(predicted.z(), 0.8f);
@@ -155,12 +427,8 @@ namespace gladius::io::tests
     TEST_F(FrontlitThicknessSolverTest, PredictColor_OnlyBottomLayerThick_ReturnsBottomColor)
     {
         FrontlitThicknessSolver solver(m_stack);
-
-        // Only the black (bottom) layer has thickness
         std::vector<float> thicknesses = {5.0f, 0.0f, 0.0f};
         Eigen::Vector3f const predicted = solver.predictColor(thicknesses);
-
-        // Should be dominated by black
         EXPECT_LT(predicted.x(), 0.2f);
         EXPECT_LT(predicted.y(), 0.2f);
         EXPECT_LT(predicted.z(), 0.2f);
@@ -169,61 +437,44 @@ namespace gladius::io::tests
     TEST_F(FrontlitThicknessSolverTest, PredictColor_OnlyMiddleLayerThick_ReturnsMiddleColor)
     {
         FrontlitThicknessSolver solver(m_stack);
-
-        // Only the red (middle) layer has thickness
         std::vector<float> thicknesses = {0.0f, 5.0f, 0.0f};
         Eigen::Vector3f const predicted = solver.predictColor(thicknesses);
-
-        // Should be dominated by red
-        EXPECT_GT(predicted.x(), 0.7f); // High red
-        EXPECT_LT(predicted.y(), 0.3f); // Low green
-        EXPECT_LT(predicted.z(), 0.3f); // Low blue
+        EXPECT_GT(predicted.x(), 0.7f);
+        EXPECT_LT(predicted.y(), 0.3f);
+        EXPECT_LT(predicted.z(), 0.3f);
     }
 
     TEST_F(FrontlitThicknessSolverTest, PredictColor_TopOccludesLower_ColorDominatedByTop)
     {
         FrontlitThicknessSolver solver(m_stack);
-
-        // All layers thick, but top should dominate
         std::vector<float> thicknesses = {5.0f, 5.0f, 5.0f};
         Eigen::Vector3f const predicted = solver.predictColor(thicknesses);
-
-        // Top layer (white) should dominate due to high opacity
         EXPECT_GT(predicted.x(), 0.7f);
         EXPECT_GT(predicted.y(), 0.7f);
         EXPECT_GT(predicted.z(), 0.7f);
     }
 
-    // Test FrontlitThicknessSolver::computeVisibilities
     TEST_F(FrontlitThicknessSolverTest, Visibilities_SumToApproximatelyOne)
     {
         FrontlitThicknessSolver solver(m_stack);
-
         std::vector<float> thicknesses = {1.0f, 1.0f, 1.0f};
         std::vector<float> const visibilities = solver.computeVisibilities(thicknesses);
 
         ASSERT_EQ(visibilities.size(), 3u);
-
-        // Sum of visibilities plus remaining (transmitted) light should be <= 1
         float const sum = visibilities[0] + visibilities[1] + visibilities[2];
         EXPECT_LE(sum, 1.0f);
-        EXPECT_GT(sum, 0.5f); // Should capture most of the light
+        EXPECT_GT(sum, 0.5f);
     }
 
     TEST_F(FrontlitThicknessSolverTest, Visibilities_TopLayerMostVisible)
     {
         FrontlitThicknessSolver solver(m_stack);
-
-        // Equal thicknesses - top layer should have highest visibility
         std::vector<float> thicknesses = {1.0f, 1.0f, 1.0f};
         std::vector<float> const visibilities = solver.computeVisibilities(thicknesses);
-
-        // Top layer (index 2) should have highest visibility
         EXPECT_GT(visibilities[2], visibilities[1]);
         EXPECT_GT(visibilities[1], visibilities[0]);
     }
 
-    // Test FrontlitThicknessSolver::solve (inverse problem)
     TEST_F(FrontlitThicknessSolverTest, Solve_TargetWhite_IncreaseTopLayerThickness)
     {
         ThicknessConstraints constraints;
@@ -231,17 +482,12 @@ namespace gladius::io::tests
         constraints.maxThickness = 5.0f;
 
         FrontlitThicknessSolver solver(m_stack, constraints);
-
         Eigen::Vector3f const targetWhite(0.9f, 0.9f, 0.9f);
         ThicknessSolution const solution = solver.solve(targetWhite);
 
         ASSERT_EQ(solution.thicknesses.size(), 3u);
-
-        // To achieve white, the white (top) layer should be thickest
         EXPECT_GT(solution.thicknesses[2], solution.thicknesses[0]);
         EXPECT_GT(solution.thicknesses[2], solution.thicknesses[1]);
-
-        // Error should be reasonably small
         EXPECT_LT(solution.colorError, 0.2f);
     }
 
@@ -252,17 +498,11 @@ namespace gladius::io::tests
         constraints.maxThickness = 5.0f;
 
         FrontlitThicknessSolver solver(m_stack, constraints);
-
         Eigen::Vector3f const targetRed(0.8f, 0.1f, 0.1f);
         ThicknessSolution const solution = solver.solve(targetRed);
 
         ASSERT_EQ(solution.thicknesses.size(), 3u);
-
-        // To achieve red, the red (middle) layer should be significant
-        // Top layer should be thin to not occlude the red
         EXPECT_LT(solution.thicknesses[2], 1.0f);
-
-        // Error should be reasonably small
         EXPECT_LT(solution.colorError, 0.3f);
     }
 
@@ -273,17 +513,10 @@ namespace gladius::io::tests
         constraints.maxThickness = 5.0f;
 
         FrontlitThicknessSolver solver(m_stack, constraints);
-
         Eigen::Vector3f const targetBlack(0.1f, 0.1f, 0.1f);
         ThicknessSolution const solution = solver.solve(targetBlack);
 
         ASSERT_EQ(solution.thicknesses.size(), 3u);
-
-        // To achieve black, the black (bottom) layer needs to be visible
-        // which means upper layers should be thin
-        // OR all layers are thick and the top-most contributes minimal light (unlikely with white)
-
-        // The achieved color should be dark
         EXPECT_LT(solution.achievedColor.norm(), 0.5f);
     }
 
@@ -295,7 +528,6 @@ namespace gladius::io::tests
         constraints.layerHeight = 0.04f;
 
         FrontlitThicknessSolver solver(m_stack, constraints);
-
         Eigen::Vector3f const targetGray(0.5f, 0.5f, 0.5f);
         ThicknessSolution const solution = solver.solve(targetGray);
 
@@ -304,7 +536,6 @@ namespace gladius::io::tests
             EXPECT_GE(t, constraints.minThickness - 1e-6f);
             EXPECT_LE(t, constraints.maxThickness + 1e-6f);
 
-            // Check quantization to layer height
             float const remainder = std::fmod(t, constraints.layerHeight);
             bool const isQuantized = remainder < 1e-5f || (constraints.layerHeight - remainder) < 1e-5f;
             EXPECT_TRUE(isQuantized) << "Thickness " << t << " not quantized to layer height "
@@ -312,7 +543,6 @@ namespace gladius::io::tests
         }
     }
 
-    // Test FaceThicknessMapper
     class FaceThicknessMapperTest : public FrontlitThicknessSolverTest
     {
     };
@@ -320,10 +550,8 @@ namespace gladius::io::tests
     TEST_F(FaceThicknessMapperTest, MapColors_EmptyInput_ReturnsEmptyResult)
     {
         FaceThicknessMapper mapper(m_stack);
-
         std::vector<Eigen::Vector3f> const emptyColors;
         FaceThicknessResult const result = mapper.mapColors(emptyColors);
-
         EXPECT_EQ(result.numFaces(), 0u);
         EXPECT_EQ(result.numLayers(), 3u);
         EXPECT_FLOAT_EQ(result.convergenceRate, 1.0f);
@@ -332,14 +560,10 @@ namespace gladius::io::tests
     TEST_F(FaceThicknessMapperTest, MapColors_SingleFace_ReturnsValidResult)
     {
         FaceThicknessMapper mapper(m_stack);
-
         std::vector<Eigen::Vector3f> colors = {Eigen::Vector3f(0.5f, 0.5f, 0.5f)};
         FaceThicknessResult const result = mapper.mapColors(colors);
-
         EXPECT_EQ(result.numFaces(), 1u);
         EXPECT_EQ(result.numLayers(), 3u);
-
-        // Each layer should have one thickness value
         for (auto const& layer : result.layerThicknesses)
         {
             EXPECT_EQ(layer.size(), 1u);
@@ -351,11 +575,10 @@ namespace gladius::io::tests
         FaceThicknessMapper mapper(m_stack);
 
         std::vector<Eigen::Vector3f> colors = {
-            Eigen::Vector3f(0.9f, 0.9f, 0.9f), // White-ish
-            Eigen::Vector3f(0.8f, 0.1f, 0.1f), // Red
-            Eigen::Vector3f(0.1f, 0.1f, 0.1f), // Black-ish
-            Eigen::Vector3f(0.5f, 0.5f, 0.5f)  // Gray
-        };
+            Eigen::Vector3f(0.9f, 0.9f, 0.9f),
+            Eigen::Vector3f(0.8f, 0.1f, 0.1f),
+            Eigen::Vector3f(0.1f, 0.1f, 0.1f),
+            Eigen::Vector3f(0.5f, 0.5f, 0.5f)};
 
         FaceThicknessResult const result = mapper.mapColors(colors);
 
@@ -363,8 +586,6 @@ namespace gladius::io::tests
         EXPECT_EQ(result.numLayers(), 3u);
         EXPECT_EQ(result.achievedColors.size(), 4u);
         EXPECT_EQ(result.colorErrors.size(), 4u);
-
-        // All layers should have 4 values
         for (auto const& layer : result.layerThicknesses)
         {
             EXPECT_EQ(layer.size(), 4u);
@@ -380,12 +601,9 @@ namespace gladius::io::tests
             Eigen::Vector3f(0.1f, 0.1f, 0.1f)};
 
         std::vector<std::vector<std::size_t>> const emptyAdjacency;
-
         FaceThicknessResult const resultNoSmooth = mapper.mapColors(colors);
-        FaceThicknessResult const resultSmooth =
-            mapper.mapColorsWithSmoothing(colors, emptyAdjacency, 3, 0.3f);
+        FaceThicknessResult const resultSmooth = mapper.mapColorsWithSmoothing(colors, emptyAdjacency, 3, 0.3f);
 
-        // Results should be identical when no adjacency is provided
         EXPECT_EQ(resultNoSmooth.numFaces(), resultSmooth.numFaces());
         EXPECT_EQ(resultNoSmooth.numLayers(), resultSmooth.numLayers());
     }
@@ -394,46 +612,33 @@ namespace gladius::io::tests
     {
         FaceThicknessMapper mapper(m_stack);
 
-        // Three faces with very different target colors
         std::vector<Eigen::Vector3f> colors = {
-            Eigen::Vector3f(0.9f, 0.9f, 0.9f), // Face 0: white
-            Eigen::Vector3f(0.1f, 0.1f, 0.1f), // Face 1: black
-            Eigen::Vector3f(0.9f, 0.9f, 0.9f)  // Face 2: white
-        };
+            Eigen::Vector3f(0.9f, 0.9f, 0.9f),
+            Eigen::Vector3f(0.1f, 0.1f, 0.1f),
+            Eigen::Vector3f(0.9f, 0.9f, 0.9f)};
 
-        // Face 1 is adjacent to faces 0 and 2
         std::vector<std::vector<std::size_t>> adjacency = {
-            {1},    // Face 0 neighbors face 1
-            {0, 2}, // Face 1 neighbors faces 0 and 2
-            {1}     // Face 2 neighbors face 1
-        };
+            {1},
+            {0, 2},
+            {1}};
 
         FaceThicknessResult const resultNoSmooth = mapper.mapColors(colors);
-        FaceThicknessResult const resultSmooth =
-            mapper.mapColorsWithSmoothing(colors, adjacency, 5, 0.5f);
+        FaceThicknessResult const resultSmooth = mapper.mapColorsWithSmoothing(colors, adjacency, 5, 0.5f);
 
-        // After smoothing, face 1's thicknesses should be closer to faces 0 and 2
-        // The difference between face 1 and its neighbors should be smaller
         for (std::size_t layer = 0; layer < resultSmooth.numLayers(); ++layer)
         {
             float const diffNoSmooth =
                 std::abs(resultNoSmooth.layerThicknesses[layer][1] -
-                         (resultNoSmooth.layerThicknesses[layer][0] +
-                          resultNoSmooth.layerThicknesses[layer][2]) /
-                             2.0f);
+                         (resultNoSmooth.layerThicknesses[layer][0] + resultNoSmooth.layerThicknesses[layer][2]) / 2.0f);
 
-            float const diffSmooth = std::abs(
-                resultSmooth.layerThicknesses[layer][1] -
-                (resultSmooth.layerThicknesses[layer][0] + resultSmooth.layerThicknesses[layer][2]) /
-                    2.0f);
+            float const diffSmooth =
+                std::abs(resultSmooth.layerThicknesses[layer][1] -
+                         (resultSmooth.layerThicknesses[layer][0] + resultSmooth.layerThicknesses[layer][2]) / 2.0f);
 
-            // Smoothed difference should generally be smaller
-            // (though not always guaranteed due to constraint projection)
             EXPECT_LE(diffSmooth, diffNoSmooth + 0.5f);
         }
     }
 
-    // Test color space conversions
     TEST(ColorConversionTest, SrgbToLinear_Zero_ReturnsZero)
     {
         EXPECT_FLOAT_EQ(srgbToLinear(0.0f), 0.0f);
@@ -465,7 +670,6 @@ namespace gladius::io::tests
 
     TEST(ColorConversionTest, LinearToSrgb_MidGray_IsLighter)
     {
-        // Linear 0.5 should map to a lighter sRGB value (gamma expansion)
         float const srgb = linearToSrgb(0.5f);
         EXPECT_GT(srgb, 0.5f);
         EXPECT_LT(srgb, 1.0f);
@@ -473,10 +677,65 @@ namespace gladius::io::tests
 
     TEST(ColorConversionTest, SrgbToLinear_MidGray_IsDarker)
     {
-        // sRGB 0.5 should map to a darker linear value (gamma compression)
         float const linear = srgbToLinear(0.5f);
         EXPECT_LT(linear, 0.5f);
         EXPECT_GT(linear, 0.0f);
+    }
+
+    TEST(FrontlitThicknessSolverBenchmark, DISABLED_HslWheelBenchmark_PetgFixtureProducesFiniteMetrics)
+    {
+        std::size_t backgroundIndex = std::numeric_limits<std::size_t>::max();
+        IlluminationMode mode = IlluminationMode::Frontlit;
+        FilamentStack const stack = loadFilamentStackFromJson("testdata/petg_cymk.json", backgroundIndex, mode);
+
+        ASSERT_EQ(stack.size(), 4U);
+        EXPECT_EQ(mode, IlluminationMode::Frontlit);
+        EXPECT_EQ(backgroundIndex, 3U) << "Fixture is expected to be the current CMYW-style white-backed stack.";
+
+        ThicknessConstraints constraints;
+        constraints.minThickness = 0.0F;
+        constraints.maxThickness = 4.0F;
+        constraints.layerHeight = 0.04F;
+        constraints.totalMaxThickness = 6.0F;
+
+        std::vector<Eigen::Vector3f> const samples = buildHslWheelSamples();
+        ASSERT_FALSE(samples.empty());
+
+        BenchmarkOutcome const heuristic = benchmarkHeuristicOrder(stack, constraints, mode, backgroundIndex, samples);
+        printBenchmarkOutcome("heuristic", heuristic);
+
+        EXPECT_EQ(heuristic.metrics.sampleCount, samples.size());
+        EXPECT_TRUE(std::isfinite(heuristic.metrics.meanLinearRgbError));
+        EXPECT_TRUE(std::isfinite(heuristic.metrics.maxLinearRgbError));
+        EXPECT_TRUE(std::isfinite(heuristic.metrics.meanDeltaE));
+        EXPECT_TRUE(std::isfinite(heuristic.metrics.maxDeltaE));
+        EXPECT_GE(heuristic.metrics.meanLinearRgbError, 0.0F);
+        EXPECT_GE(heuristic.metrics.meanDeltaE, 0.0F);
+        EXPECT_GE(heuristic.metrics.convergenceRate, 0.0F);
+        EXPECT_LE(heuristic.metrics.convergenceRate, 1.0F);
+    }
+
+    TEST(FrontlitThicknessSolverBenchmark, DISABLED_HslWheelBenchmark_OptimizedGlobalOrderDoesNotUnderperformHeuristic)
+    {
+        std::size_t backgroundIndex = std::numeric_limits<std::size_t>::max();
+        IlluminationMode mode = IlluminationMode::Frontlit;
+        FilamentStack const stack = loadFilamentStackFromJson("testdata/petg_cymk.json", backgroundIndex, mode);
+
+        ThicknessConstraints constraints;
+        constraints.minThickness = 0.0F;
+        constraints.maxThickness = 4.0F;
+        constraints.layerHeight = 0.04F;
+        constraints.totalMaxThickness = 6.0F;
+
+        std::vector<Eigen::Vector3f> const samples = buildHslWheelSamples();
+
+        BenchmarkOutcome const heuristic = benchmarkHeuristicOrder(stack, constraints, mode, backgroundIndex, samples);
+        BenchmarkOutcome const optimized = benchmarkOptimizedOrder(stack, constraints, mode, backgroundIndex, samples);
+        printBenchmarkOutcome("heuristic", heuristic);
+        printBenchmarkOutcome("optimized", optimized);
+
+        EXPECT_LE(optimized.metrics.meanDeltaE, heuristic.metrics.meanDeltaE + 1e-4F);
+        EXPECT_LE(optimized.metrics.meanLinearRgbError, heuristic.metrics.meanLinearRgbError + 1e-4F);
     }
 
 } // namespace gladius::io::tests

@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <numeric>
 #include <chrono>
 #include <cmath>
 #include <cstddef>

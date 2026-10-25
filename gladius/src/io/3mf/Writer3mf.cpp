@@ -648,18 +648,42 @@ namespace gladius::io
         }
     }
 
-    void Writer3mf::updateModel(Document const & doc)
+    bool Writer3mf::save(std::filesystem::path const & filename,
+                         SaveSnapshot const & snapshot,
+                         bool /*writeThumbnail*/)
     {
-        m_logger->logInfo("Starting updateModel operation");
-        auto model3mf = doc.get3mfModel();
-
-        if (!model3mf)
+        if (!snapshot.model || !snapshot.assembly)
         {
-            m_logger->addEvent({"No 3MF model to update.", events::Severity::Error});
-            return;
+            m_logger->addEvent({"Cannot save an incomplete 3MF snapshot.",
+                                events::Severity::Error});
+            return false;
         }
 
-        m_logger->logInfo("Retrieved 3MF model for update");
+        try
+        {
+            addDefaultMetadata(snapshot.model);
+            updateModel(snapshot);
+            auto writer = snapshot.model->QueryWriter("3mf");
+            writer->WriteToFile(filename.string().c_str());
+            return true;
+        }
+        catch (Lib3MF::ELib3MFException const & e)
+        {
+            m_logger->addEvent({fmt::format("3MF snapshot write error: {} (Error Code: {})",
+                                            e.what(),
+                                            e.getErrorCode()),
+                                events::Severity::Error});
+        }
+        catch (std::exception const & e)
+        {
+            m_logger->addEvent({fmt::format("Snapshot write error: {}", e.what()),
+                                events::Severity::Error});
+        }
+        return false;
+    }
+
+    void Writer3mf::updateModel(Document const & doc)
+    {
         auto assembly = doc.getAssembly();
         if (!assembly)
         {
@@ -667,7 +691,26 @@ namespace gladius::io
             return;
         }
 
-        auto functions = assembly->getFunctions();
+        updateModel(doc.get3mfModel(), *assembly);
+    }
+
+    void Writer3mf::updateModel(SaveSnapshot const & snapshot)
+    {
+        updateModel(snapshot.model, *snapshot.assembly);
+    }
+
+    void Writer3mf::updateModel(Lib3MF::PModel model3mf, nodes::Assembly const & assembly)
+    {
+        m_logger->logInfo("Starting updateModel operation");
+        if (!model3mf)
+        {
+            m_logger->addEvent({"No 3MF model to update.", events::Severity::Error});
+            return;
+        }
+
+        m_logger->logInfo("Retrieved 3MF model for update");
+
+        auto functions = assembly.getFunctions();
         m_logger->logInfo(fmt::format("Found {} functions to process", functions.size()));
 
         for (auto & [name, model] : functions)

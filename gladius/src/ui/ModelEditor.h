@@ -30,6 +30,7 @@
 
 #include "Outline.h"
 #include "ResourceView.h"
+#include "io/3mf/LibraryExampleExtractor.h"
 #include "io/VdbImporter.h"
 #include "Style.h"
 #include "compute/ComputeCore.h"
@@ -257,10 +258,14 @@ namespace gladius::ui
         void importStlDrop(std::filesystem::path const & path, ImVec2 screenPos);
 
         /// @brief Create a FunctionCall node at the current cursor position.
-        /// @param functionId The resource ID of the function to call.
-        /// @param sourceModel The model providing inputs/outputs for the FunctionCall.
-        void createFunctionCallNodeAtCursor(nodes::ResourceId functionId,
-                                            nodes::SharedModel const & sourceModel);
+        /// @param functionId      The resource ID of the function to call.
+        /// @param sourceModel     The model providing inputs/outputs for the FunctionCall.
+        /// @param exampleConstants Optional constant nodes (with example values) to create and
+        ///                         wire to the FunctionCall arguments.
+        void createFunctionCallNodeAtCursor(
+          nodes::ResourceId functionId,
+          nodes::SharedModel const & sourceModel,
+          std::vector<io::ExampleConstantValue> const & exampleConstants = {});
 
         // Helper method to check if a string matches the current filter
         bool matchesNodeFilter(const std::string & text) const;

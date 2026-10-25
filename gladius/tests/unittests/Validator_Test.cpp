@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "nodes/Assembly.h"
 #include "nodes/Validator.h"
 #include "nodes/IssueList.h"
 
@@ -118,6 +119,32 @@ namespace gladius::tests
         EXPECT_FALSE(getFixSuggestion(IssueType::InvalidReference).empty());
         EXPECT_FALSE(getFixSuggestion(IssueType::CyclicDependency).empty());
         EXPECT_FALSE(getFixSuggestion(IssueType::FunctionNotFound).empty());
+    }
+
+    TEST_F(Validator_Test, Validate_FunctionCallReferencesMissingFunction_AddsFunctionNotFoundIssue)
+    {
+        Assembly assembly;
+        constexpr ResourceId callerFunctionId = 10;
+        constexpr ResourceId missingFunctionId = 999;
+
+        assembly.addModelIfNotExisting(callerFunctionId);
+        auto callerModel = assembly.findModel(callerFunctionId);
+        ASSERT_TRUE(callerModel);
+        callerModel->createBeginEnd();
+
+        auto * functionCall = callerModel->create<FunctionCall>();
+        ASSERT_NE(functionCall, nullptr);
+        functionCall->setFunctionId(missingFunctionId);
+
+        Validator validator;
+
+        EXPECT_FALSE(validator.validate(assembly, *m_issueList));
+        ASSERT_EQ(m_issueList->size(), 1u);
+
+        auto issues = m_issueList->getAll();
+        EXPECT_EQ(issues.front().type, IssueType::FunctionNotFound);
+        EXPECT_EQ(issues.front().severity, IssueSeverity::Error);
+        EXPECT_NE(issues.front().message.find("Function reference not found"), std::string::npos);
     }
 
 } // namespace gladius::tests

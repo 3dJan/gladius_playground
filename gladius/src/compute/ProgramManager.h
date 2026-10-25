@@ -110,7 +110,7 @@ namespace gladius
         void ensureHierarchicalDcProgramCompiled();
         void ensureManifoldDcProgramCompiled();
 
-        void setComputeContext(std::shared_ptr<ComputeContext> context);
+        void setComputeContext(std::shared_ptr<ComputeContext> context, SharedResources resources);
 
         [[nodiscard]] events::SharedLogger getSharedLogger() const;
 
@@ -131,6 +131,10 @@ namespace gladius
         void setModelSources(std::string optimizedSource,
                  std::optional<std::string> previewSource,
                  bool compileOptimizedRenderProgram);
+        void setPreviewModelSource(std::string previewSource);
+        void setOptimizedModelSource(std::string optimizedSource,
+                   bool compileOptimizedRenderProgram,
+                   bool compileSlicerProgram);
 
         void setVdbRequired(bool required);
         [[nodiscard]] bool isVdbSupported() const;

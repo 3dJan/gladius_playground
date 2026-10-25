@@ -1170,6 +1170,77 @@ namespace gladius::io
         }
     }
 
+    void Importer3mf::collectBooleanReferencedMeshIds(
+      Lib3MF::PModel const & model,
+      Lib3MF::PBooleanObject const & booleanObject,
+      std::set<Lib3MF_uint32> & meshIds,
+      std::set<Lib3MF_uint32> & visitedBooleanIds) const
+    {
+        if (!model || !booleanObject)
+        {
+            return;
+        }
+
+        auto const booleanId = booleanObject->GetModelResourceID();
+        if (!visitedBooleanIds.insert(booleanId).second)
+        {
+            return;
+        }
+
+        try
+        {
+            auto const baseObject = booleanObject->GetBaseObject();
+            if (baseObject && baseObject->IsMeshObject())
+            {
+                meshIds.insert(baseObject->GetModelResourceID());
+            }
+            else if (baseObject && baseObject->IsBooleanObject())
+            {
+                auto const baseBoolean =
+                  model->GetBooleanObjectByID(baseObject->GetUniqueResourceID());
+                collectBooleanReferencedMeshIds(model, baseBoolean, meshIds, visitedBooleanIds);
+            }
+        }
+        catch (std::exception const & e)
+        {
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent(
+                  {fmt::format("Could not collect boolean base mesh references for resource {}: {}",
+                               booleanId,
+                               e.what()),
+                   events::Severity::Warning});
+            }
+        }
+
+        auto const operandCount = booleanObject->GetOperandCount();
+        for (Lib3MF_uint32 operandIndex = 0; operandIndex < operandCount; ++operandIndex)
+        {
+            try
+            {
+                Lib3MF::PMeshObject operandMesh;
+                (void) booleanObject->GetOperand(operandIndex, operandMesh);
+                if (operandMesh)
+                {
+                    meshIds.insert(operandMesh->GetModelResourceID());
+                }
+            }
+            catch (std::exception const & e)
+            {
+                if (m_eventLogger)
+                {
+                    m_eventLogger->addEvent(
+                      {fmt::format("Could not collect boolean operand {} mesh reference for "
+                                   "resource {}: {}",
+                                   operandIndex,
+                                   booleanId,
+                                   e.what()),
+                       events::Severity::Warning});
+                }
+            }
+        }
+    }
+
     std::set<Lib3MF_uint32> Importer3mf::collectBboxOnlyMeshIds(Lib3MF::PModel const & model) const
     {
         std::set<Lib3MF_uint32> bboxOnlyIds;
@@ -1202,6 +1273,16 @@ namespace gladius::io
             {
                 regularIds.insert(meshId);
             }
+        }
+
+        auto booleanIterator = model->GetBooleanObjects();
+        while (booleanIterator->MoveNext())
+        {
+            std::set<Lib3MF_uint32> visitedBooleanIds;
+            collectBooleanReferencedMeshIds(model,
+                                            booleanIterator->GetCurrentBooleanObject(),
+                                            regularIds,
+                                            visitedBooleanIds);
         }
 
         // Return only IDs that are exclusively used as bounding boxes (not also as real geometry)
@@ -1392,6 +1473,24 @@ namespace gladius::io
 
         auto * resource = resourceManager.getResourcePtr(key);
         auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
+        if (spatialMesh != nullptr && spatialMesh->hasMeshQualityIssues())
+        {
+            auto const message = spatialMesh->formatMeshQualityMessage(key.getDisplayName());
+            bool const strictNanoVdb = m_meshSdfEvaluationConfig.method == MeshSdfMethod::NanoVDB &&
+                                       m_nanovdbBuildPolicy.failurePolicy ==
+                                           NanoVdbFailurePolicy::Fail;
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent({message,
+                                         strictNanoVdb ? gladius::events::Severity::Error
+                                                       : gladius::events::Severity::Warning});
+            }
+            if (strictNanoVdb)
+            {
+                resourceManager.deleteResource(key);
+                throw NanoVdbBuildRejectedError(message);
+            }
+        }
         if (spatialMesh != nullptr && spatialMesh->hasNanoVdbBuildIssue())
         {
             auto const message = spatialMesh->formatNanoVdbBuildMessage(key.getDisplayName());
@@ -1710,6 +1809,314 @@ namespace gladius::io
 
             doc.getAssembly()->updateInputsAndOutputs();
         }
+    }
+
+    nodes::Port & Importer3mf::createMeshSdfNode(ResourceKey const & key,
+                                                 nodes::Port & coordinateSystemPort,
+                                                 nodes::Model & target)
+    {
+        auto resourceNode = target.create<nodes::Resource>();
+        resourceNode->parameter().at(nodes::FieldNames::ResourceId) =
+          nodes::VariantParameter(key.getResourceId().value_or(0));
+
+        auto meshSdfNode = target.create<nodes::SignedDistanceToMesh>();
+        meshSdfNode->parameter().at(nodes::FieldNames::Pos).setInputFromPort(coordinateSystemPort);
+        meshSdfNode->parameter()
+          .at(nodes::FieldNames::Mesh)
+          .setInputFromPort(resourceNode->getOutputValue());
+
+        return meshSdfNode->getOutputs().at(nodes::FieldNames::Distance);
+    }
+
+    nodes::Port & Importer3mf::combineSdf(nodes::Model & target,
+                                          nodes::Port & lhs,
+                                          nodes::Port & rhs,
+                                          Lib3MF::eBooleanOperation operation)
+    {
+        switch (operation)
+        {
+        case Lib3MF::eBooleanOperation::Union:
+        {
+            auto unionNode = target.create<nodes::Min>();
+            unionNode->setInputA(lhs);
+            unionNode->setInputB(rhs);
+            return unionNode->getResultOutputPort();
+        }
+        case Lib3MF::eBooleanOperation::Intersection:
+        {
+            auto intersectionNode = target.create<nodes::Max>();
+            intersectionNode->setInputA(lhs);
+            intersectionNode->setInputB(rhs);
+            return intersectionNode->getResultOutputPort();
+        }
+        case Lib3MF::eBooleanOperation::Difference:
+        {
+            auto negateNode = target.create<nodes::Multiplication>();
+            auto & minusOne =
+              nodes::Builder::ensureConstantScalar(target, "BooleanDifferenceNegate", -1.0f);
+            negateNode->setInputA(rhs);
+            negateNode->parameter().at(nodes::FieldNames::B).setInputFromPort(minusOne);
+
+            auto differenceNode = target.create<nodes::Max>();
+            differenceNode->setInputA(lhs);
+            differenceNode->setInputB(negateNode->getResultOutputPort());
+            return differenceNode->getResultOutputPort();
+        }
+        default:
+            throw std::runtime_error("Unsupported 3MF boolean operation");
+        }
+    }
+
+    nodes::Port & Importer3mf::createLevelSetSdfNode(Lib3MF::PModel const & model,
+                                                     Lib3MF::PLevelSet const & levelSet,
+                                                     nodes::Port & coordinateSystemPort,
+                                                     nodes::Model & target,
+                                                     Document & doc)
+    {
+        if (!levelSet)
+        {
+            throw std::runtime_error("Cannot build SDF for null level set base object");
+        }
+
+        auto function = levelSet->GetFunction();
+        if (!function)
+        {
+            throw std::runtime_error("No function found for boolean level set base object");
+        }
+
+        auto const functionResourceId = function->GetResourceID();
+        auto const functionResource = model->GetResourceByID(functionResourceId);
+        if (!functionResource)
+        {
+            throw std::runtime_error(
+              fmt::format("Could not resolve level set function resource {}", functionResourceId));
+        }
+
+        auto const modelFunctionId = functionResource->GetModelResourceID();
+        auto const gladiusFunction = doc.getAssembly()->findModel(modelFunctionId);
+        if (!gladiusFunction)
+        {
+            throw std::runtime_error(
+              fmt::format("Could not find imported level set function {}", modelFunctionId));
+        }
+
+        auto mesh = levelSet->GetMesh();
+        if (!mesh)
+        {
+            throw std::runtime_error("No mesh domain found for boolean level set base object");
+        }
+
+        auto channelName = levelSet->GetChannelName();
+        if (channelName.empty())
+        {
+            channelName = nodes::FieldNames::Shape;
+        }
+
+        nodes::Builder builder;
+        auto const levelSetTransform = matrix4x4From3mfTransform(levelSet->GetTransform());
+        auto & functionCoordinateSystemPort =
+          builder.insertTransformation(target, coordinateSystemPort, levelSetTransform, 1.0f);
+
+        auto const boundingBox = computeBoundingBox(mesh);
+        auto boundingBoxNode = target.create<nodes::BoxMinMax>();
+        boundingBoxNode->parameter()
+          .at(nodes::FieldNames::Pos)
+          .setInputFromPort(coordinateSystemPort);
+
+        auto minVectorNode = target.create<nodes::ConstantVector>();
+        minVectorNode->parameter().at(nodes::FieldNames::X) =
+          nodes::VariantParameter(boundingBox.min.x);
+        minVectorNode->parameter().at(nodes::FieldNames::Y) =
+          nodes::VariantParameter(boundingBox.min.y);
+        minVectorNode->parameter().at(nodes::FieldNames::Z) =
+          nodes::VariantParameter(boundingBox.min.z);
+
+        auto maxVectorNode = target.create<nodes::ConstantVector>();
+        maxVectorNode->parameter().at(nodes::FieldNames::X) =
+          nodes::VariantParameter(boundingBox.max.x);
+        maxVectorNode->parameter().at(nodes::FieldNames::Y) =
+          nodes::VariantParameter(boundingBox.max.y);
+        maxVectorNode->parameter().at(nodes::FieldNames::Z) =
+          nodes::VariantParameter(boundingBox.max.z);
+
+        boundingBoxNode->parameter()
+          .at(nodes::FieldNames::Min)
+          .setInputFromPort(minVectorNode->getVectorOutputPort());
+        boundingBoxNode->parameter()
+          .at(nodes::FieldNames::Max)
+          .setInputFromPort(maxVectorNode->getVectorOutputPort());
+
+        auto resourceNode = target.create<nodes::Resource>();
+        resourceNode->parameter().at(nodes::FieldNames::ResourceId) =
+          nodes::VariantParameter(gladiusFunction->getResourceId());
+
+        auto functionCallNode = target.create<nodes::FunctionCall>();
+        functionCallNode->parameter()
+          .at(nodes::FieldNames::FunctionId)
+          .setInputFromPort(resourceNode->getOutputValue());
+        functionCallNode->updateInputsAndOutputs(*gladiusFunction);
+        target.registerInputs(*functionCallNode);
+        target.registerOutputs(*functionCallNode);
+
+        auto positionInput = functionCallNode->parameter().find(nodes::FieldNames::Pos);
+        if (positionInput == functionCallNode->parameter().end())
+        {
+            throw std::runtime_error("Level set function has no pos input");
+        }
+        positionInput->second.setInputFromPort(functionCoordinateSystemPort);
+
+        auto shapeOutput = functionCallNode->getOutputs().find(channelName);
+        if (shapeOutput == functionCallNode->getOutputs().end())
+        {
+            throw std::runtime_error(
+              fmt::format("Level set function has no output named {}", channelName));
+        }
+        if (shapeOutput->second.getTypeIndex() != nodes::ParameterTypeIndex::Float)
+        {
+            throw std::runtime_error(
+              fmt::format("Level set output {} is not scalar", channelName));
+        }
+
+        auto intersectionNode = target.create<nodes::Max>();
+        intersectionNode->setInputA(boundingBoxNode->getOutputs().at(nodes::FieldNames::Shape));
+        intersectionNode->setInputB(shapeOutput->second);
+        return intersectionNode->getResultOutputPort();
+    }
+
+    nodes::Port & Importer3mf::buildObjectSdf(Lib3MF::PModel const & model,
+                                              Lib3MF::PObject const & object,
+                                              nodes::Port & coordinateSystemPort,
+                                              nodes::Model & target,
+                                              Document & doc)
+    {
+        if (!object)
+        {
+            throw std::runtime_error("Cannot build SDF for null 3MF object");
+        }
+
+        if (object->IsMeshObject())
+        {
+            auto key = ResourceKey{static_cast<uint32_t>(object->GetModelResourceID()),
+                                   ResourceType::Mesh};
+            key.setDisplayName(object->GetName());
+            return createMeshSdfNode(key, coordinateSystemPort, target);
+        }
+
+        if (object->IsBooleanObject())
+        {
+            auto const booleanObject = model->GetBooleanObjectByID(object->GetUniqueResourceID());
+            return buildBooleanSdf(model, booleanObject, coordinateSystemPort, target, doc);
+        }
+
+        if (object->IsLevelSetObject())
+        {
+            auto const levelSet = model->GetLevelSetByID(object->GetUniqueResourceID());
+            return createLevelSetSdfNode(model, levelSet, coordinateSystemPort, target, doc);
+        }
+
+        auto const message = fmt::format("Unsupported base object type in boolean resource {}",
+                                         object->GetModelResourceID());
+        if (m_eventLogger)
+        {
+            m_eventLogger->addEvent({message, events::Severity::Error});
+        }
+        throw std::runtime_error(message);
+    }
+
+    nodes::Port & Importer3mf::buildBooleanSdf(Lib3MF::PModel const & model,
+                                               Lib3MF::PBooleanObject const & booleanObject,
+                                               nodes::Port & coordinateSystemPort,
+                                               nodes::Model & target,
+                                               Document & doc)
+    {
+        if (!booleanObject)
+        {
+            throw std::runtime_error("Cannot build SDF for null boolean object");
+        }
+
+        nodes::Builder builder;
+        auto const baseTransform =
+          inverseMatrix(matrix4x4From3mfTransform(booleanObject->GetBaseTransform()));
+        auto & baseCoordinateSystemPort =
+          builder.insertTransformation(target, coordinateSystemPort, baseTransform, 1.0f);
+
+        auto baseObject = booleanObject->GetBaseObject();
+        auto * currentSdf =
+          &buildObjectSdf(model, baseObject, baseCoordinateSystemPort, target, doc);
+
+        auto const operandCount = booleanObject->GetOperandCount();
+        if (operandCount == 0u && m_eventLogger)
+        {
+            m_eventLogger->addEvent(
+              {fmt::format("Boolean resource {} has no operands; using base object only",
+                           booleanObject->GetModelResourceID()),
+               events::Severity::Warning});
+        }
+
+        for (Lib3MF_uint32 operandIndex = 0; operandIndex < operandCount; ++operandIndex)
+        {
+            Lib3MF::PMeshObject operandMesh;
+            auto const operandTransform =
+              inverseMatrix(matrix4x4From3mfTransform(booleanObject->GetOperand(operandIndex,
+                                                                                 operandMesh)));
+            if (!operandMesh)
+            {
+                throw std::runtime_error(
+                  fmt::format("Boolean resource {} has null operand {}",
+                              booleanObject->GetModelResourceID(),
+                              operandIndex));
+            }
+
+            auto & operandCoordinateSystemPort =
+              builder.insertTransformation(target, coordinateSystemPort, operandTransform, 1.0f);
+            auto operandKey = ResourceKey{static_cast<uint32_t>(operandMesh->GetModelResourceID()),
+                                          ResourceType::Mesh};
+            operandKey.setDisplayName(operandMesh->GetName());
+            auto & operandSdf = createMeshSdfNode(operandKey, operandCoordinateSystemPort, target);
+            currentSdf =
+              &combineSdf(target, *currentSdf, operandSdf, booleanObject->GetOperation());
+        }
+
+        return *currentSdf;
+    }
+
+    void Importer3mf::addBooleanObject(Lib3MF::PModel model,
+                                       Lib3MF::PBooleanObject booleanObject,
+                                       nodes::Matrix4x4 const & trafo,
+                                       Document & doc)
+    {
+        if (!booleanObject)
+        {
+            if (m_eventLogger)
+            {
+                m_eventLogger->addEvent({"No boolean object to import", events::Severity::Error});
+            }
+            return;
+        }
+
+        nodes::Builder builder;
+        auto & target = *doc.getAssembly()->assemblyModel();
+        float const units_per_mm = computeUnitsPerMM(model);
+        auto & coordinateSystemPort = builder.addTransformationToInputCs(target, trafo, units_per_mm);
+        auto & booleanSdf = buildBooleanSdf(model, booleanObject, coordinateSystemPort, target, doc);
+
+        auto * shapeSink = target.getEndNode()->getParameter(nodes::FieldNames::Shape);
+        if (!shapeSink)
+        {
+            throw std::runtime_error("End node is required to have a shape parameter");
+        }
+
+        auto * lastShapePort = builder.getLastShape(target);
+        if (!lastShapePort)
+        {
+            shapeSink->setInputFromPort(booleanSdf);
+            return;
+        }
+
+        auto unionNode = target.create<nodes::Min>();
+        unionNode->setInputA(*lastShapePort);
+        unionNode->setInputB(booleanSdf);
+        shapeSink->setInputFromPort(unionNode->getResultOutputPort());
     }
 
     void Importer3mf::addLevelSetObject(Lib3MF::PModel model,
@@ -2088,6 +2495,11 @@ namespace gladius::io
         {
             auto levelSet = model->GetLevelSetByID(objectRes.GetUniqueResourceID());
             addLevelSetObject(model, key, levelSet, trafo, doc);
+        }
+        else if (objectRes.IsBooleanObject())
+        {
+            auto booleanObject = model->GetBooleanObjectByID(objectRes.GetUniqueResourceID());
+            addBooleanObject(model, booleanObject, trafo, doc);
         }
     }
 

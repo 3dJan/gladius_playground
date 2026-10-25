@@ -7,6 +7,7 @@
 #include "imgui.h"
 #include <cstring>
 #include <fmt/format.h>
+#include <optional>
 
 namespace gladius::ui
 {
@@ -28,6 +29,7 @@ namespace gladius::ui
         auto const & resources = resourceManager.getResourceMap();
 
         bool propertiesChanged = false;
+        std::optional<ResourceKey> pendingResourceDeletion;
 
         renderImportDialog(document, propertiesChanged);
 
@@ -146,7 +148,7 @@ namespace gladius::ui
                     {
                         if (safeResult.canBeRemoved)
                         {
-                            document->deleteResource(key);
+                            pendingResourceDeletion = key;
                             propertiesChanged = true;
                         }
                     }
@@ -179,6 +181,11 @@ namespace gladius::ui
                   "Beam Lattice Details\n\n"
                   "View the structure and properties of this beam lattice.\n"
                   "Beam lattices define complex structural geometries using beams and nodes.");
+
+                                if (pendingResourceDeletion.has_value())
+                                {
+                                        break;
+                                }
             }
 
             if (!hasBeamLattices)
@@ -195,6 +202,11 @@ namespace gladius::ui
                      "Complex structural geometries made of interconnected beams.\n"
                      "Beam lattices are ideal for lightweight structures, supports,\n"
                      "and metamaterials with specific mechanical properties.");
+
+        if (pendingResourceDeletion.has_value())
+        {
+            document->deleteResource(*pendingResourceDeletion);
+        }
 
         return propertiesChanged;
     }

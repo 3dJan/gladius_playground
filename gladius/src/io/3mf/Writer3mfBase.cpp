@@ -36,6 +36,35 @@ namespace gladius::io
         }
     }
 
+    bool Writer3mfBase::attachThumbnail(Lib3MF::PModel model3mf,
+                                         std::vector<Lib3MF_uint8> const & pngData)
+    {
+        if (!model3mf || pngData.empty())
+        {
+            return false;
+        }
+
+        try
+        {
+            if (model3mf->HasPackageThumbnailAttachment())
+            {
+                model3mf->RemovePackageThumbnailAttachment();
+            }
+            auto thumbnail = model3mf->CreatePackageThumbnailAttachment();
+            thumbnail->ReadFromBuffer(pngData);
+            return true;
+        }
+        catch (std::exception const & e)
+        {
+            if (m_logger)
+            {
+                m_logger->addEvent({fmt::format("Failed to attach supplied thumbnail: {}", e.what()),
+                                    events::Severity::Warning});
+            }
+            return false;
+        }
+    }
+
     void Writer3mfBase::updateThumbnail(Document & doc, Lib3MF::PModel model3mf)
     {
         if (!model3mf)

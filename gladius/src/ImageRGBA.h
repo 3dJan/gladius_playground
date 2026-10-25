@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
+#include <typeinfo>
 #include <vector>
 
 namespace gladius
@@ -19,6 +21,8 @@ namespace gladius
             , m_height(512)
             , m_size(m_width * m_height * m_depth)
             , m_ComputeContext(context)
+            , m_gpuResource(m_ComputeContext.gpuAccessCoordinator().registerResource(
+                resourceKindForDepth(m_depth), typeid(ImageDataPoint).name()))
         {
         }
 
@@ -27,6 +31,8 @@ namespace gladius
             , m_height(height)
             , m_size(m_width * m_height * m_depth)
             , m_ComputeContext(ComputeContext)
+            , m_gpuResource(m_ComputeContext.gpuAccessCoordinator().registerResource(
+                resourceKindForDepth(m_depth), typeid(ImageDataPoint).name()))
         {
         }
 
@@ -36,6 +42,8 @@ namespace gladius
             , m_depth(depth)
             , m_size(m_width * m_height * m_depth)
             , m_ComputeContext(ComputeContext)
+            , m_gpuResource(m_ComputeContext.gpuAccessCoordinator().registerResource(
+                resourceKindForDepth(m_depth), typeid(ImageDataPoint).name()))
         {
         }
 
@@ -43,11 +51,15 @@ namespace gladius
         ImageImpl(ImageImpl<ImageDataPoint> & src)
             : m_width(src.getWidth())
             , m_height(src.getHeight())
-            , m_size(m_width * m_height)
+            , m_depth(src.getDepth())
+            , m_size(m_width * m_height * m_depth)
             , m_ComputeContext(src.m_ComputeContext)
+            , m_gpuResource(m_ComputeContext.gpuAccessCoordinator().registerResource(
+                resourceKindForDepth(m_depth), typeid(ImageDataPoint).name()))
         {
             ImageImpl<ImageDataPoint>::allocateOnDevice();
 
+            m_ComputeContext.waitForGpuResourceIdle(src.gpuResourceHandle());
             CL_ERROR(m_ComputeContext.GetQueue().enqueueCopyImage(
               src.getBuffer(), getBuffer(), {0, 0, 0}, {0, 0, 0}, {m_width, m_height, m_depth}));
             CL_ERROR(m_ComputeContext.GetQueue().finish());
@@ -55,10 +67,18 @@ namespace gladius
 
         virtual ~ImageImpl()
         {
-            if (m_buffer && m_allocatedBytes > 0)
+            try
             {
-                m_ComputeContext.onBufferReleased(m_allocatedBytes);
-                m_allocatedBytes = 0;
+                if (m_buffer && m_allocatedBytes > 0)
+                {
+                    m_ComputeContext.waitForGpuResourceIdle(m_gpuResource);
+                    m_ComputeContext.onBufferReleased(m_allocatedBytes);
+                    m_allocatedBytes = 0;
+                }
+            }
+            catch (...)
+            {
+                // Destructors must not throw.
             }
         }
 
@@ -75,6 +95,7 @@ namespace gladius
 
         void read()
         {
+            m_ComputeContext.waitForGpuResourceIdle(m_gpuResource);
             CL_ERROR(m_ComputeContext.GetQueue().finish());
             CL_ERROR(m_ComputeContext.GetQueue().enqueueReadImage(
               *m_buffer, CL_TRUE, {0, 0, 0}, {m_width, m_height, m_depth}, 0, 0, m_data.data()));
@@ -83,6 +104,7 @@ namespace gladius
 
         void write()
         {
+            retireCurrentGpuGeneration();
             CL_ERROR(m_ComputeContext.GetQueue().finish());
             CL_ERROR(m_ComputeContext.GetQueue().enqueueWriteImage(
               *m_buffer, CL_TRUE, {0, 0, 0}, {m_width, m_height, m_depth}, 0, 0, m_data.data()));
@@ -103,6 +125,7 @@ namespace gladius
             // If re-allocating, release previous accounting tracked
             if (m_buffer && m_allocatedBytes > 0)
             {
+                retireCurrentGpuGeneration();
                 m_ComputeContext.onBufferReleased(m_allocatedBytes);
                 m_allocatedBytes = 0;
             }
@@ -192,6 +215,11 @@ namespace gladius
             return m_buffer.get();
         }
 
+        [[nodiscard]] GpuResourceHandle gpuResourceHandle() const noexcept
+        {
+            return m_gpuResource;
+        }
+
         [[nodiscard]] size_t getWidth() const
         {
             return m_width;
@@ -242,8 +270,38 @@ namespace gladius
         ComputeContext & m_ComputeContext;
         std::unique_ptr<cl::Image> m_buffer;
 
+        GpuResourceHandle m_gpuResource{};
+
         // Track bytes accounted in ComputeContext for this device image
         size_t m_allocatedBytes{0};
+
+        void retireCurrentGpuGeneration()
+        {
+            m_ComputeContext.waitForGpuResourceIdle(m_gpuResource);
+
+            auto retirement = m_ComputeContext.gpuAccessCoordinator().retireCurrentGeneration(
+              m_gpuResource.resourceId);
+            if (retirement.status == GpuAccessStatus::PendingAccessWithoutEvent)
+            {
+                m_ComputeContext.waitForGpuResourceIdle(m_gpuResource);
+                retirement = m_ComputeContext.gpuAccessCoordinator().retireCurrentGeneration(
+                  m_gpuResource.resourceId);
+            }
+
+            if (!retirement.granted())
+            {
+                throw std::runtime_error("Failed to retire GPU image generation safely");
+            }
+
+            m_ComputeContext.waitForGpuEvents(retirement.waitEvents);
+            m_ComputeContext.gpuAccessCoordinator().collectCompletedRetirements();
+            m_gpuResource = retirement.newGeneration;
+        }
+
+        [[nodiscard]] static GpuResourceKind resourceKindForDepth(size_t const depth) noexcept
+        {
+            return depth > 1u ? GpuResourceKind::Image3D : GpuResourceKind::Image2D;
+        }
 
         static cl::ImageFormat determineImageFormat()
         {

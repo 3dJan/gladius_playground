@@ -1,6 +1,7 @@
 #include "ColorToThicknessDialog.h"
 
 #include "Widgets.h"
+#include "io/3mf/FaceThicknessMapper.h"
 
 #include <imgui.h>
 
@@ -125,6 +126,7 @@ namespace gladius::ui
             filament.reflectanceColor = Eigen::Vector3f(1.0F, 1.0F, 1.0F);
             filament.transmissionDistance = Eigen::Vector3f(1.0F, 1.0F, 1.0F);
             m_materials.push_back(filament);
+            invalidateComputedData();
         }
         ImGui::SameLine();
         if (ImGui::Button("Load…"))
@@ -185,6 +187,7 @@ namespace gladius::ui
                                       ImGuiColorEditFlags_NoInputs))
                 {
                     mat.reflectanceColor = Eigen::Vector3f{clamp01(color[0]), clamp01(color[1]), clamp01(color[2])};
+                    invalidateComputedData();
                 }
 
                 ImGui::TableSetColumnIndex(3);
@@ -194,6 +197,7 @@ namespace gladius::ui
                 {
                     tdValue = std::max(0.0F, tdValue);
                     mat.transmissionDistance = Eigen::Vector3f{tdValue, tdValue, tdValue};
+                    invalidateComputedData();
                 }
 
                 ImGui::TableSetColumnIndex(4);
@@ -204,6 +208,7 @@ namespace gladius::ui
                     {
                         m_backgroundIndex = m_materials.empty() ? 0 : m_materials.size() - 1;
                     }
+                    invalidateComputedData();
                     --i;
                 }
             }
@@ -233,6 +238,7 @@ namespace gladius::ui
             if (ImGui::Combo("##background", &selected, names.data(), static_cast<int>(names.size())))
             {
                 m_backgroundIndex = static_cast<std::size_t>(selected);
+                invalidateComputedData();
             }
         }
     }
@@ -276,7 +282,7 @@ namespace gladius::ui
             if (ImGui::Button("Clear palette"))
             {
                 m_palette.clear();
-                m_solutions.clear();
+                invalidateComputedData();
             }
         }
 
@@ -304,6 +310,7 @@ namespace gladius::ui
                 if (ImGui::ColorEdit3(("##pal" + std::to_string(i)).c_str(), color))
                 {
                     m_palette[i] = Eigen::Vector3f{clamp01(color[0]), clamp01(color[1]), clamp01(color[2])};
+                    m_solutions.clear();
                 }
 
                 ImGui::TableSetColumnIndex(2);
@@ -333,7 +340,7 @@ namespace gladius::ui
         if (ImGui::Combo("Illumination mode", &modeIndex, MODE_LABELS, IM_ARRAYSIZE(MODE_LABELS)))
         {
             m_illuminationMode = (modeIndex == 0) ? io::IlluminationMode::Frontlit : io::IlluminationMode::Backlit;
-            m_solutions.clear();
+            invalidateComputedData();
         }
 
         ImGui::SetNextItemWidth(140.0F);
@@ -344,24 +351,33 @@ namespace gladius::ui
             {
                 m_constraints.maxThickness = m_constraints.minThickness;
             }
+            invalidateComputedData();
         }
 
         ImGui::SetNextItemWidth(140.0F);
         if (ImGui::InputFloat("Max thickness (mm)", &m_constraints.maxThickness, 0.1F, 0.5F, "%.3f"))
         {
             m_constraints.maxThickness = std::max(m_constraints.maxThickness, m_constraints.minThickness);
+            invalidateComputedData();
         }
 
         ImGui::SetNextItemWidth(140.0F);
-        ImGui::InputFloat("Layer height (mm, optional)", &m_constraints.layerHeight, 0.01F, 0.05F, "%.3f");
+        if (ImGui::InputFloat("Layer height (mm, optional)", &m_constraints.layerHeight, 0.01F, 0.05F, "%.3f"))
+        {
+            invalidateComputedData();
+        }
 
         ImGui::SetNextItemWidth(140.0F);
-        ImGui::InputFloat("Total max thickness (mm, optional)", &m_constraints.totalMaxThickness, 0.5F, 1.0F, "%.3f");
+        if (ImGui::InputFloat("Total max thickness (mm, optional)", &m_constraints.totalMaxThickness, 0.5F, 1.0F, "%.3f"))
+        {
+            invalidateComputedData();
+        }
 
         ImGui::SetNextItemWidth(140.0F);
         if (ImGui::InputInt("LUT resolution (per axis)", &m_lutResolution))
         {
             m_lutResolution = std::clamp(m_lutResolution, 2, 64); // keep sane bounds
+            invalidateComputedData();
         }
 
         bool const canCompute = !m_materials.empty() && !m_palette.empty();
@@ -410,14 +426,26 @@ namespace gladius::ui
             return;
         }
 
-        int const columnCount = static_cast<int>(m_materials.size()) + 3;
+        auto const orderedMaterials = getOrderedShellMaterials();
+
+        int const columnCount = static_cast<int>(orderedMaterials.stack.size()) + 3;
         if (ImGui::BeginTable("ResultsTable", columnCount, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
         {
             ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 130.0F);
             ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 190.0F);
-            for (auto const & mat : m_materials)
+            for (std::size_t orderedIndex = 0; orderedIndex < orderedMaterials.stack.size(); ++orderedIndex)
             {
-                ImGui::TableSetupColumn(mat.name.c_str(), ImGuiTableColumnFlags_WidthFixed, 200.0F);
+                auto const & mat = orderedMaterials.stack[orderedIndex];
+                std::string columnLabel = mat.name;
+                if (orderedIndex == 0U)
+                {
+                    columnLabel += " (inner)";
+                }
+                else if (orderedIndex + 1U == orderedMaterials.stack.size())
+                {
+                    columnLabel += " (outer)";
+                }
+                ImGui::TableSetupColumn(columnLabel.c_str(), ImGuiTableColumnFlags_WidthFixed, 200.0F);
             }
             ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthFixed, 80.0F);
             ImGui::TableHeadersRow();
@@ -431,19 +459,27 @@ namespace gladius::ui
                 ImGui::Text("%zu", row + 1);
 
                 ImGui::TableSetColumnIndex(1);
-                ImVec4 targetColor{solution.targetColor.x(), solution.targetColor.y(), solution.targetColor.z(), 1.0F};
+                Eigen::Vector3f const targetDisplay = io::linearToSrgb(
+                    solution.targetColor.cwiseMax(0.0F).cwiseMin(1.0F));
+                ImVec4 targetColor{targetDisplay.x(), targetDisplay.y(), targetDisplay.z(), 1.0F};
                 colorButtonWithTooltip(("##target" + std::to_string(row)).c_str(), targetColor, "Target color");
                 ImGui::SameLine();
-                ImVec4 achievedColor{solution.achievedColor.x(), solution.achievedColor.y(), solution.achievedColor.z(), 1.0F};
+                Eigen::Vector3f const achievedDisplay = io::linearToSrgb(
+                    solution.achievedColor.cwiseMax(0.0F).cwiseMin(1.0F));
+                ImVec4 achievedColor{achievedDisplay.x(), achievedDisplay.y(), achievedDisplay.z(), 1.0F};
                 colorButtonWithTooltip(("##achieved" + std::to_string(row)).c_str(), achievedColor, "Achieved color");
 
-                for (std::size_t col = 0; col < m_materials.size(); ++col)
+                for (std::size_t orderedIndex = 0; orderedIndex < orderedMaterials.stack.size(); ++orderedIndex)
                 {
-                    ImGui::TableSetColumnIndex(static_cast<int>(2 + col));
+                    ImGui::TableSetColumnIndex(static_cast<int>(2 + orderedIndex));
                     float thickness = 0.0F;
-                    if (col < solution.thicknesses.size())
+                    if (orderedIndex < orderedMaterials.orderedToOriginal.size())
                     {
-                        thickness = solution.thicknesses[col];
+                        std::size_t const originalIndex = orderedMaterials.orderedToOriginal[orderedIndex];
+                        if (originalIndex < solution.thicknesses.size())
+                        {
+                            thickness = solution.thicknesses[originalIndex];
+                        }
                     }
                     ImGui::Text("%.3f mm", thickness);
                 }
@@ -464,6 +500,11 @@ namespace gladius::ui
     std::string const & ColorToThicknessDialog::getLutStatus() const
     {
         return m_lutStatus;
+    }
+
+    io::FilamentStack ColorToThicknessDialog::getFilamentStack() const
+    {
+        return getOrderedShellMaterials().stack;
     }
 
     bool ColorToThicknessDialog::ensurePrecomputedLuts()
@@ -487,10 +528,14 @@ namespace gladius::ui
             return;
         }
 
-        io::FilamentStack stack{m_materials};
-        io::FrontlitThicknessSolver solver{stack, m_constraints, m_illuminationMode, m_backgroundIndex};
+        auto const orderedMaterials = getOrderedShellMaterials();
+        io::FrontlitThicknessSolver solver{
+            orderedMaterials.stack,
+            m_constraints,
+            m_illuminationMode,
+            orderedMaterials.backgroundIndex};
 
-        std::size_t const layerCount = stack.size();
+        std::size_t const layerCount = orderedMaterials.stack.size();
         std::size_t const lutSize = static_cast<std::size_t>(m_lutResolution) *
                                    static_cast<std::size_t>(m_lutResolution) *
                                    static_cast<std::size_t>(m_lutResolution);
@@ -613,6 +658,9 @@ namespace gladius::ui
 
     void ColorToThicknessDialog::deserializeMaterials(nlohmann::json const & json)
     {
+        m_solutions.clear();
+        m_lutStatus.clear();
+
         if (!json.contains("materials") || !json["materials"].is_array())
         {
             return;
@@ -691,15 +739,76 @@ namespace gladius::ui
             return;
         }
 
-        io::FilamentStack stack{m_materials};
-        io::FrontlitThicknessSolver solver{stack, m_constraints, m_illuminationMode, m_backgroundIndex};
+        auto const orderedMaterials = getOrderedShellMaterials();
+        io::FrontlitThicknessSolver solver{
+            orderedMaterials.stack,
+            m_constraints,
+            m_illuminationMode,
+            orderedMaterials.backgroundIndex};
 
         m_solutions.clear();
         m_solutions.reserve(m_palette.size());
         for (auto const & color : m_palette)
         {
-            auto solution = solver.solve(color);
+            auto solution = solver.solve(io::srgbToLinear(color.cwiseMax(0.0F).cwiseMin(1.0F)));
+            solution.thicknesses = remapThicknessesToUiOrder(
+                solution.thicknesses,
+                orderedMaterials.orderedToOriginal,
+                m_materials.size());
             m_solutions.push_back(std::move(solution));
+        }
+    }
+
+    io::OrderedShellMaterials ColorToThicknessDialog::getOrderedShellMaterials() const
+    {
+        io::FilamentStack stack{m_materials};
+
+        // For small frontlit stacks with a known palette, prefer the palette-optimized
+        // global order over the generic translucency heuristic. The exhaustive search is
+        // cheap for small material counts and the benchmark showed it meaningfully
+        // reduces reproduction error for typical CMY-style stacks.
+        if (m_illuminationMode == io::IlluminationMode::Frontlit
+            && !m_palette.empty()
+            && m_materials.size() <= 6U)
+        {
+            return io::ShellMaterialOrdering::optimizeGlobalOrderForPalette(
+                stack,
+                m_backgroundIndex,
+                m_illuminationMode,
+                m_constraints,
+                m_palette);
+        }
+
+        return io::ShellMaterialOrdering::reorderForShells(stack, m_backgroundIndex, m_illuminationMode);
+    }
+
+    std::vector<float> ColorToThicknessDialog::remapThicknessesToUiOrder(
+        std::vector<float> const& orderedThicknesses,
+        std::vector<std::size_t> const& orderedToOriginal,
+        std::size_t materialCount)
+    {
+        std::vector<float> remapped(materialCount, 0.0F);
+        for (std::size_t orderedIndex = 0; orderedIndex < orderedThicknesses.size() &&
+                                           orderedIndex < orderedToOriginal.size();
+             ++orderedIndex)
+        {
+            std::size_t const originalIndex = orderedToOriginal[orderedIndex];
+            if (originalIndex < remapped.size())
+            {
+                remapped[originalIndex] = orderedThicknesses[orderedIndex];
+            }
+        }
+        return remapped;
+    }
+
+    void ColorToThicknessDialog::invalidateComputedData(bool clearPaletteStatus)
+    {
+        m_solutions.clear();
+        m_precomputedLuts.clear();
+        m_lutStatus.clear();
+        if (clearPaletteStatus)
+        {
+            m_paletteStatus.clear();
         }
     }
 

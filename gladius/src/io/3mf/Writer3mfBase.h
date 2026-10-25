@@ -10,6 +10,7 @@
 #include <lib3mf_implicit.hpp>
 
 #include <filesystem>
+#include <vector>
 
 namespace gladius
 {
@@ -36,6 +37,13 @@ namespace gladius::io
          * @brief Virtual destructor
          */
         virtual ~Writer3mfBase() = default;
+
+        /**
+         * @brief Replaces the package thumbnail with supplied PNG bytes.
+         * @return true if the attachment was created successfully.
+         */
+        bool attachThumbnail(Lib3MF::PModel model3mf,
+                 std::vector<Lib3MF_uint8> const & pngData);
 
       protected:
         /**

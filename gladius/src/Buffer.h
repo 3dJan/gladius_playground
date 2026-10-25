@@ -3,6 +3,7 @@
 #include "ComputeContext.h"
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <typeinfo>
 #include <vector>
 
@@ -14,19 +15,31 @@ namespace gladius
       public:
         explicit Buffer(ComputeContext & context)
             : m_ComputeContext(context)
+            , m_gpuResource(m_ComputeContext.gpuAccessCoordinator().registerResource(
+                GpuResourceKind::Buffer, typeid(T).name()))
         {
         }
 
         ~Buffer()
         {
-            // Release tracked bytes when buffer goes out of scope
-            if (m_buffer && m_size > 0)
+            try
             {
-                m_ComputeContext.onBufferReleased(sizeof(T) * m_size);
+                // Release tracked bytes only after known GPU users have completed.
+                if (m_buffer && m_size > 0)
+                {
+                    m_ComputeContext.waitForGpuResourceIdle(m_gpuResource);
+                    m_ComputeContext.onBufferReleased(sizeof(T) * m_size);
+                }
+            }
+            catch (...)
+            {
+                // Destructors must not throw.
             }
         }
         Buffer(Buffer const & other)
             : m_ComputeContext(other.m_ComputeContext)
+            , m_gpuResource(m_ComputeContext.gpuAccessCoordinator().registerResource(
+                GpuResourceKind::Buffer, typeid(T).name()))
             , m_data(other.m_data)
         {
             create();
@@ -44,6 +57,7 @@ namespace gladius
             {
                 throw std::runtime_error("Failed to read, device buffer could not be created");
             }
+            m_ComputeContext.waitForGpuResourceIdle(m_gpuResource);
             m_data.resize(m_size);
             CL_ERROR(m_ComputeContext.GetQueue().enqueueReadBuffer(
               *m_buffer.get(), CL_TRUE, 0, sizeof(T) * m_size, &m_data[0]));
@@ -59,6 +73,7 @@ namespace gladius
             // If there was a previous allocation, release its accounting first
             if (m_buffer && m_size > 0)
             {
+                retireCurrentGpuGeneration();
                 m_ComputeContext.onBufferReleased(sizeof(T) * m_size);
             }
 
@@ -73,6 +88,7 @@ namespace gladius
             m_data.clear();
             if (m_buffer && m_size > 0)
             {
+                retireCurrentGpuGeneration();
                 m_ComputeContext.onBufferReleased(sizeof(T) * m_size);
             }
             m_size = 0;
@@ -95,6 +111,7 @@ namespace gladius
                 throw std::runtime_error("Failed to write, device buffer could not be created");
             }
 
+            retireCurrentGpuGeneration();
             CL_ERROR(m_ComputeContext.GetQueue().enqueueWriteBuffer(
               *m_buffer.get(), CL_TRUE, 0, sizeof(T) * m_data.size(), &m_data[0]));
 
@@ -139,10 +156,39 @@ namespace gladius
             return *m_buffer.get();
         }
 
+        [[nodiscard]] GpuResourceHandle gpuResourceHandle() const noexcept
+        {
+            return m_gpuResource;
+        }
+
       private:
+        void retireCurrentGpuGeneration()
+        {
+            m_ComputeContext.waitForGpuResourceIdle(m_gpuResource);
+
+            auto retirement = m_ComputeContext.gpuAccessCoordinator().retireCurrentGeneration(
+              m_gpuResource.resourceId);
+            if (retirement.status == GpuAccessStatus::PendingAccessWithoutEvent)
+            {
+                m_ComputeContext.waitForGpuResourceIdle(m_gpuResource);
+                retirement = m_ComputeContext.gpuAccessCoordinator().retireCurrentGeneration(
+                  m_gpuResource.resourceId);
+            }
+
+            if (!retirement.granted())
+            {
+                throw std::runtime_error("Failed to retire GPU buffer generation safely");
+            }
+
+            m_ComputeContext.waitForGpuEvents(retirement.waitEvents);
+            m_ComputeContext.gpuAccessCoordinator().collectCompletedRetirements();
+            m_gpuResource = retirement.newGeneration;
+        }
+
+        ComputeContext & m_ComputeContext;
+        GpuResourceHandle m_gpuResource{};
         std::vector<T> m_data;
         size_t m_size = 0;
-        ComputeContext & m_ComputeContext;
         std::unique_ptr<cl::Buffer> m_buffer;
     };
 }

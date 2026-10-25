@@ -45,6 +45,18 @@ namespace gladius
             return result;
         }
 
+        inline void padDataToFloatAlignment(std::vector<PrimitiveData> & data,
+                                            std::size_t const alignmentFloats)
+        {
+            if (alignmentFloats == 0u)
+            {
+                return;
+            }
+
+            auto const padding = (alignmentFloats - (data.size() % alignmentFloats)) % alignmentFloats;
+            data.insert(data.end(), padding, 0.0f);
+        }
+
         inline double bytesToMiB(std::size_t const bytes)
         {
             return static_cast<double>(bytes) / static_cast<double>(MEBIBYTE);
@@ -257,6 +269,32 @@ namespace gladius
         ResourceBase::load();
     }
 
+        std::string SpatialMeshResource::formatMeshQualityMessage(
+            std::string const & displayName) const
+        {
+                if (!hasMeshQualityIssues())
+                {
+                        return {};
+                }
+
+                auto const subject = displayName.empty() ? std::string{"mesh resource"}
+                                                                                                 : fmt::format("mesh '{}'", displayName);
+                auto const & quality = m_data.quality;
+                auto message = fmt::format(
+                    "Topology diagnostics for {}: {} boundary edges, {} non-manifold edges, "
+                    "{} degenerate triangles. Signed mesh SDF methods, including NanoVDB, are "
+                    "deterministic only for watertight, consistently oriented meshes.",
+                    subject,
+                    quality.boundaryEdgeCount,
+                    quality.nonManifoldEdgeCount,
+                    quality.degenerateTriangleCount);
+
+                message += " No repair or fallback was applied silently. Enable explicit repair-on-import "
+                                     "and re-import, or select Fast Winding Number when the input is an intentional "
+                                     "triangle soup.";
+                return message;
+        }
+
     std::string SpatialMeshResource::formatNanoVdbBuildMessage(
       std::string const & displayName) const
     {
@@ -440,6 +478,9 @@ namespace gladius
     static constexpr size_t kSignCacheResolutionSlot = 1;  // sign cache resolution per axis
     static constexpr size_t kSignCacheBetaSlot = 1;        // beta used to build the ready sign cache
     static constexpr size_t kNanoVdbOffsetSlot = 1;        // local float offset of the NanoVDB grid (0 = none)
+    static constexpr size_t kFloat2AlignmentFloats = 2;
+    static constexpr size_t kFloat4AlignmentFloats = 4;
+    static constexpr size_t kNanoVdbAlignmentFloats = 8;   // 32 bytes
 
     /// Coarse sign-cache resolution per axis (FWN acceleration). 64^3 = 262144 cells.
     /// Each cell stores a conservative 2-bit state (unknown/outside/inside), so
@@ -489,6 +530,11 @@ namespace gladius
     {
         ProfileFunction;
         GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::write FWN payload", usesFastWindingNumber());
+
+        // Keep the absolute base aligned. Several OpenCL kernels reinterpret float payload data
+        // as float2/float4 or structs containing float4 values, and NanoVDB grids require 32-byte
+        // alignment. Padding here keeps local payload alignment valid after insertion.
+        padDataToFloatAlignment(primitives.data.getData(), kNanoVdbAlignmentFloats);
 
         // Track the base offset before adding our data
         m_dataBaseOffset = static_cast<int>(primitives.data.getSize());
@@ -656,6 +702,7 @@ namespace gladius
 
         // Clear previous payload
         m_payloadData.meta.clear();
+        m_payloadData.data.clear();
 
         // Create primitive metadata for the spatial mesh root
         PrimitiveMeta metaData{};
@@ -744,6 +791,7 @@ namespace gladius
 
         // Serialize BVH nodes
         // Each node: bboxMin (4), bboxMax (4), leftChild, rightChild, primStart, primCount = 12 floats
+        padDataToFloatAlignment(m_payloadData.data, kFloat4AlignmentFloats);
         m_nodesOffset = m_payloadData.data.size();
         {
             GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize BVH nodes", useFwn);
@@ -766,6 +814,7 @@ namespace gladius
 
         // Serialize triangles
         // Each triangle: v0 (4), v1 (4), v2 (4), faceNormal (4) = 16 floats
+        padDataToFloatAlignment(m_payloadData.data, kFloat4AlignmentFloats);
         m_trianglesOffset = m_payloadData.data.size();
         {
             GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize triangles", useFwn);
@@ -792,6 +841,7 @@ namespace gladius
 
         // Serialize vertex normals
         // Each normal: xyz + w (vertex index) = 4 floats
+        padDataToFloatAlignment(m_payloadData.data, kFloat4AlignmentFloats);
         m_normalsOffset = m_payloadData.data.size();
         {
             GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize vertex normals", useFwn);
@@ -806,6 +856,7 @@ namespace gladius
 
         // Serialize triangle indices for normal lookup
         // Each triangle: 3 vertex indices = 4 ints (padded)
+        padDataToFloatAlignment(m_payloadData.data, kFloat4AlignmentFloats);
         m_indicesOffset = m_payloadData.data.size();
         {
             GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize triangle indices", useFwn);
@@ -820,6 +871,7 @@ namespace gladius
 
         // Serialize per-edge adjacent face normals (3 entries per triangle, 4 floats each).
         // Used by computePseudoNormalFast in mesh_sdf.cl for robust sign on edge features.
+        padDataToFloatAlignment(m_payloadData.data, kFloat4AlignmentFloats);
         m_edgeNeighborsOffset = m_payloadData.data.size();
         {
             GLADIUS_FWN_PREP_SCOPE_IF("SpatialMeshResource::loadImpl serialize edge neighbours", useFwn);
@@ -841,6 +893,7 @@ namespace gladius
         if (useFwn)
         {
             GLADIUS_FWN_PREP_SCOPE("SpatialMeshResource::loadImpl reserve FWN aggregate slots");
+            padDataToFloatAlignment(m_payloadData.data, kFloat4AlignmentFloats);
             m_fwnAggregatesOffset = m_payloadData.data.size();
             size_t const aggregateFloatCount = m_data.nodes.size() * 8u;
             for (size_t i = 0; i < aggregateFloatCount; ++i)
@@ -851,6 +904,7 @@ namespace gladius
 
         // Reserve space for voxel grid data (2 floats per voxel: nearestTriIdx, signedDist)
         // This space will be filled by the buildMeshVoxelGrid kernel on GPU
+        padDataToFloatAlignment(m_payloadData.data, kFloat2AlignmentFloats);
         m_voxelDataOffset = m_payloadData.data.size();
         size_t const voxelDataSize = m_voxelCount * 2;  // 2 floats per voxel
         for (size_t i = 0; i < voxelDataSize; ++i)
@@ -866,6 +920,7 @@ namespace gladius
         if (useFwn)
         {
             GLADIUS_FWN_PREP_SCOPE("SpatialMeshResource::loadImpl reserve FWN sign-cache slots");
+            padDataToFloatAlignment(m_payloadData.data, kFloat4AlignmentFloats);
             m_signCacheDataOffset = m_payloadData.data.size();
             for (size_t i = 0; i < kSignCacheWordCount; ++i)
             {
@@ -1032,6 +1087,7 @@ namespace gladius
                 // -- Companion i+1: SDF_MESH_TRIANGLES (flat vertex buffer) --------------------
                 PrimitiveMeta flatMeshCompanion{};
                 flatMeshCompanion.primitiveType = SDF_MESH_TRIANGLES;
+                padDataToFloatAlignment(m_payloadData.data, kFloat4AlignmentFloats);
                 flatMeshCompanion.start = static_cast<int>(m_payloadData.data.size());
                 for (auto const & tri : m_data.triangles)
                 {
@@ -1048,16 +1104,31 @@ namespace gladius
                 flatMeshCompanion.end = static_cast<int>(m_payloadData.data.size());
 
                 // -- Companion i+2: SDF_VDB (near signed-distance field, user-configured res) --
-                auto const nearSdfTransform = openvdb::math::Transform::createLinearTransform(
-                    static_cast<double>(voxelSize_mm));
+                // Keep the legacy VdbImporter value convention: build the SDF grid in
+                // voxel-scaled coordinates with an identity transform, then store
+                // PrimitiveMeta::scaling as the world_mm -> grid coordinate scale. The OpenCL
+                // vdbModel() sampler divides sampled grid values by the same scale to return
+                // millimetres. Building this grid directly in world space with a non-identity
+                // transform would store millimetre-valued distances and the kernel would scale
+                // them down a second time.
+                float const nearSdfScaling = 1.0f / voxelSize_mm;
+                auto nearSdfVerts = verts;
+                for (auto & vertex : nearSdfVerts)
+                {
+                    vertex *= nearSdfScaling;
+                }
+                auto const nearSdfTransform = openvdb::math::Transform::createLinearTransform(1.0);
                 float constexpr kNearHalfBandVoxels = 8.0f;
                 auto nearSdfGrid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
-                    *nearSdfTransform, verts, tris, kNearHalfBandVoxels);
-                openvdb::tools::changeBackground(nearSdfGrid->tree(),
-                                                 std::numeric_limits<float>::max());
+                    *nearSdfTransform, nearSdfVerts, tris, kNearHalfBandVoxels);
+                // Preserve OpenVDB's signed inactive tiles. The hybrid NanoVDB path uses this
+                // grid as its sign source while face-index grids provide the long-range
+                // magnitude. Replacing all inactive values with +max destroys the negative
+                // interior background and makes closed solids look outside once queries leave
+                // the active narrow band.
                 nearSdfGrid->pruneGrid();
                 PrimitiveMeta sdfVdbCompanion = appendVdbGrid(
-                    openvdb::GridBase::Ptr(nearSdfGrid), 1.0f / voxelSize_mm, SDF_VDB);
+                    openvdb::GridBase::Ptr(nearSdfGrid), nearSdfScaling, SDF_VDB);
                 m_nanovdbGridOffset = static_cast<size_t>(sdfVdbCompanion.start);
 
                 // -- Companion i+3: SDF_VDB_FACE_INDICES (far face-index, fixed 1mm / 150 voxels) --

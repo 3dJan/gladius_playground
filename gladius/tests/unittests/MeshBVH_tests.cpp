@@ -53,6 +53,27 @@ namespace gladius::tests
             };
         }
 
+        static void createDuplicateVertexCubeMesh(std::vector<float4> & vertices,
+                                                  std::vector<TriangleIndices> & indices)
+        {
+            std::vector<float4> sharedVertices;
+            std::vector<TriangleIndices> sharedIndices;
+            createCubeMesh(sharedVertices, sharedIndices);
+
+            vertices.clear();
+            indices.clear();
+            vertices.reserve(sharedIndices.size() * 3u);
+            indices.reserve(sharedIndices.size());
+            for (auto const & tri : sharedIndices)
+            {
+                int const base = static_cast<int>(vertices.size());
+                vertices.push_back(sharedVertices[tri.i0]);
+                vertices.push_back(sharedVertices[tri.i1]);
+                vertices.push_back(sharedVertices[tri.i2]);
+                indices.emplace_back(base, base + 1, base + 2);
+            }
+        }
+
         // Helper to create a single triangle
         static void createSingleTriangle(std::vector<float4> & vertices,
                                          std::vector<TriangleIndices> & indices)
@@ -295,6 +316,25 @@ namespace gladius::tests
         EXPECT_EQ(stats.degenerateTriangleCount, 0);
         EXPECT_EQ(stats.boundaryEdgeCount, 0);
         EXPECT_EQ(stats.nonManifoldEdgeCount, 0);
+        EXPECT_FALSE(result.quality.hasIssues());
+    }
+
+    /// Exact duplicate vertex records are common in STL-style triangle soups. They should be
+    /// certified by exact position adjacency without silently modifying the source mesh.
+    TEST_F(MeshBVHBuilder_Test, Build_DuplicateVertexWatertightCube_ReportsCleanStats)
+    {
+        std::vector<float4> vertices;
+        std::vector<TriangleIndices> indices;
+        createDuplicateVertexCubeMesh(vertices, indices);
+
+        auto result = builder.build(vertices, indices);
+        ASSERT_FALSE(result.empty());
+
+        auto const & stats = builder.getLastBuildStats();
+        EXPECT_EQ(stats.degenerateTriangleCount, 0);
+        EXPECT_EQ(stats.boundaryEdgeCount, 0);
+        EXPECT_EQ(stats.nonManifoldEdgeCount, 0);
+        EXPECT_FALSE(result.quality.hasIssues());
     }
 
     /// A degenerate (zero-area) triangle should be counted but must not abort the build.
@@ -318,6 +358,8 @@ namespace gladius::tests
 
         auto const & stats = builder.getLastBuildStats();
         EXPECT_EQ(stats.degenerateTriangleCount, 1);
+        EXPECT_EQ(result.quality.degenerateTriangleCount, 1);
+        EXPECT_TRUE(result.quality.hasIssues());
     }
 
     /// Two triangles sharing a single edge: 5 boundary edges, 1 manifold edge.
@@ -341,6 +383,9 @@ namespace gladius::tests
         auto const & stats = builder.getLastBuildStats();
         EXPECT_EQ(stats.boundaryEdgeCount, 4);   // four outer edges
         EXPECT_EQ(stats.nonManifoldEdgeCount, 0);
+        EXPECT_EQ(result.quality.boundaryEdgeCount, 4);
+        EXPECT_EQ(result.quality.nonManifoldEdgeCount, 0);
+        EXPECT_TRUE(result.quality.hasIssues());
     }
 
     /// Three coplanar triangles sharing one edge → non-manifold edge.
@@ -373,6 +418,8 @@ namespace gladius::tests
         auto const & stats = builder.getLastBuildStats();
         EXPECT_EQ(stats.nonManifoldEdgeCount, 1)
             << "Edge (0,1) is shared by three faces and must be flagged non-manifold";
+        EXPECT_EQ(result.quality.nonManifoldEdgeCount, 1);
+        EXPECT_TRUE(result.quality.hasIssues());
 
         // Verify that the edge entry on the perpendicular fin (tri 2) was NOT
         // assigned a neighbour — only the two coplanar triangles should be

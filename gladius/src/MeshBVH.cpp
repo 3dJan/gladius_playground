@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <numbers>
 #include <numeric>
@@ -16,6 +17,96 @@
 
 namespace gladius
 {
+    namespace
+    {
+        std::uint32_t floatKeyBits(float const value) noexcept
+        {
+            float normalized = value;
+            if (normalized == 0.0f)
+            {
+                normalized = 0.0f; // canonicalise -0.0f to +0.0f
+            }
+
+            std::uint32_t bits = 0u;
+            std::memcpy(&bits, &normalized, sizeof(bits));
+            return bits;
+        }
+
+        struct PointKey
+        {
+            std::uint32_t x = 0u;
+            std::uint32_t y = 0u;
+            std::uint32_t z = 0u;
+
+            bool operator==(PointKey const & other) const noexcept
+            {
+                return x == other.x && y == other.y && z == other.z;
+            }
+        };
+
+        struct PointKeyHash
+        {
+            std::size_t operator()(PointKey const & key) const noexcept
+            {
+                std::size_t seed = std::hash<std::uint32_t>{}(key.x);
+                seed ^= std::hash<std::uint32_t>{}(key.y) + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+                seed ^= std::hash<std::uint32_t>{}(key.z) + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+                return seed;
+            }
+        };
+
+        [[nodiscard]] PointKey makePointKey(float4 const & point) noexcept
+        {
+            return PointKey{floatKeyBits(point.x), floatKeyBits(point.y), floatKeyBits(point.z)};
+        }
+
+        [[nodiscard]] bool lessPointKey(PointKey const & lhs, PointKey const & rhs) noexcept
+        {
+            if (lhs.x != rhs.x)
+            {
+                return lhs.x < rhs.x;
+            }
+            if (lhs.y != rhs.y)
+            {
+                return lhs.y < rhs.y;
+            }
+            return lhs.z < rhs.z;
+        }
+
+        struct EdgeKey
+        {
+            PointKey a;
+            PointKey b;
+
+            bool operator==(EdgeKey const & other) const noexcept
+            {
+                return a == other.a && b == other.b;
+            }
+        };
+
+        struct EdgeKeyHash
+        {
+            std::size_t operator()(EdgeKey const & key) const noexcept
+            {
+                std::size_t seed = PointKeyHash{}(key.a);
+                auto const bHash = PointKeyHash{}(key.b);
+                seed ^= bHash + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+                return seed;
+            }
+        };
+
+        [[nodiscard]] EdgeKey makeEdgeKey(float4 const & lhs, float4 const & rhs) noexcept
+        {
+            auto a = makePointKey(lhs);
+            auto b = makePointKey(rhs);
+            if (lessPointKey(b, a))
+            {
+                std::swap(a, b);
+            }
+            return EdgeKey{a, b};
+        }
+    }
+
     // ========================================================================
     // Build Context
     // ========================================================================
@@ -197,6 +288,10 @@ namespace gladius
             ? static_cast<float>(totalLeafPrims) / static_cast<float>(m_lastStats.leafNodes)
             : 0.0f;
 
+        result.quality.degenerateTriangleCount = m_lastStats.degenerateTriangleCount;
+        result.quality.boundaryEdgeCount = m_lastStats.boundaryEdgeCount;
+        result.quality.nonManifoldEdgeCount = m_lastStats.nonManifoldEdgeCount;
+
         return result;
     }
 
@@ -218,6 +313,32 @@ namespace gladius
         {
             vn.normal = {0.0f, 0.0f, 0.0f, 0.0f};
         }
+
+        struct AccumulatedNormal
+        {
+            float x = 0.0f;
+            float y = 0.0f;
+            float z = 0.0f;
+        };
+
+        // Accumulate by exact vertex position, not only by vertex index. Many STL-style
+        // triangle soups duplicate vertex records per face while still being geometrically
+        // watertight. Exact positional grouping preserves deterministic behaviour without
+        // silently modifying the mesh like a weld repair would.
+        std::unordered_map<PointKey, AccumulatedNormal, PointKeyHash> normalSums;
+        normalSums.reserve(vertexCount);
+
+        auto const addNormal = [&](float4 const & vertex,
+                                   float const angle,
+                                   float const normalX,
+                                   float const normalY,
+                                   float const normalZ)
+        {
+            auto & sum = normalSums[makePointKey(vertex)];
+            sum.x += angle * normalX;
+            sum.y += angle * normalY;
+            sum.z += angle * normalZ;
+        };
 
         // Accumulate angle-weighted face normals for each vertex
         for (size_t i = 0; i < indices.size(); ++i)
@@ -278,23 +399,23 @@ namespace gladius
             float angle2 = std::numbers::pi_v<float> - angle0 - angle1;
 
             // Add weighted face normal to each vertex
-            data.vertexNormals[idx.i0].normal.x += angle0 * fnx;
-            data.vertexNormals[idx.i0].normal.y += angle0 * fny;
-            data.vertexNormals[idx.i0].normal.z += angle0 * fnz;
-
-            data.vertexNormals[idx.i1].normal.x += angle1 * fnx;
-            data.vertexNormals[idx.i1].normal.y += angle1 * fny;
-            data.vertexNormals[idx.i1].normal.z += angle1 * fnz;
-
-            data.vertexNormals[idx.i2].normal.x += angle2 * fnx;
-            data.vertexNormals[idx.i2].normal.y += angle2 * fny;
-            data.vertexNormals[idx.i2].normal.z += angle2 * fnz;
+            addNormal(p0, angle0, fnx, fny, fnz);
+            addNormal(p1, angle1, fnx, fny, fnz);
+            addNormal(p2, angle2, fnx, fny, fnz);
         }
 
         // Normalize all vertex normals
         for (size_t i = 0; i < vertexCount; ++i)
         {
             auto & n = data.vertexNormals[i].normal;
+            auto const it = normalSums.find(makePointKey(vertices[i]));
+            if (it != normalSums.end())
+            {
+                n.x = it->second.x;
+                n.y = it->second.y;
+                n.z = it->second.z;
+            }
+
             float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             if (len > 1e-10f)
             {
@@ -357,24 +478,6 @@ namespace gladius
             faceNormals[t] = float4{fnx * invLen, fny * invLen, fnz * invLen, 1.0f};
         }
 
-        // Hash undirected edges to (triIdx, edgeIdx). On second hit we know both sides.
-        struct EdgeKey
-        {
-            uint64_t key;
-            bool operator==(EdgeKey const & o) const { return key == o.key; }
-        };
-        struct EdgeKeyHash
-        {
-            size_t operator()(EdgeKey const & k) const noexcept { return std::hash<uint64_t>{}(k.key); }
-        };
-
-        auto const makeKey = [](uint32_t a, uint32_t b) -> EdgeKey
-        {
-            uint32_t lo = std::min(a, b);
-            uint32_t hi = std::max(a, b);
-            return EdgeKey{(static_cast<uint64_t>(hi) << 32) | static_cast<uint64_t>(lo)};
-        };
-
         struct EdgeRef
         {
             int triIdx;
@@ -395,7 +498,7 @@ namespace gladius
             for (int e = 0; e < 3; ++e)
             {
                 auto [va, vb] = edgeVertices(idx, e);
-                EdgeKey const key = makeKey(va, vb);
+                EdgeKey const key = makeEdgeKey(vertices[va], vertices[vb]);
                 edgeMap[key].push_back(EdgeRef{static_cast<int>(t), e});
             }
         }

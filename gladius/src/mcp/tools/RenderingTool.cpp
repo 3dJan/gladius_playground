@@ -276,7 +276,7 @@ namespace gladius
                     float yaw = std::atan2(direction.y(), direction.x());
 
                     customCamera.setAngle(pitch, yaw);
-                    customCamera.update(10000.0f);
+                    customCamera.snapToTarget();
 
                     // Apply the custom camera settings
                     core->applyCamera(customCamera);
@@ -416,14 +416,14 @@ namespace gladius
                 optimalCamera.centerView(bbox);
 
                 // Update camera position
-                optimalCamera.update(10000.0f);
+                optimalCamera.snapToTarget();
 
                 // Adjust distance to fit the model in view (using reasonable viewport size)
                 const float viewportSize = 512.0f;
                 optimalCamera.adjustDistanceToTarget(bbox, viewportSize, viewportSize);
 
                 // Final update
-                optimalCamera.update(10000.0f);
+                optimalCamera.snapToTarget();
 
                 // Get the calculated camera parameters
                 auto eyePosition = optimalCamera.getEyePosition();

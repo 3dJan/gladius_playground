@@ -414,4 +414,154 @@ namespace gladius::ui::tests
         EXPECT_FALSE(m_logic->shouldShowSaveDialog());
         EXPECT_EQ(m_logic->getPendingOperation(), PendingFileOperation::None);
     }
+
+    /**
+     * @brief Simple test class that mimics MainWindow's Save As overwrite logic
+     */
+    class SaveAsOverwriteLogic
+    {
+      public:
+        void onSaveAsPathSelected(std::filesystem::path const & path, bool fileExists)
+        {
+            m_selectedPath = path;
+            if (fileExists)
+            {
+                m_pendingOverwritePath = path;
+                m_showConfirmation = true;
+            }
+            else
+            {
+                executeSave(path);
+            }
+        }
+
+        void confirmOverwrite()
+        {
+            if (m_pendingOverwritePath)
+            {
+                executeSave(*m_pendingOverwritePath);
+                reset();
+            }
+        }
+
+        std::optional<std::filesystem::path> chooseDifferentName()
+        {
+            auto const path = m_pendingOverwritePath;
+            reset();
+            return path;
+        }
+
+        void cancel()
+        {
+            reset();
+        }
+
+        [[nodiscard]] bool showConfirmation() const { return m_showConfirmation; }
+        [[nodiscard]] std::optional<std::filesystem::path> pendingOverwritePath() const
+        {
+            return m_pendingOverwritePath;
+        }
+        [[nodiscard]] bool wasSaved() const { return m_saved; }
+        [[nodiscard]] std::optional<std::filesystem::path> savedPath() const { return m_savedPath; }
+
+      private:
+        void executeSave(std::filesystem::path const & path)
+        {
+            m_saved = true;
+            m_savedPath = path;
+        }
+
+        void reset()
+        {
+            m_showConfirmation = false;
+            m_pendingOverwritePath.reset();
+        }
+
+        std::filesystem::path m_selectedPath;
+        std::optional<std::filesystem::path> m_pendingOverwritePath;
+        std::optional<std::filesystem::path> m_savedPath;
+        bool m_showConfirmation{false};
+        bool m_saved{false};
+    };
+
+    class MainWindowSaveAsOverwrite_Test : public ::testing::Test
+    {
+      protected:
+        SaveAsOverwriteLogic m_logic;
+    };
+
+    /**
+     * @brief Test that a new path is saved directly without confirmation
+     */
+    TEST_F(MainWindowSaveAsOverwrite_Test, NewPath_DoesNotExist_SavesDirectly)
+    {
+        auto const path = std::filesystem::path{"/test/path/new_model.implicit.3mf"};
+
+        m_logic.onSaveAsPathSelected(path, false);
+
+        EXPECT_TRUE(m_logic.wasSaved());
+        EXPECT_EQ(m_logic.savedPath().value(), path);
+        EXPECT_FALSE(m_logic.showConfirmation());
+    }
+
+    /**
+     * @brief Test that an existing path triggers the overwrite confirmation
+     */
+    TEST_F(MainWindowSaveAsOverwrite_Test, ExistingPath_TriggersConfirmation)
+    {
+        auto const path = std::filesystem::path{"/test/path/existing_model.implicit.3mf"};
+
+        m_logic.onSaveAsPathSelected(path, true);
+
+        EXPECT_FALSE(m_logic.wasSaved());
+        EXPECT_TRUE(m_logic.showConfirmation());
+        EXPECT_EQ(m_logic.pendingOverwritePath().value(), path);
+    }
+
+    /**
+     * @brief Test confirming the overwrite executes the save
+     */
+    TEST_F(MainWindowSaveAsOverwrite_Test, ConfirmOverwrite_ExecutesSave)
+    {
+        auto const path = std::filesystem::path{"/test/path/existing_model.implicit.3mf"};
+        m_logic.onSaveAsPathSelected(path, true);
+
+        m_logic.confirmOverwrite();
+
+        EXPECT_TRUE(m_logic.wasSaved());
+        EXPECT_EQ(m_logic.savedPath().value(), path);
+        EXPECT_FALSE(m_logic.showConfirmation());
+        EXPECT_FALSE(m_logic.pendingOverwritePath().has_value());
+    }
+
+    /**
+     * @brief Test choosing a different name clears the pending state and returns the path
+     */
+    TEST_F(MainWindowSaveAsOverwrite_Test, ChooseDifferentName_ClearsPendingState)
+    {
+        auto const path = std::filesystem::path{"/test/path/existing_model.implicit.3mf"};
+        m_logic.onSaveAsPathSelected(path, true);
+
+        auto const fallback = m_logic.chooseDifferentName();
+
+        EXPECT_FALSE(m_logic.wasSaved());
+        EXPECT_FALSE(m_logic.showConfirmation());
+        EXPECT_FALSE(m_logic.pendingOverwritePath().has_value());
+        EXPECT_EQ(fallback.value(), path);
+    }
+
+    /**
+     * @brief Test cancelling the overwrite dialog aborts the save
+     */
+    TEST_F(MainWindowSaveAsOverwrite_Test, Cancel_DoesNotSave)
+    {
+        auto const path = std::filesystem::path{"/test/path/existing_model.implicit.3mf"};
+        m_logic.onSaveAsPathSelected(path, true);
+
+        m_logic.cancel();
+
+        EXPECT_FALSE(m_logic.wasSaved());
+        EXPECT_FALSE(m_logic.showConfirmation());
+        EXPECT_FALSE(m_logic.pendingOverwritePath().has_value());
+    }
 }

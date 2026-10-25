@@ -24,6 +24,9 @@ namespace gladius::ui
         auto computeModelViewPerspectiveMatrix() const -> cl_float16;
         bool update(float deltaTime_ms);
 
+        /// @brief Immediately applies all target camera values without interpolation.
+        void snapToTarget();
+
         void centerView(BoundingBox const & bbox);
         void
         adjustDistanceToTarget(BoundingBox const & bbox, float viewportWidth, float viewportHeight);

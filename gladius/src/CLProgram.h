@@ -115,6 +115,30 @@ namespace gladius
                                                cl::NDRange range,
                                                const ArgumentTypes &... args)
         {
+            return runNonBlockingImpl(queue, methodName, origin, range, nullptr, args...);
+        }
+
+        template <typename... ArgumentTypes>
+        [[nodiscard]] cl::Event runNonBlockingWithWaitList(cl::CommandQueue const & queue,
+                                                           const std::string & methodName,
+                                                           cl::NDRange origin,
+                                                           cl::NDRange range,
+                                                           std::vector<cl::Event> const & waitEvents,
+                                                           const ArgumentTypes &... args)
+        {
+            auto const * waitList = waitEvents.empty() ? nullptr : &waitEvents;
+            return runNonBlockingImpl(queue, methodName, origin, range, waitList, args...);
+        }
+
+      private:
+        template <typename... ArgumentTypes>
+        [[nodiscard]] cl::Event runNonBlockingImpl(cl::CommandQueue const & queue,
+                                                   const std::string & methodName,
+                                                   cl::NDRange origin,
+                                                   cl::NDRange range,
+                                                   std::vector<cl::Event> const * waitEvents,
+                                                   const ArgumentTypes &... args)
+        {
             ProfileFunction;
 
             auto logError = [&](const std::string & stage, const std::string & details = "")
@@ -279,8 +303,12 @@ namespace gladius
             cl::Event kernelEvent;
             try
             {
-                CL_ERROR(
-                  queue.enqueueNDRangeKernel(m_kernels[methodName], origin, range, cl::NullRange, nullptr, &kernelEvent));
+                CL_ERROR(queue.enqueueNDRangeKernel(m_kernels[methodName],
+                                                    origin,
+                                                    range,
+                                                    cl::NullRange,
+                                                    waitEvents,
+                                                    &kernelEvent));
             }
             catch (const OpenCLError & e)
             {
@@ -290,6 +318,8 @@ namespace gladius
 
             return kernelEvent;
         }
+
+            public:
 
         template <typename... ArgumentTypes>
         void run(cl::CommandQueue const & queue,

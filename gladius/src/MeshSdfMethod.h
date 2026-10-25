@@ -106,6 +106,19 @@ namespace gladius
         float suggestedVoxelSize_mm = 0.0f;
     };
 
+    /// User-facing aggregate of mesh topology diagnostics that can make signed-distance
+    /// evaluation ambiguous unless the mesh is repaired or an orientation-independent
+    /// sign strategy is selected.
+    struct MeshQualityIssueSummary
+    {
+        bool hasIssue = false;
+        std::size_t affectedMeshCount = 0u;
+        std::size_t degenerateTriangleCount = 0u;
+        std::size_t boundaryEdgeCount = 0u;
+        std::size_t nonManifoldEdgeCount = 0u;
+        std::string message;
+    };
+
     /// Raised when a strict NanoVDB policy rejects the requested load/build.
     class NanoVdbBuildRejectedError : public std::runtime_error
     {

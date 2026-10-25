@@ -32,6 +32,8 @@
 #include "GamepadQuickRef.h"
 
 #include <chrono>
+#include <string>
+#include <vector>
 
 namespace ed = ax::NodeEditor;
 
@@ -217,6 +219,7 @@ namespace gladius::ui
         void showExitPopUp();
         void showExportInProgressWarning();
         void showSaveBeforeFileOperationPopUp();
+        void showSaveAsOverwriteConfirmation();
         void logViewer();
         void renderStatusBar();
         void renderComputeErrorModal();
@@ -235,7 +238,8 @@ namespace gladius::ui
         void resetEditorState();
         void save();
         void updateModel();
-        void saveAs();
+        void saveAs(std::filesystem::path defaultPath = {});
+        void executeSaveAs(std::filesystem::path const & savePath);
         void saveCurrentFunction();
         void importImageStack();
 
@@ -384,8 +388,36 @@ namespace gladius::ui
         AsyncFileDialog m_asyncFileDialog;
         AsyncDialogOperation m_asyncDialogOp{AsyncDialogOperation::None};
 
+        /// @brief Path selected by Save As that already exists and waits for overwrite confirmation
+        std::optional<std::filesystem::path> m_pendingSaveAsPath;
+        /// @brief Whether to show the Save As overwrite confirmation modal
+        bool m_showSaveAsOverwriteConfirmation{false};
+
         /// @brief Process async file dialog results and execute pending operations
         void processAsyncFileDialog();
+
+                struct NativeSaveResult
+                {
+                        std::filesystem::path filename;
+                    io::DocumentIdentity snapshotDocumentIdentity{0};
+                        uint64_t snapshotVersion{0};
+                        bool success{false};
+                        std::string error;
+                    std::weak_ptr<Document> sourceDocument;
+                };
+
+                struct PendingNativeSave
+                {
+                        std::filesystem::path filename;
+                        io::SaveSnapshot snapshot;
+                        std::weak_ptr<Document> sourceDocument;
+                };
+
+                void enqueueNativeSave(std::filesystem::path filename);
+                void startNativeSave(PendingNativeSave save);
+                void pollNativeSave();
+                [[nodiscard]] std::filesystem::path makeNativeSaveTempPath(
+                    std::filesystem::path const & filename);
 
         // Export state for blocking UI modifications during mesh export
         ExportState m_exportState;
@@ -411,6 +443,12 @@ namespace gladius::ui
 
         /// @brief Future for async compute initialization
         std::future<ComputeEnumResult> m_computeInitFuture;
+
+        /// @brief Active background native 3MF save. The worker owns only snapshot data.
+        std::future<NativeSaveResult> m_nativeSaveFuture;
+        std::optional<PendingNativeSave> m_pendingNativeSave;
+        uint64_t m_nativeSaveSequence{0};
+        bool m_nativeSaveInProgress{false};
 
         /// @brief Start async compute initialization
         void startAsyncComputeInit();

@@ -1,6 +1,7 @@
 #include "ShellExporter.h"
 
 #include "3mf/MeshWriter3mf.h"
+#include "3mf/OpenVdbShellGenerator.h"
 #include "3mf/ShellGenerator.h"
 #include "ComputeContext.h"
 #include "ComputeCore.h"
@@ -191,6 +192,12 @@ namespace gladius::io
 
         m_progress.store(0.05, std::memory_order_release);
 
+        auto const shellIntervals = ShellThicknessPartition::buildIntervals(solution);
+        if (shellIntervals.empty())
+        {
+            throw std::runtime_error("Shell export requires at least one non-zero shell thickness");
+        }
+
         if (isCancellationRequested())
         {
             m_state.store(State::Idle, std::memory_order_release);
@@ -200,18 +207,43 @@ namespace gladius::io
         // Phase 2: Shell generation (5% - 85%)
         {
             std::lock_guard lock(m_statusMutex);
-            m_statusMessage = fmt::format("Generating {} shells...", numLayers);
+            m_statusMessage = fmt::format("Generating {} shells...", shellIntervals.size());
         }
 
-        ShellGenerator shellGenerator(generator, *const_cast<Document*>(m_document));
-        auto shells = shellGenerator.generateShells(
-            m_config.filamentStack,
-            solution,
-            m_config.mdcOptions,
-            m_config.lutResolution,
-            m_config.thicknessConstraints,
-            &m_config.precomputedLuts,
-            m_config.useSurfaceColorSampling);
+        std::vector<ShellGenerator::ShellMesh> shells;
+        if (m_config.generationMode == ShellGenerationMode::OpenVdbColorThickness)
+        {
+            OpenVdbShellGenerator shellGenerator(generator);
+            if (m_config.useSurfaceColorSampling)
+            {
+                shells = shellGenerator.generateSurfaceDrivenShells(
+                    m_config.filamentStack,
+                    m_config.mdcOptions,
+                    m_config.lutResolution,
+                    m_config.thicknessConstraints,
+                    [this]() { return isCancellationRequested(); });
+            }
+            else
+            {
+                shells = shellGenerator.generateUniformShells(
+                    m_config.filamentStack,
+                    solution,
+                    m_config.mdcOptions,
+                    [this]() { return isCancellationRequested(); });
+            }
+        }
+        else
+        {
+            ShellGenerator shellGenerator(generator, *const_cast<Document*>(m_document));
+            shells = shellGenerator.generateShells(
+                m_config.filamentStack,
+                solution,
+                m_config.mdcOptions,
+                m_config.lutResolution,
+                m_config.thicknessConstraints,
+                &m_config.precomputedLuts,
+                m_config.useSurfaceColorSampling);
+        }
 
         if (isCancellationRequested())
         {

@@ -21,7 +21,8 @@ namespace gladius::nodes
         TypeMismatch,       ///< Connected port type doesn't match parameter
         InvalidReference,   ///< Referenced node/port no longer exists
         CyclicDependency,   ///< Graph contains a cycle
-        FunctionNotFound    ///< Referenced function doesn't exist
+        FunctionNotFound,   ///< Referenced function doesn't exist
+        GraphSyncError      ///< Graph sync/validation failed unexpectedly
     };
 
     /**

@@ -288,12 +288,9 @@ namespace gladius::nodes
 
         out << m_signature.str();
         out << fmt::format("float out[{}];\n", roundUp(m_currentOutPutIndex + 1, 1024));
-        out << fmt::format("out[1]={}.x;\n",
-                           getAssemblyBegin().getOutputs().at(FieldNames::Pos).getUniqueName());
-        out << fmt::format("out[2]={}.y;\n",
-                           getAssemblyBegin().getOutputs().at(FieldNames::Pos).getUniqueName());
-        out << fmt::format("out[3]={}.z;\n",
-                           getAssemblyBegin().getOutputs().at(FieldNames::Pos).getUniqueName());
+        out << "out[1]=pos.x;\n";
+        out << "out[2]=pos.y;\n";
+        out << "out[3]=pos.z;\n";
 
         out << "for (int i = 0; i < sizeOfCmds; ++i)\n";
         out << "{\n";
@@ -1807,8 +1804,7 @@ namespace gladius::nodes
         {
             acquireOutputIndex(beginning.getOutputs().at(FieldNames::Pos), 3);
 
-            m_signature << fmt::format("float4 model(float3 {0} ,  PAYLOAD_ARGS)\n{{\n",
-                                       beginning.getOutputs().at(FieldNames::Pos).getUniqueName());
+            m_signature << "float4 model(float3 pos, PAYLOAD_ARGS)\n{\n";
         }
 
         m_partBegin = beginning;

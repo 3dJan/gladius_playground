@@ -69,7 +69,7 @@ float3 getCellExtent(float3 bboxMin, float3 bboxMax, uint depth)
 // variable shell offsets based on surface colors.
 
 /// Transform world position to field grid coordinates and sample thickness
-inline float sampleThicknessFieldMDC(
+static inline float sampleThicknessFieldMDC(
     __global const float* thicknessField,  // 3D grid of precomputed thickness values
     const int fieldResolution,              // Resolution of the 3D grid (e.g., 128)
     const float16 worldToGrid,              // 4x4 transform: world → grid coordinates
@@ -121,7 +121,7 @@ inline float sampleThicknessFieldMDC(
 /// Compute shell SDF value using thickness fields
 /// For non-innermost layers: max(SDF + outer, -(SDF + inner))
 /// For innermost layer: SDF + outer
-inline float computeShellSdfMDC(
+static inline float computeShellSdfMDC(
     const float baseSdf,
     __global const float* outerField,
     __global const float* innerField,
@@ -150,7 +150,7 @@ inline float computeShellSdfMDC(
 /// Compute gradient of shell SDF using central differences
 /// This must be used for thickness field mode instead of computeGradientWithEps,
 /// because the shell SDF is a function of both the base SDF and the thickness field.
-inline float3 computeShellGradientMDC(
+static inline float3 computeShellGradientMDC(
     const float3 pos,
     const float epsilon,
     __global const float* outerField,

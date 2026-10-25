@@ -78,6 +78,11 @@ void GamepadActionDispatcher::dispatch(GamepadAction action, ModelEditor & edito
         handleNavigationHistory(action, editor);
         break;
 
+    case GamepadAction::Cancel:
+        // Cancellation is currently handled by the same path as deselection.
+        handleSelection(GamepadAction::Deselect, editor);
+        break;
+
     case GamepadAction::Count:
         // Invalid action, do nothing
         break;

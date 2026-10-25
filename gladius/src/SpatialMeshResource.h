@@ -150,6 +150,23 @@ namespace gladius
             return hasNanoVdbBuildIssue();
         }
 
+        /// Mesh topology diagnostics captured during BVH construction.
+        [[nodiscard]] MeshQualityDiagnostics const & getMeshQualityDiagnostics() const noexcept
+        {
+            return m_data.quality;
+        }
+
+        /// True when the source mesh has topology that can make signed SDF sign ambiguous.
+        [[nodiscard]] bool hasMeshQualityIssues() const noexcept
+        {
+            return m_data.quality.hasIssues();
+        }
+
+        /// Format mesh-quality diagnostics into a user-facing message. Returns an empty string
+        /// when the mesh has no recorded quality issues.
+        [[nodiscard]] std::string formatMeshQualityMessage(
+          std::string const & displayName) const;
+
         /// Format the current NanoVDB issue into a user-facing message. Returns an empty string
         /// when the resource has no NanoVDB build issue.
         [[nodiscard]] std::string formatNanoVdbBuildMessage(

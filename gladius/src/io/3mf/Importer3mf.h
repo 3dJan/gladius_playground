@@ -210,6 +210,38 @@ namespace gladius::io
                                nodes::Matrix4x4 const & trafo,
                                Document & doc);
 
+        void addBooleanObject(Lib3MF::PModel model,
+                      Lib3MF::PBooleanObject booleanObject,
+                      nodes::Matrix4x4 const & trafo,
+                      Document & doc);
+
+        nodes::Port & buildBooleanSdf(Lib3MF::PModel const & model,
+                           Lib3MF::PBooleanObject const & booleanObject,
+                           nodes::Port & coordinateSystemPort,
+                           nodes::Model & target,
+                           Document & doc);
+
+        nodes::Port & buildObjectSdf(Lib3MF::PModel const & model,
+                          Lib3MF::PObject const & object,
+                          nodes::Port & coordinateSystemPort,
+                          nodes::Model & target,
+                          Document & doc);
+
+        nodes::Port & createLevelSetSdfNode(Lib3MF::PModel const & model,
+                              Lib3MF::PLevelSet const & levelSet,
+                              nodes::Port & coordinateSystemPort,
+                              nodes::Model & target,
+                              Document & doc);
+
+        static nodes::Port & createMeshSdfNode(ResourceKey const & key,
+                                 nodes::Port & coordinateSystemPort,
+                                 nodes::Model & target);
+
+        static nodes::Port & combineSdf(nodes::Model & target,
+                             nodes::Port & lhs,
+                             nodes::Port & rhs,
+                             Lib3MF::eBooleanOperation operation);
+
         void loadImageStacks(std::filesystem::path const & filename,
                              Lib3MF::PModel model,
                              Document & doc);
@@ -276,6 +308,11 @@ namespace gladius::io
         ///        sets (meshbboxonly=true) and not also referenced as actual geometry.
         /// @return Set of model resource IDs that should be skipped during mesh loading.
         std::set<Lib3MF_uint32> collectBboxOnlyMeshIds(Lib3MF::PModel const & model) const;
+
+        void collectBooleanReferencedMeshIds(Lib3MF::PModel const & model,
+                                             Lib3MF::PBooleanObject const & booleanObject,
+                                             std::set<Lib3MF_uint32> & meshIds,
+                                             std::set<Lib3MF_uint32> & visitedBooleanIds) const;
 
         Lib3MF::PWrapper m_wrapper{};
 
