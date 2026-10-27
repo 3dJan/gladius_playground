@@ -41,3 +41,7 @@ paths:
   - "gladius/tests/**"
   - "gladius/cmake/**"
   - "scripts/**"
+
+# Use security-extended query suite for better performance vs security-and-quality
+queries:
+  - uses: security-extended
