@@ -136,9 +136,11 @@ namespace gladius::ui
             for (auto const & option : options)
             {
                 bool const popStyle = pushNodeButtonStyle(option.category);
+                ImGui::PushID(option.id);
                 bool const clicked = touchButton(option.label.c_str());
                 bool const isHovered = ImGui::IsItemHovered();
                 bool const isFocused = ImGui::IsItemFocused();
+                ImGui::PopID();
                 if (popStyle)
                 {
                     ImGui::PopStyleColor(3);
@@ -249,9 +251,11 @@ namespace gladius::ui
         for (auto const & option : options)
         {
             bool const popStyle = pushNodeButtonStyle(option.category);
+            ImGui::PushID(option.id);
             bool const clicked = touchButton(option.label.c_str());
             bool const isHovered = ImGui::IsItemHovered();
             bool const isFocused = ImGui::IsItemFocused();
+            ImGui::PopID();
             if (popStyle)
             {
                 ImGui::PopStyleColor(3);
