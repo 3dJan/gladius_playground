@@ -4,6 +4,7 @@
 #include "FileDialogService.h"
 #include "LinkColors.h"
 #include "NumericInputOverlay.h"
+#include "PinHitboxGeometry.h"
 #include "Style.h"
 
 #include <imgui.h>
@@ -215,10 +216,25 @@ namespace gladius::ui
         int pushPinButtonStyle(PinVisualState state, ImVec4 baseColor) const;
 
         /// Show a tooltip with port name and type when hovering a compatible pin during drag.
-        void showPinDragTooltip(std::string const & name, std::type_index typeIndex, PinVisualState state) const;
+        void showPinDragTooltip(nodes::PortId pinId,
+              std::string const & name,
+              std::type_index typeIndex,
+              PinVisualState state) const;
 
-        /// Register the last rendered ImGui item as the hitbox for the active pin.
-        void registerCurrentItemAsPinHitbox(bool isInput) const;
+        /// Compute pin hit, pivot, and menu-button geometry for the current table cell.
+        PinHitboxGeometry pinHitboxGeometry(bool isInput) const;
+
+        /// Draw the visible, type-colored port marker independently of its menu button.
+        void drawPinMarker(PinHitboxGeometry const & geometry,
+               ImVec4 color,
+               PinVisualState state,
+               bool isHovered) const;
+
+        /// Register independent drag-target and visible-anchor rectangles with the node editor.
+        void registerPinHitbox(PinHitboxGeometry const & geometry, bool isInput) const;
+
+        /// Whether the node editor currently reports this pin as hovered.
+        bool isPinHovered(nodes::PortId pinId) const;
 
         bool viewString(nodes::NodeBase const & node,
                         nodes::ParameterMap::reference parameter,

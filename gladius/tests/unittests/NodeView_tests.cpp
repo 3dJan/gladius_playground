@@ -2,6 +2,7 @@
 #include <gmock/gmock.h>
 
 #include "../../src/ui/NodeView.h"
+#include "../../src/ui/PinHitboxGeometry.h"
 #include "../../src/nodes/Model.h"
 #include "../../src/nodes/NodeBase.h"
 #include "../../src/ui/ModelEditor.h"
@@ -136,6 +137,49 @@ namespace gladius::ui::tests
         EXPECT_TRUE(result);
         EXPECT_FALSE(m_nodeView->hasGroup(oldTag));
         EXPECT_TRUE(m_nodeView->hasGroup(newTag));
+    }
+
+    TEST(PinHitboxGeometryTest, InputPin_UsesMinimumHitTargetAndSeparatesMenuButton)
+    {
+        ImVec2 const cellCursor{100.f, 200.f};
+        auto const geometry = makePinHitboxGeometry(cellCursor, 48.f, 20.f, 1.f, true);
+
+        EXPECT_FLOAT_EQ(geometry.hitRectMax.x - geometry.hitRectMin.x, 24.f);
+        EXPECT_FLOAT_EQ(geometry.hitRectMax.y - geometry.hitRectMin.y, 24.f);
+        EXPECT_FLOAT_EQ(geometry.markerCenter.x, 112.f);
+        EXPECT_FLOAT_EQ(geometry.markerCenter.y, 210.f);
+        EXPECT_FLOAT_EQ(geometry.pivotRectMax.x - geometry.pivotRectMin.x, 8.f);
+        EXPECT_LE(geometry.hitRectMax.x, geometry.menuButtonPosition.x);
+        EXPECT_FLOAT_EQ(geometry.menuButtonPosition.x, 128.f);
+        EXPECT_FLOAT_EQ(pinMinimumRowHeight(1.f), 26.f);
+        EXPECT_FLOAT_EQ(pinRailWidth(20.f, 5.f, 1.f), 58.f);
+    }
+
+    TEST(PinHitboxGeometryTest, OutputPin_AnchorsAtOuterEdgeAndPlacesMenuInside)
+    {
+        ImVec2 const cellCursor{100.f, 200.f};
+        auto const geometry = makePinHitboxGeometry(cellCursor, 48.f, 20.f, 1.f, false);
+
+        EXPECT_FLOAT_EQ(geometry.markerCenter.x, 136.f);
+        EXPECT_FLOAT_EQ(geometry.hitRectMax.x, 148.f);
+        EXPECT_FLOAT_EQ(geometry.menuButtonPosition.x, 100.f);
+        EXPECT_LE(geometry.menuButtonPosition.x + 20.f, geometry.hitRectMin.x);
+    }
+
+    TEST(PinHitboxGeometryTest, UiScale_ExpandsHitTargetAndKeepsPivotCentered)
+    {
+        ImVec2 const cellCursor{10.f, 20.f};
+        auto const geometry = makePinHitboxGeometry(cellCursor, 72.f, 30.f, 1.5f, true);
+
+        EXPECT_FLOAT_EQ(pinHitTargetSize(1.5f), 36.f);
+        EXPECT_FLOAT_EQ(pinMinimumRowHeight(1.5f), 38.f);
+        EXPECT_FLOAT_EQ(pinRailWidth(30.f, 7.5f, 1.5f), 87.f);
+        EXPECT_FLOAT_EQ(geometry.hitRectMax.x - geometry.hitRectMin.x, 36.f);
+        EXPECT_FLOAT_EQ(geometry.markerRadius, 6.f);
+        EXPECT_FLOAT_EQ(geometry.pivotRectMin.x + geometry.pivotRectMax.x,
+                        2.f * geometry.markerCenter.x);
+        EXPECT_FLOAT_EQ(geometry.pivotRectMin.y + geometry.pivotRectMax.y,
+                        2.f * geometry.markerCenter.y);
     }
 
 } // namespace gladius::ui::tests
