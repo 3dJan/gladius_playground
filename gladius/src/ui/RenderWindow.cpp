@@ -282,6 +282,7 @@ namespace gladius::ui
 
     void RenderWindow::setBackendRuntime(compute::IBackendRuntime * runtime)
     {
+        m_neutralParameterInteractionPolicy.reset();
         // A runtime replacement can disable the neutral render loop entirely. Drain before
         // releasing the old session so its physical submissions cannot remain unpolled forever.
         if (m_neutralRenderScheduler.hasInFlightSubmissions())
@@ -317,6 +318,7 @@ namespace gladius::ui
 
     void RenderWindow::setDocument(Document * doc)
     {
+        m_neutralParameterInteractionPolicy.reset();
         m_neutralRenderScheduler.requestCancellationForAll();
         if (m_neutralBoundsSubmission)
         {
@@ -386,6 +388,12 @@ namespace gladius::ui
                 m_neutralModelBounds = result->modelBounds;
                 m_neutralBoundsFreshness = result->freshness;
                 m_neutralBoundsFailed = false;
+                if (m_renderUpdateCoordinator.interactionState() == async_rendering::RenderInteractionState::Static)
+                {
+                    // A frame rendered without authoritative clipping bounds must catch up.
+                    queueRenderDecision(m_renderUpdateCoordinator.notifyRenderSettingsChanged());
+                    m_neutralRenderScheduler.requestCancellationForStale();
+                }
                 return true;
             }
 
@@ -418,6 +426,11 @@ namespace gladius::ui
             return false;
         }
 
+        if (m_renderUpdateCoordinator.interactionState() == async_rendering::RenderInteractionState::ParameterInteracting)
+        {
+            return false;
+        }
+
         compute::BoundsRequest request;
         request.freshness = freshness;
         try
@@ -434,6 +447,7 @@ namespace gladius::ui
 
     bool RenderWindow::tryRenderWithNeutralBackend(RenderWindowState & state)
     {
+        updateNeutralParameterInteraction();
         if (!m_neutralBackendActive || !m_document)
         {
             return false;
@@ -462,15 +476,13 @@ namespace gladius::ui
         if (!renderBackendSession->hasMaterializedScene() ||
             renderBackendSession->getSceneGeneration() != sceneGeneration)
         {
-            auto const assembly = m_document->getFlatAssembly();
+            auto const assembly = m_document->getAssembly();
             if (assembly && assembly->assemblyModel())
             {
-                auto const snapshot = compute::ComputeRendererFactory::materializeScene(
-                  assembly.get(),
-                  *assembly->assemblyModel(),
-                  sceneGeneration,
-                  &m_document->getResourceManager());
-                if (!renderBackendSession->replaceScene(snapshot))
+                auto const snapshot = compute::ComputeRendererFactory::materializeRuntimeScene(
+                  *assembly, sceneGeneration, &m_document->getResourceManager());
+                if (!renderBackendSession->replaceScene(
+                      snapshot, m_renderUpdateCoordinator.latestStamp().parameterEpoch))
                 {
                     return false;
                 }
@@ -589,6 +601,21 @@ namespace gladius::ui
                                                     .type = command.task.type,
                                                     .stamp = command.task.stamp,
                                                     .status = async_rendering::RenderTaskStatus::Failed},
+                  true));
+            }
+            else if (command.task.type == async_rendering::RenderTaskType::ParameterUpload)
+            {
+                auto const assembly = m_document->getAssembly();
+                                bool const updated =
+                                    assembly && renderBackendSession->updateParameterValues(
+                                                                *assembly, command.task.stamp.parameterEpoch);
+                queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+                  async_rendering::RenderTaskResult{
+                    .requestId = command.task.requestId,
+                    .type = command.task.type,
+                    .stamp = command.task.stamp,
+                    .status = updated ? async_rendering::RenderTaskStatus::Completed
+                                      : async_rendering::RenderTaskStatus::Failed},
                   true));
             }
             else
@@ -813,6 +840,21 @@ namespace gladius::ui
 
         for (auto & command : decision.commands)
         {
+            if (m_neutralBackendActive &&
+                command.type == async_rendering::RenderCommandType::StartTask &&
+                command.task.type == async_rendering::RenderTaskType::ParameterUpload)
+            {
+                auto const oldEnd = m_pendingRenderCommands.end();
+                auto const newEnd = std::remove_if(
+                  m_pendingRenderCommands.begin(),
+                  oldEnd,
+                  [](async_rendering::RenderCommand const & pending)
+                  {
+                      return pending.type == async_rendering::RenderCommandType::StartTask &&
+                             pending.task.type == async_rendering::RenderTaskType::ParameterUpload;
+                  });
+                m_pendingRenderCommands.erase(newEnd, oldEnd);
+            }
             if (m_neutralBackendActive &&
                 command.type == async_rendering::RenderCommandType::StartTask &&
                 isInteractiveDisplayTask(command.task.type))
@@ -1134,6 +1176,7 @@ namespace gladius::ui
     void RenderWindow::renderWindow()
     {
         ProfileFunction;
+        updateNeutralParameterInteraction();
         if (!m_isVisible)
         {
             return;
@@ -1877,11 +1920,6 @@ namespace gladius::ui
             m_core->setSdfValid(false);
         }
 
-        if (m_neutralBackendActive)
-        {
-            m_renderBackendSession.reset();
-        }
-
         m_dirty = true;
 
         // In realtime mode, mirror invalidateCameraView(): skip the legacy low-res preview
@@ -1913,8 +1951,14 @@ namespace gladius::ui
         m_asyncViewEpoch.fetch_add(1, std::memory_order_acq_rel);
         if (m_neutralBackendActive)
         {
-            queueRenderDecision(m_neutralRenderScheduler.workflow().notifyEmbeddedParameterChanged(true));
+            queueRenderDecision(m_neutralRenderScheduler.workflow().notifyParameterChanged(true));
             m_neutralRenderScheduler.requestCancellationForStale();
+            m_neutralParameterInteractionPolicy.notifyParameterChanged(
+              async_rendering::ParameterInteractionPolicy::Clock::now());
+            if (m_view != nullptr)
+            {
+                m_view->startAnimationMode();
+            }
         }
         else
         {
@@ -2393,6 +2437,7 @@ namespace gladius::ui
     void RenderWindow::render(RenderWindowState & state)
     {
         ZoneScopedN("render");
+        updateNeutralParameterInteraction();
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
         // During an active resize the GPU image buffers may be reallocated at
@@ -5023,6 +5068,10 @@ namespace gladius::ui
 
     void RenderWindow::finishParameterInteraction()
     {
+        if (m_neutralBackendActive)
+        {
+            m_neutralParameterInteractionPolicy.reset();
+        }
         m_streamingPreviewActive.store(false, std::memory_order_release);
         m_streamingFrameConsumed.store(true, std::memory_order_release);
         if (m_renderUpdateCoordinator.interactionState() ==
@@ -5129,6 +5178,12 @@ namespace gladius::ui
 
     void RenderWindow::refreshStreamingParameterInteraction()
     {
+        if (m_neutralBackendActive)
+        {
+            invalidateViewDueToParameterChange();
+            return;
+        }
+
         if (m_core)
         {
             m_core->setSdfValid(false);

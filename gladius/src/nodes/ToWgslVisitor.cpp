@@ -82,6 +82,11 @@ namespace gladius::nodes
         return m_requiredParameterIds.contains(parameterId);
     }
 
+    void ToWgslVisitor::setBufferNumericLiterals(bool const enabled)
+    {
+        m_bufferNumericLiterals = enabled;
+    }
+
     bool ToWgslVisitor::beginNode(NodeBase const & node)
     {
         if (m_functionClosed)
@@ -119,7 +124,7 @@ namespace gladius::nodes
         }
 
         auto const & value = variantParameter->getValue();
-        if (parameter.isModifiable())
+        if (parameter.isModifiable() || m_bufferNumericLiterals)
         {
             auto const lookupIndex = const_cast<IParameter &>(parameter).getLookUpIndex();
             if (lookupIndex < 0)

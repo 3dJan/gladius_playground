@@ -57,7 +57,7 @@ namespace gladius::compute
                 return m_core != nullptr && m_errorMessage.empty();
             }
 
-            [[nodiscard]] std::string const & getErrorMessage() const noexcept override
+            [[nodiscard]] std::string getErrorMessage() const override
             {
                 return m_errorMessage;
             }
@@ -136,18 +136,17 @@ namespace gladius::compute
                 return m_webgpuContext != nullptr && m_webgpuContext->isValid() && m_errorMessage.empty();
             }
 
-            [[nodiscard]] std::string const & getErrorMessage() const noexcept override
+            [[nodiscard]] std::string getErrorMessage() const override
             {
                 if (!m_errorMessage.empty())
                 {
                     return m_errorMessage;
                 }
-                if (m_webgpuContext && !m_webgpuContext->getErrorMessage().empty())
+                if (m_webgpuContext)
                 {
                     return m_webgpuContext->getErrorMessage();
                 }
-                static std::string const emptyMessage;
-                return emptyMessage;
+                return {};
             }
 
             [[nodiscard]] RendererCapability getCapabilities() const noexcept override

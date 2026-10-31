@@ -4,6 +4,7 @@
 #include "webgpu/WebGPUFrameShaderComposer.h"
 
 #include <atomic>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -24,14 +25,21 @@ namespace gladius::webgpu
                                 if (hasMeshes || hasBeams || hasImages)
                                 {
                                         m_composedShader = WebGPUFrameShaderComposer::composeWithResourceSupport(
-                                            m_snapshot->analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages,
+                                            m_snapshot->analyticEvaluatorWgsl,
+                                            hasMeshes,
+                                            hasBeams,
+                                            hasImages,
                                             m_snapshot->translucencyEvaluatorWgsl);
                                 }
                 else
                 {
-                    m_composedShader = WebGPUFrameShaderComposer::compose(m_snapshot->analyticEvaluatorWgsl,
-                                                                          m_snapshot->translucencyEvaluatorWgsl);
+                                        m_composedShader = WebGPUFrameShaderComposer::compose(
+                                            m_snapshot->analyticEvaluatorWgsl, m_snapshot->translucencyEvaluatorWgsl);
                 }
+                                m_parameterSnapshot = std::make_shared<const compute::RenderParameterSnapshot>(
+                                    compute::RenderParameterSnapshot{.sceneGeneration = m_snapshot->sceneGeneration,
+                                                                                                     .parameterGeneration = 0u,
+                                                                                                     .values = m_snapshot->parameterValues});
             }
 
             [[nodiscard]] compute::ComputeBackendKind getBackendKind() const noexcept override
@@ -49,6 +57,21 @@ namespace gladius::webgpu
                 return m_snapshot->requiredCapabilities;
             }
 
+            [[nodiscard]] bool updateParameterSnapshot(
+              std::shared_ptr<const compute::RenderParameterSnapshot> snapshot) noexcept override
+            {
+                if (!snapshot || !snapshot->isValid() ||
+                    snapshot->sceneGeneration != m_snapshot->sceneGeneration ||
+                    snapshot->values.size() != m_snapshot->parameterValues.size())
+                {
+                    return false;
+                }
+
+                std::scoped_lock lock{m_parameterMutex};
+                m_parameterSnapshot = std::move(snapshot);
+                return true;
+            }
+
             [[nodiscard]] compute::RenderSceneSnapshot const & getSnapshot() const noexcept
             {
                 return *m_snapshot;
@@ -60,6 +83,13 @@ namespace gladius::webgpu
                 return m_snapshot;
             }
 
+            [[nodiscard]] std::shared_ptr<const compute::RenderParameterSnapshot>
+            getParameterSnapshot() const noexcept
+            {
+                std::scoped_lock lock{m_parameterMutex};
+                return m_parameterSnapshot;
+            }
+
             [[nodiscard]] std::string const & getComposedShader() const noexcept
             {
                 return m_composedShader;
@@ -67,6 +97,8 @@ namespace gladius::webgpu
 
           private:
             std::shared_ptr<const compute::RenderSceneSnapshot> m_snapshot;
+            mutable std::mutex m_parameterMutex;
+            std::shared_ptr<const compute::RenderParameterSnapshot> m_parameterSnapshot;
             std::string m_composedShader;
         };
 
@@ -75,10 +107,13 @@ namespace gladius::webgpu
           public:
             WebGPUFrameRenderSubmission(std::unique_ptr<compute::IFrameSubmission> submission,
                                         compute::RenderRequest request,
-                                        std::shared_ptr<const compute::RenderSceneSnapshot> snapshot)
+                                                                                std::shared_ptr<const compute::RenderSceneSnapshot> snapshot,
+                                                                                std::shared_ptr<const compute::RenderParameterSnapshot>
+                                                                                    parameterSnapshot)
                 : m_submission{std::move(submission)}
                 , m_request{std::move(request)}
                 , m_snapshot{std::move(snapshot)}
+                                , m_parameterSnapshot{std::move(parameterSnapshot)}
             {
             }
 
@@ -157,10 +192,12 @@ namespace gladius::webgpu
             std::unique_ptr<compute::IFrameSubmission> m_submission;
             compute::RenderRequest m_request;
             std::shared_ptr<const compute::RenderSceneSnapshot> m_snapshot;
+            std::shared_ptr<const compute::RenderParameterSnapshot> m_parameterSnapshot;
             std::atomic_bool m_cancelRequested{false};
         };
 
         [[nodiscard]] compute::FrameRequest createFrameRequest(compute::RenderSceneSnapshot const & scene,
+                                                               compute::RenderParameterSnapshot const & parameters,
                                                                std::string const & composedShader,
                                                                compute::RenderRequest const & request)
         {
@@ -195,7 +232,7 @@ namespace gladius::webgpu
                     .translucencyMaxSurfaces = translucencyActive ? request.settings.translucencyMaxSurfaces : 0u,
                     .modelBounds = request.modelBounds,
                     .shaderSource = composedShader,
-                    .parameterValues = scene.parameterValues,
+                    .parameterValues = parameters.values,
                     .meshPayloadTable = scene.meshResources.size() > 0u
                                           ? ([&]()
                                              {
@@ -315,12 +352,22 @@ namespace gladius::webgpu
             throw std::invalid_argument("WebGPU renderer received a scene from another backend");
         }
 
-        auto frameSubmission = m_backend->submitFrame(createFrameRequest(analyticScene->getSnapshot(),
-                                                                          analyticScene->getComposedShader(),
-                                                                          request));
+        auto const parameterSnapshot = analyticScene->getParameterSnapshot();
+        if (!parameterSnapshot || !parameterSnapshot->isValid() ||
+            parameterSnapshot->sceneGeneration != analyticScene->getSceneGeneration())
+        {
+            throw std::invalid_argument("WebGPU scene has no valid runtime parameter snapshot");
+        }
+
+                auto frameSubmission = m_backend->submitFrame(
+                    createFrameRequest(analyticScene->getSnapshot(),
+                                                         *parameterSnapshot,
+                                                         analyticScene->getComposedShader(),
+                                                         request));
         return std::make_unique<WebGPUFrameRenderSubmission>(std::move(frameSubmission),
-                                      std::move(request),
-                                      analyticScene->getSharedSnapshot());
+                                                                                                                        std::move(request),
+                                                                                                                        analyticScene->getSharedSnapshot(),
+                                                                                                                        parameterSnapshot);
     }
 
     std::unique_ptr<compute::IRenderSubmission> WebGPUComputeRenderer::submitFrame(compute::RenderRequest)

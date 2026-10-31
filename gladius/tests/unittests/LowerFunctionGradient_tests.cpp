@@ -182,6 +182,52 @@ namespace gladius_tests
         EXPECT_EQ(functionCallCount, 6u);
     }
 
+    TEST(LowerFunctionGradientTests, Lower_AllOutputsConsumed_RewiresEveryConsumerBeforeRemoval)
+    {
+        Assembly assembly;
+        auto mainModel = assembly.assemblyModel();
+        mainModel->createBeginEndWithDefaultInAndOuts();
+        assembly.addModelIfNotExisting(ReferencedFunctionId);
+        auto referencedModel = assembly.findModel(ReferencedFunctionId);
+        configureReferencedModel(*referencedModel);
+        auto * gradient = addGradientNode(*mainModel, *referencedModel);
+        auto * sum = mainModel->create<gladius::nodes::Addition>();
+        ASSERT_TRUE(mainModel->addLink(gradient->getOutputs().at(gladius::nodes::FieldNames::NormalizedGradient).getId(),
+                                      sum->parameter().at(gladius::nodes::FieldNames::A).getId()));
+        ASSERT_TRUE(mainModel->addLink(gradient->getOutputs().at(gladius::nodes::FieldNames::Gradient).getId(),
+                                      sum->parameter().at(gladius::nodes::FieldNames::B).getId()));
+        connectToColor(*mainModel, sum->getOutputs().at(gladius::nodes::FieldNames::Result));
+        auto & shape = mainModel->getEndNode()->parameter().at(gladius::nodes::FieldNames::Shape);
+        ASSERT_TRUE(mainModel->addLink(gradient->getOutputs().at(gladius::nodes::FieldNames::Magnitude).getId(),
+                                      shape.getId()));
+        auto const gradientId = gradient->getId();
+
+        LowerFunctionGradient lowering{assembly};
+        lowering.run();
+
+        ASSERT_FALSE(lowering.hadErrors());
+        EXPECT_FALSE(mainModel->getNode(gradientId).has_value());
+        FunctionCall * call = nullptr;
+        for (auto & [id, node] : *mainModel)
+        {
+            if (auto * candidate = dynamic_cast<FunctionCall *>(node.get()))
+            {
+                call = candidate;
+            }
+        }
+        ASSERT_NE(call, nullptr);
+        auto const expectSource = [&](VariantParameter const & parameter, std::string const & output)
+        {
+            auto const & source = parameter.getConstSource();
+            ASSERT_TRUE(source.has_value());
+            EXPECT_EQ(source->port, &call->getOutputs().at(output));
+            EXPECT_EQ(source->nodeId, call->getId());
+        };
+        expectSource(sum->parameter().at(gladius::nodes::FieldNames::A), gladius::nodes::FieldNames::NormalizedGradient);
+        expectSource(sum->parameter().at(gladius::nodes::FieldNames::B), gladius::nodes::FieldNames::Gradient);
+        expectSource(shape, gladius::nodes::FieldNames::Magnitude);
+    }
+
     TEST(LowerFunctionGradientTests, ReusesLoweredFunctionForIdenticalGradients)
     {
         Assembly assembly;

@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace gladius::tests
@@ -52,6 +54,39 @@ namespace gladius::tests
         {
             int const value = co_await throwingTask();
             co_return value;
+        }
+
+        bool canAcquireFromOtherThread(std::recursive_mutex& deviceMutex)
+        {
+            bool acquired = false;
+            std::thread probe([&]
+            {
+                std::unique_lock<std::recursive_mutex> lock(deviceMutex, std::try_to_lock);
+                acquired = lock.owns_lock();
+            });
+            probe.join();
+            return acquired;
+        }
+
+        compute::AsyncTask<int> scopedDeviceTask(std::recursive_mutex& deviceMutex,
+                                                bool& readbackReady,
+                                                int& submissions,
+                                                bool& analysisHadUnlockedDevice)
+        {
+            for (int batch = 0; batch < 2; ++batch)
+            {
+                {
+                    std::unique_lock<std::recursive_mutex> const lock(deviceMutex);
+                    ++submissions;
+                }
+                co_await compute::WaitUntil([&readbackReady] { return readbackReady; });
+                analysisHadUnlockedDevice = canAcquireFromOtherThread(deviceMutex);
+                if (batch == 0)
+                {
+                    co_await compute::AsyncYield{};
+                }
+            }
+            co_return submissions;
         }
     } // namespace
 
@@ -132,5 +167,55 @@ namespace gladius::tests
 
         EXPECT_EQ(result, 3);
         EXPECT_EQ(pumps, 3);
+    }
+
+    TEST(AsyncTask, Step_ScopedDeviceTransaction_ReleasesGateBeforeWaitAnalysisAndYield)
+    {
+        std::recursive_mutex deviceMutex;
+        bool readbackReady = false;
+        int submissions = 0;
+        bool analysisHadUnlockedDevice = false;
+        auto task = scopedDeviceTask(deviceMutex, readbackReady, submissions, analysisHadUnlockedDevice);
+
+        EXPECT_EQ(submissions, 0);
+        task.step();
+        EXPECT_EQ(submissions, 1);
+        EXPECT_FALSE(task.done());
+        EXPECT_TRUE(canAcquireFromOtherThread(deviceMutex));
+
+        task.step();
+        EXPECT_EQ(submissions, 1);
+        EXPECT_TRUE(canAcquireFromOtherThread(deviceMutex));
+
+        readbackReady = true;
+        task.step();
+        EXPECT_TRUE(analysisHadUnlockedDevice);
+        EXPECT_EQ(submissions, 1);
+        EXPECT_FALSE(task.done());
+        EXPECT_TRUE(canAcquireFromOtherThread(deviceMutex));
+
+        task.step();
+        EXPECT_TRUE(task.done());
+        EXPECT_EQ(task.take(), 2);
+        EXPECT_TRUE(analysisHadUnlockedDevice);
+        EXPECT_TRUE(canAcquireFromOtherThread(deviceMutex));
+    }
+
+    TEST(AsyncTask, Destroy_SuspendedScopedDeviceTransaction_LeavesGateAvailable)
+    {
+        std::recursive_mutex deviceMutex;
+        bool readbackReady = false;
+        int submissions = 0;
+        bool analysisHadUnlockedDevice = false;
+        {
+            auto task = scopedDeviceTask(deviceMutex, readbackReady, submissions, analysisHadUnlockedDevice);
+            task.step();
+            EXPECT_FALSE(task.done());
+            EXPECT_TRUE(canAcquireFromOtherThread(deviceMutex));
+        }
+
+        EXPECT_EQ(submissions, 1);
+        EXPECT_FALSE(analysisHadUnlockedDevice);
+        EXPECT_TRUE(canAcquireFromOtherThread(deviceMutex));
     }
 } // namespace gladius::tests

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <string>
 
 #ifdef Always
@@ -28,15 +30,20 @@ namespace gladius::webgpu
      */
     class WebGPUComputeContext
     {
+      private:
+        struct CallbackState;
+
       public:
         WebGPUComputeContext();
+        ~WebGPUComputeContext();
 
         [[nodiscard]] bool isValid() const noexcept;
-        [[nodiscard]] std::string const & getErrorMessage() const noexcept;
+        [[nodiscard]] std::string getErrorMessage() const;
 
         void processEvents() const;
 
-        /// RAII guard serializing device/queue access across threads.
+        /// RAII guard for a synchronous device transaction, including callback mapping and handle release.
+        /// Never retain this guard across coroutine suspension or CPU batch generation/analysis.
         class DeviceLock
         {
           public:
@@ -48,6 +55,7 @@ namespace gladius::webgpu
             DeviceLock & operator=(DeviceLock &&) = delete;
 
           private:
+            std::shared_ptr<CallbackState> m_callbackState;
             std::unique_lock<std::recursive_mutex> m_lock;
         };
 
@@ -58,10 +66,7 @@ namespace gladius::webgpu
         // Returns true until initialize() completes or fails.  Polled by the
         // UI so that the browser can show a status while the WebGPU adapter
         // and device are still being requested.
-        [[nodiscard]] bool isInitializing() const noexcept
-        {
-            return !m_isValid && m_errorMessage.empty();
-        }
+        [[nodiscard]] bool isInitializing() const;
 
       #ifdef __EMSCRIPTEN__
         /// Complete browser-side device setup after the spontaneous callback has returned.
@@ -84,13 +89,15 @@ namespace gladius::webgpu
       #endif
         void setDeviceLost(wgpu::DeviceLostReason reason, wgpu::StringView message);
         void setUncapturedError(wgpu::ErrorType type, wgpu::StringView message);
+        void setErrorMessage(std::string message);
 
+        std::shared_ptr<CallbackState> m_callbackState;
         wgpu::Instance m_instance;
         wgpu::Adapter m_adapter;
         wgpu::Device m_device;
         wgpu::Queue m_queue;
-        bool m_isValid{};
+        std::atomic<bool> m_isValid{false};
+        mutable std::mutex m_errorMutex;
         std::string m_errorMessage;
-        mutable std::recursive_mutex m_deviceMutex;
     };
 }

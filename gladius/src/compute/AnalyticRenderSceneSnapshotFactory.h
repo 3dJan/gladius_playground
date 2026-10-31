@@ -42,5 +42,19 @@ namespace gladius::compute
         [[nodiscard]] static RenderSceneSnapshot create(nodes::Assembly const & assembly,
                                                         std::uint64_t sceneGeneration,
                                                         ResourceManager const * resourceManager);
+
+        /// Build runtime numerical storage and origin fan-out on a detached assembly.
+        [[nodiscard]] static RenderSceneSnapshot createRuntime(nodes::Assembly const & assembly,
+                                                               std::uint64_t sceneGeneration,
+                                                               ResourceManager const * resourceManager = nullptr);
+
+            private:
+                [[nodiscard]] static RenderSceneSnapshot createModel(nodes::Model & model,
+                                                                                                                         std::uint64_t sceneGeneration,
+                                                                                                                         bool bufferNumericLiterals);
+                [[nodiscard]] static RenderSceneSnapshot createModel(nodes::Model & model,
+                                                                                                                         std::uint64_t sceneGeneration,
+                                                                                                                         ResourceManager const & resourceManager,
+                                                                                                                         bool bufferNumericLiterals);
     };
 }

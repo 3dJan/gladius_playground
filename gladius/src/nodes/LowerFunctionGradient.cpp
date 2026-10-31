@@ -610,10 +610,12 @@ namespace gladius::nodes
 
         call->resolveFunctionId();
 
-        auto & gradientOut = gradient.getOutputs().at(FieldNames::NormalizedGradient);
-        auto & callOut = call->getOutputs().at(FieldNames::NormalizedGradient);
-        callOut.setIsUsed(gradientOut.isUsed());
-        rewireConsumers(parentModel, gradientOut, callOut);
+        for (auto & [name, gradientOut] : gradient.getOutputs())
+        {
+            auto & callOut = call->getOutputs().at(name);
+            callOut.setIsUsed(gradientOut.isUsed());
+            rewireConsumers(parentModel, gradientOut, callOut);
+        }
 
         parentModel.remove(gradient.getId());
         parentModel.invalidateGraph();
@@ -652,6 +654,7 @@ namespace gladius::nodes
         targetParam.setInputSourceRequired(sourceParam.isInputSourceRequired());
         targetParam.setModifiable(sourceParam.isModifiable());
         targetParam.setValid(sourceParam.isValid());
+        targetParam.setOrigin(sourceParam.getOrigin());
         if (sourceParam.isArgument())
         {
             targetParam.marksAsArgument();

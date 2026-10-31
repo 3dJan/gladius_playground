@@ -35,7 +35,7 @@ namespace gladius::webgpu
         explicit WebGPUSdfEvaluator(std::shared_ptr<WebGPUComputeContext> context);
 
         [[nodiscard]] bool isAvailable() const noexcept;
-        [[nodiscard]] std::string const & getErrorMessage() const noexcept;
+        [[nodiscard]] std::string getErrorMessage() const;
         [[nodiscard]] compute::SdfEvaluationResult evaluate(compute::SdfEvaluationRequest request) const;
 
         /// @brief Evaluate generated positions in bounded batches, retaining GPU buffers between batches.

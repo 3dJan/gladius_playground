@@ -56,6 +56,16 @@ namespace gladius::compute
         [[nodiscard]] virtual ComputeBackendKind getBackendKind() const noexcept = 0;
         [[nodiscard]] virtual std::uint64_t getSceneGeneration() const noexcept = 0;
         [[nodiscard]] virtual RendererCapability getCapabilities() const noexcept = 0;
+
+        /// @brief Publish numeric values for future submissions without replacing scene structure.
+        ///
+        /// Implementations must retain snapshots already captured by in-flight submissions.
+        [[nodiscard]] virtual bool updateParameterSnapshot(
+          std::shared_ptr<const RenderParameterSnapshot> snapshot) noexcept
+        {
+            (void) snapshot;
+            return false;
+        }
     };
 
     /**

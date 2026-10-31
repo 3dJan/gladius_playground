@@ -4214,7 +4214,7 @@ namespace gladius::ui
             bool const contoursNeedUpdate = m_parameterDirty || m_contoursDirty;
             if (m_parameterDirty)
             {
-                m_doc->updateFlatAssembly();
+                m_doc->updateFlatAssemblyParameterValues();
                 m_renderWindow.invalidateViewDueToParameterChange();
             }
             if (contoursNeedUpdate)

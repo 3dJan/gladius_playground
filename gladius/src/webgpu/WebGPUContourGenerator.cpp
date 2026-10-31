@@ -21,10 +21,9 @@ namespace gladius::webgpu
         return m_context && m_context->isValid();
     }
 
-    std::string const & WebGPUContourGenerator::getErrorMessage() const noexcept
+    std::string WebGPUContourGenerator::getErrorMessage() const
     {
-        static std::string const empty;
-        return m_context ? m_context->getErrorMessage() : empty;
+        return m_context ? m_context->getErrorMessage() : std::string{};
     }
 
     std::optional<slicer::SdfGrid> WebGPUContourGenerator::renderSdfGrid(

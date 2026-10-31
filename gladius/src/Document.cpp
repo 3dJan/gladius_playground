@@ -74,6 +74,7 @@
 #include <fmt/format.h>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <thread>
 #include <tracy/Tracy.hpp>
 #include <utility>
@@ -818,6 +819,20 @@ namespace gladius
         try
         {
             nodes::Assembly assemblyToFlat{*m_assembly};
+            for (auto const & [modelId, model] : assemblyToFlat.getFunctions())
+            {
+                if (!model)
+                {
+                    continue;
+                }
+                for (auto const & [parameterId, parameter] : model->getParameterRegistry())
+                {
+                    if (parameter != nullptr && parameter->getId() == parameterId)
+                    {
+                        parameter->setOrigin(nodes::ParameterOrigin{modelId, parameterId});
+                    }
+                }
+            }
 
             nodes::LowerFunctionGradient gradientLowering{assemblyToFlat, getSharedLogger()};
             gradientLowering.run();
@@ -843,6 +858,81 @@ namespace gladius
             if (logger)
                 logger->addEvent(
                   {std::string("Error flattening assembly: ") + e.what(), Severity::Error});
+        }
+    }
+
+    void Document::updateFlatAssemblyParameterValues()
+    {
+        if (!m_assembly || !m_flatAssembly)
+        {
+            return;
+        }
+
+        std::map<nodes::ParameterOrigin, nodes::VariantType> valuesByOrigin;
+        for (auto const & [modelId, model] : m_assembly->getFunctions())
+        {
+            if (!model)
+            {
+                continue;
+            }
+
+            for (auto const & [parameterId, parameter] : model->getConstParameterRegistry())
+            {
+                if (parameter == nullptr || parameter->getId() != parameterId ||
+                    parameter->getConstSource().has_value())
+                {
+                    continue;
+                }
+
+                auto const * variantParameter =
+                  dynamic_cast<nodes::VariantParameter const *>(parameter);
+                if (variantParameter == nullptr)
+                {
+                    continue;
+                }
+
+                auto const & value = variantParameter->getValue();
+                if (std::holds_alternative<float>(value) ||
+                    std::holds_alternative<nodes::float3>(value) ||
+                    std::holds_alternative<nodes::Matrix4x4>(value))
+                {
+                    valuesByOrigin.insert_or_assign(
+                      nodes::ParameterOrigin{modelId, parameterId}, value);
+                }
+            }
+        }
+
+        for (auto const & [modelId, model] : m_flatAssembly->getFunctions())
+        {
+            (void) modelId;
+            if (!model)
+            {
+                continue;
+            }
+
+            for (auto const & [parameterId, parameter] : model->getParameterRegistry())
+            {
+                (void) parameterId;
+                if (parameter == nullptr || parameter->getConstSource().has_value() ||
+                    !parameter->getOrigin().has_value())
+                {
+                    continue;
+                }
+
+                auto const sourceValue = valuesByOrigin.find(*parameter->getOrigin());
+                if (sourceValue == valuesByOrigin.end())
+                {
+                    continue;
+                }
+
+                auto * variantParameter = dynamic_cast<nodes::VariantParameter *>(parameter);
+                if (variantParameter != nullptr &&
+                    std::type_index(nodes::getVariantType(variantParameter->getValue())) ==
+                      std::type_index(nodes::getVariantType(sourceValue->second)))
+                {
+                    variantParameter->setValue(sourceValue->second);
+                }
+            }
         }
     }
 

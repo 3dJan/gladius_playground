@@ -2,13 +2,17 @@
 
 #include "compute/RenderContracts.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace gladius::compute
 {
+    class ParameterLayout;
+
     /**
      * @brief Backend-independent mesh resource payload for a render scene.
      *
@@ -62,6 +66,8 @@ namespace gladius::compute
         std::vector<MeshResourcePayload> beamLatticeResources;
         /// Word-aligned image stack payloads indexed by image resource id (sparse; empty entries invalid).
         std::vector<ImageResourcePayload> imageResources;
+        /// Present for runtime-storage builds; shared unchanged by numerical updates.
+        std::shared_ptr<ParameterLayout const> parameterLayout;
 
         [[nodiscard]] bool isValid() const noexcept
         {
@@ -142,6 +148,21 @@ namespace gladius::compute
                 break;
             }
             return !declaresImages || hasValidImagePayload;
+        }
+    };
+
+    /// Immutable numeric values captured by a frame or bounds submission.
+    struct RenderParameterSnapshot
+    {
+        std::uint64_t sceneGeneration{};
+        std::uint64_t parameterGeneration{};
+        std::vector<float> values;
+
+        [[nodiscard]] bool isValid() const noexcept
+        {
+            return sceneGeneration != 0u &&
+                   std::all_of(values.begin(), values.end(), [](float const value)
+                               { return std::isfinite(value); });
         }
     };
 }

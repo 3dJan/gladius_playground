@@ -284,6 +284,8 @@ namespace gladius
         void invalidatePrimitiveData();
         nodes::SharedAssembly getAssembly() const;
         nodes::SharedAssembly getFlatAssembly() const;
+        /// @brief Copy runtime numeric values into the cached flattened model without rebuilding its graph.
+        void updateFlatAssemblyParameterValues();
 
         /**
          * @brief Get the current assembly filename

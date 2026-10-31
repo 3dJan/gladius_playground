@@ -38,7 +38,7 @@ namespace gladius::webgpu
         explicit WebGPUContourGenerator(std::shared_ptr<WebGPUComputeContext> context);
 
         [[nodiscard]] bool isAvailable() const noexcept;
-        [[nodiscard]] std::string const & getErrorMessage() const noexcept;
+        [[nodiscard]] std::string getErrorMessage() const;
 
         /**
          * @brief Evaluate the composed model SDF on the request grid via WebGPU.

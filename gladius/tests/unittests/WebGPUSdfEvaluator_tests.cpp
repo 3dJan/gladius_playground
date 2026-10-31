@@ -11,9 +11,81 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace gladius::tests
 {
+    TEST(WebGPUSdfEvaluator, EvaluateGeneratedAsync_CancelledBeforeStart_DoesNotAccessDeviceOrCallbacks)
+    {
+        webgpu::WebGPUSdfEvaluator evaluator(nullptr);
+        int cancellationChecks = 0;
+        int sourceCalls = 0;
+        int sinkCalls = 0;
+        auto task = evaluator.evaluateGeneratedAsync(
+          {},
+          1u,
+          [&sourceCalls](std::size_t, std::size_t, std::vector<std::array<float, 3>> &)
+          { ++sourceCalls; },
+          [&sinkCalls](std::size_t, std::vector<float> &&) { ++sinkCalls; },
+          [&cancellationChecks]
+          {
+              ++cancellationChecks;
+              return true;
+          });
+
+        EXPECT_EQ(cancellationChecks, 0);
+        EXPECT_EQ(sourceCalls, 0);
+        EXPECT_EQ(sinkCalls, 0);
+        EXPECT_FALSE(task.done());
+
+        task.step();
+
+        ASSERT_TRUE(task.done());
+        EXPECT_FALSE(task.take());
+        EXPECT_EQ(cancellationChecks, 1);
+        EXPECT_EQ(sourceCalls, 0);
+        EXPECT_EQ(sinkCalls, 0);
+    }
+
+    TEST(WebGPUSdfEvaluator, EvaluateGeneratedAsync_EmptyInput_CompletesWithoutDevice)
+    {
+        webgpu::WebGPUSdfEvaluator evaluator(nullptr);
+        auto task = evaluator.evaluateGeneratedAsync({}, 0u, {}, {});
+
+        EXPECT_FALSE(task.done());
+        task.step();
+
+        ASSERT_TRUE(task.done());
+        EXPECT_TRUE(task.take());
+    }
+
+    TEST(WebGPUSdfEvaluator, EvaluateColorsGeneratedAsync_CancelledBeforeStart_DoesNotAccessDevice)
+    {
+        webgpu::WebGPUSdfEvaluator evaluator(nullptr);
+        compute::SdfEvaluationRequest request;
+        request.returnColor = true;
+        int cancellationChecks = 0;
+        int sinkCalls = 0;
+        auto task = evaluator.evaluateColorsGeneratedAsync(
+          std::move(request),
+          1u,
+          {},
+          [&sinkCalls](std::size_t, std::vector<std::array<float, 3>> &&) { ++sinkCalls; },
+          [&cancellationChecks]
+          {
+              ++cancellationChecks;
+              return true;
+          });
+
+        EXPECT_EQ(cancellationChecks, 0);
+        task.step();
+
+        ASSERT_TRUE(task.done());
+        EXPECT_FALSE(task.take());
+        EXPECT_EQ(cancellationChecks, 1);
+        EXPECT_EQ(sinkCalls, 0);
+    }
+
     TEST(WebGPUSdfEvaluator, ReturnsRawFloatValuesForNonMultiplePointCount)
     {
         if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)

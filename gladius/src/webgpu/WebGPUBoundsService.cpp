@@ -25,6 +25,8 @@ namespace gladius::webgpu
     {
         mutable std::mutex mutex;
         std::shared_ptr<const compute::RenderSceneSnapshot> snapshot;
+        std::shared_ptr<const compute::RenderParameterSnapshot> parameters;
+        bool hasExplicitParameterSnapshot{};
         std::optional<compute::BoundsResult> cachedResult;
     };
 
@@ -223,6 +225,7 @@ namespace gladius::webgpu
         [[nodiscard]] compute::AsyncTask<compute::BoundsResult> determineBoundsAsync(
           std::shared_ptr<WebGPUComputeContext> context,
           std::shared_ptr<const compute::RenderSceneSnapshot> snapshot,
+                    std::shared_ptr<const compute::RenderParameterSnapshot> parameters,
           compute::BoundsRequest request,
           std::atomic_bool const & cancelRequested)
         {
@@ -256,6 +259,16 @@ namespace gladius::webgpu
                                     compute::BoundsErrorCode::NoScene,
                                     "WebGPU bounds service has no valid analytic scene snapshot");
             }
+            if (!parameters || !parameters->isValid() ||
+                parameters->sceneGeneration != request.freshness.sceneGeneration ||
+                parameters->parameterGeneration != request.freshness.parameterGeneration ||
+                parameters->values.size() != snapshot->parameterValues.size())
+            {
+                co_return makeError(request,
+                                    compute::BoundsResultStatus::Stale,
+                                    compute::BoundsErrorCode::Stale,
+                                    "WebGPU bounds request does not match the published parameter snapshot");
+            }
 
             std::array<float, 3> const extent{
               request.probeDomain.max[0] - request.probeDomain.min[0],
@@ -274,7 +287,8 @@ namespace gladius::webgpu
             std::vector<float> values(dimensions->count,
                                       std::numeric_limits<float>::quiet_NaN());
             auto const & pointDimensions = dimensions->points;
-            auto baseRequest = makeSdfEvaluationRequest(*snapshot, request.probeSettings.isoValue);
+                        auto baseRequest = makeSdfEvaluationRequest(
+                            *snapshot, *parameters, request.probeSettings.isoValue);
             WebGPUSdfEvaluator evaluator{context};
 
             bool const completed = co_await evaluator.evaluateGeneratedAsync(
@@ -496,10 +510,12 @@ namespace gladius::webgpu
 
             WebGPUBoundsSubmission(ResultPoll poll,
                                    std::shared_ptr<const compute::RenderSceneSnapshot> snapshot,
+                                   std::shared_ptr<const compute::RenderParameterSnapshot> parameters,
                                    std::function<void(compute::BoundsResult const &)> publish,
                                    std::shared_ptr<std::atomic_bool> cancelRequested)
                 : m_poll{std::move(poll)}
                 , m_snapshot{std::move(snapshot)}
+                , m_parameters{std::move(parameters)}
                 , m_publish{std::move(publish)}
                 , m_cancelRequested{std::move(cancelRequested)}
             {
@@ -628,6 +644,7 @@ namespace gladius::webgpu
             mutable std::mutex m_mutex;
             ResultPoll m_poll;
             std::shared_ptr<const compute::RenderSceneSnapshot> m_snapshot;
+            std::shared_ptr<const compute::RenderParameterSnapshot> m_parameters;
             std::function<void(compute::BoundsResult const &)> m_publish;
             std::shared_ptr<std::atomic_bool> m_cancelRequested;
             mutable compute::BoundsSubmissionStatus m_status{
@@ -657,7 +674,36 @@ namespace gladius::webgpu
       std::shared_ptr<const compute::RenderSceneSnapshot> snapshot) noexcept
     {
         std::scoped_lock lock{m_state->mutex};
-        m_state->snapshot = std::move(snapshot);
+        try
+        {
+            if (snapshot)
+            {
+                m_state->parameters = std::make_shared<const compute::RenderParameterSnapshot>(
+                  compute::RenderParameterSnapshot{.sceneGeneration = snapshot->sceneGeneration,
+                                                   .parameterGeneration = 0u,
+                                                   .values = snapshot->parameterValues});
+            }
+            else
+            {
+                m_state->parameters.reset();
+            }
+            m_state->hasExplicitParameterSnapshot = false;
+            m_state->snapshot = std::move(snapshot);
+        }
+        catch (...)
+        {
+            m_state->parameters.reset();
+            m_state->hasExplicitParameterSnapshot = false;
+            m_state->snapshot = std::move(snapshot);
+        }
+    }
+
+    void WebGPUBoundsService::setParameterSnapshot(
+      std::shared_ptr<const compute::RenderParameterSnapshot> snapshot) noexcept
+    {
+        std::scoped_lock lock{m_state->mutex};
+        m_state->parameters = std::move(snapshot);
+        m_state->hasExplicitParameterSnapshot = m_state->parameters != nullptr;
     }
 
     std::optional<compute::BoundsResult>
@@ -694,9 +740,13 @@ namespace gladius::webgpu
         }
 
         std::shared_ptr<const compute::RenderSceneSnapshot> snapshot;
+        std::shared_ptr<const compute::RenderParameterSnapshot> parameters;
+        bool hasExplicitParameterSnapshot{};
         {
             std::scoped_lock lock{m_state->mutex};
             snapshot = m_state->snapshot;
+            parameters = m_state->parameters;
+            hasExplicitParameterSnapshot = m_state->hasExplicitParameterSnapshot;
         }
         if (!snapshot)
         {
@@ -706,6 +756,15 @@ namespace gladius::webgpu
               compute::BoundsErrorCode::NoScene,
               "WebGPU bounds service has no published scene snapshot"));
         }
+        if (!hasExplicitParameterSnapshot && parameters &&
+            parameters->sceneGeneration == request.freshness.sceneGeneration)
+        {
+            parameters = std::make_shared<const compute::RenderParameterSnapshot>(
+              compute::RenderParameterSnapshot{
+                                .sceneGeneration = parameters->sceneGeneration,
+                                .parameterGeneration = request.freshness.parameterGeneration,
+                                .values = parameters->values});
+        }
         if (snapshot->sceneGeneration != request.freshness.sceneGeneration)
         {
             return std::make_unique<WebGPUBoundsSubmission>(makeError(
@@ -713,6 +772,17 @@ namespace gladius::webgpu
               compute::BoundsResultStatus::Stale,
               compute::BoundsErrorCode::Stale,
               "WebGPU bounds request does not match the published scene snapshot"));
+        }
+        if (!parameters || !parameters->isValid() ||
+            parameters->sceneGeneration != request.freshness.sceneGeneration ||
+            parameters->parameterGeneration != request.freshness.parameterGeneration ||
+            parameters->values.size() != snapshot->parameterValues.size())
+        {
+            return std::make_unique<WebGPUBoundsSubmission>(makeError(
+              request,
+              compute::BoundsResultStatus::Stale,
+              compute::BoundsErrorCode::Stale,
+              "WebGPU bounds request does not match the published parameter snapshot"));
         }
         if (!compute::hasCapability(snapshot->requiredCapabilities,
                                    compute::RendererCapability::AnalyticRendering))
@@ -737,7 +807,7 @@ namespace gladius::webgpu
             // Single-threaded browser: the probe is a coroutine advanced by progress()/getStatus(), so
             // GPU readbacks suspend and return control to the JS event loop instead of blocking it.
             auto task = std::make_shared<compute::AsyncTask<compute::BoundsResult>>(
-              determineBoundsAsync(m_context, snapshot, request, *cancelRequested));
+                            determineBoundsAsync(m_context, snapshot, parameters, request, *cancelRequested));
             WebGPUBoundsSubmission::ResultPoll poll =
               [cancelRequested, task](bool const) -> std::optional<compute::BoundsResult>
             {
@@ -754,10 +824,10 @@ namespace gladius::webgpu
 #else
             auto future = std::make_shared<std::future<compute::BoundsResult>>(std::async(
               std::launch::async,
-              [context = m_context, snapshot, request, cancelRequested]()
+              [context = m_context, snapshot, parameters, request, cancelRequested]()
               {
                   return compute::runBlocking(
-                    determineBoundsAsync(context, snapshot, request, *cancelRequested),
+                  determineBoundsAsync(context, snapshot, parameters, request, *cancelRequested),
                     [context] { context->processEvents(); });
               }));
             WebGPUBoundsSubmission::ResultPoll poll =
@@ -773,6 +843,7 @@ namespace gladius::webgpu
 #endif
             return std::make_unique<WebGPUBoundsSubmission>(std::move(poll),
                                                               std::move(snapshot),
+                                                              std::move(parameters),
                                                               std::move(publish),
                                                               std::move(cancelRequested));
         }

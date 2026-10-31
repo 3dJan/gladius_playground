@@ -34,7 +34,7 @@ namespace gladius::compute
 
         [[nodiscard]] virtual ComputeBackendKind getBackendKind() const noexcept = 0;
         [[nodiscard]] virtual bool isAvailable() const noexcept = 0;
-        [[nodiscard]] virtual std::string const & getErrorMessage() const noexcept = 0;
+        [[nodiscard]] virtual std::string getErrorMessage() const = 0;
         [[nodiscard]] virtual RendererCapability getCapabilities() const noexcept = 0;
 
         /// @brief Transitional OpenCL adapter; null for a pure WebGPU runtime.

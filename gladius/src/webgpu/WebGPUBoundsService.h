@@ -23,6 +23,8 @@ namespace gladius::webgpu
         [[nodiscard]] bool isAvailable() const noexcept override;
         void setSceneSnapshot(
           std::shared_ptr<const compute::RenderSceneSnapshot> snapshot) noexcept override;
+        void setParameterSnapshot(
+          std::shared_ptr<const compute::RenderParameterSnapshot> snapshot) noexcept override;
         [[nodiscard]] std::optional<compute::BoundsResult>
         getCachedResult(compute::RenderFreshnessStamp const & freshness) const noexcept override;
         [[nodiscard]] std::unique_ptr<compute::IBoundsSubmission>

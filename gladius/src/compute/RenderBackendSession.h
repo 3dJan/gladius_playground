@@ -6,6 +6,11 @@
 #include <memory>
 #include <string>
 
+namespace gladius::nodes
+{
+  class Assembly;
+}
+
 namespace gladius::compute
 {
     /**
@@ -29,11 +34,20 @@ namespace gladius::compute
         [[nodiscard]] std::uint64_t getSceneGeneration() const noexcept;
         [[nodiscard]] std::shared_ptr<const RenderSceneSnapshot>
         getSceneSnapshot() const noexcept;
+        [[nodiscard]] std::shared_ptr<const RenderParameterSnapshot>
+        getParameterSnapshot() const noexcept;
         [[nodiscard]] IBoundsService * getBoundsService() noexcept;
         [[nodiscard]] std::string const & getErrorMessage() const noexcept;
 
         /// @brief Materialize and atomically replace the active scene on success.
-        [[nodiscard]] bool replaceScene(RenderSceneSnapshot snapshot) noexcept;
+        [[nodiscard]] bool replaceScene(
+          RenderSceneSnapshot snapshot,
+          std::uint64_t parameterGeneration = 0u) noexcept;
+
+        /// @brief Patch runtime numeric storage without replacing or rematerializing the scene.
+        [[nodiscard]] bool updateParameterValues(
+          nodes::Assembly const & assembly,
+          std::uint64_t parameterGeneration) noexcept;
 
         /// @brief Submit a frame against the active materialized scene.
         [[nodiscard]] std::unique_ptr<IRenderSubmission> submitFrame(RenderRequest request);
@@ -42,6 +56,7 @@ namespace gladius::compute
         std::unique_ptr<IComputeRenderer> m_renderer;
         std::unique_ptr<IRenderScene> m_scene;
         std::shared_ptr<const RenderSceneSnapshot> m_snapshot;
+        std::shared_ptr<const RenderParameterSnapshot> m_parameterSnapshot;
         std::shared_ptr<IBoundsService> m_boundsService;
         std::string m_errorMessage;
     };

@@ -102,5 +102,12 @@ namespace gladius::compute
             std::uint64_t generation,
             ResourceManager const * resourceManager = nullptr,
             std::string * errorMessage = nullptr);
+
+        /// @brief Build a WebGPU runtime scene with stable numeric parameter storage.
+        [[nodiscard]] static RenderSceneSnapshot materializeRuntimeScene(
+            nodes::Assembly const & assembly,
+            std::uint64_t generation,
+            ResourceManager const * resourceManager = nullptr,
+            std::string * errorMessage = nullptr);
     };
 }

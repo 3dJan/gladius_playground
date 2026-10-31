@@ -1,4 +1,7 @@
 #include "compute/RenderBackendSession.h"
+#include "compute/ParameterLayout.h"
+#include "nodes/Assembly.h"
+#include "nodes/Parameter.h"
 
 #include <stdexcept>
 #include <utility>
@@ -51,6 +54,12 @@ namespace gladius::compute
         return m_snapshot;
     }
 
+    std::shared_ptr<const RenderParameterSnapshot>
+    RenderBackendSession::getParameterSnapshot() const noexcept
+    {
+        return m_parameterSnapshot;
+    }
+
     IBoundsService * RenderBackendSession::getBoundsService() noexcept
     {
         return m_boundsService.get();
@@ -61,7 +70,8 @@ namespace gladius::compute
         return m_errorMessage;
     }
 
-    bool RenderBackendSession::replaceScene(RenderSceneSnapshot snapshot) noexcept
+    bool RenderBackendSession::replaceScene(RenderSceneSnapshot snapshot,
+                                            std::uint64_t const parameterGeneration) noexcept
     {
         try
         {
@@ -89,11 +99,24 @@ namespace gladius::compute
                 return false;
             }
 
+            auto parameterSnapshot = std::make_shared<const RenderParameterSnapshot>(
+              RenderParameterSnapshot{.sceneGeneration = sharedSnapshot->sceneGeneration,
+                                      .parameterGeneration = parameterGeneration,
+                                      .values = sharedSnapshot->parameterValues});
+            if (!parameterSnapshot->isValid())
+            {
+                m_errorMessage = "Render scene contains an invalid parameter snapshot";
+                return false;
+            }
+            (void) scene->updateParameterSnapshot(parameterSnapshot);
+
             if (m_boundsService)
             {
                 m_boundsService->setSceneSnapshot(sharedSnapshot);
+                m_boundsService->setParameterSnapshot(parameterSnapshot);
             }
             m_snapshot = std::move(sharedSnapshot);
+            m_parameterSnapshot = std::move(parameterSnapshot);
             m_scene = std::move(scene);
             m_errorMessage.clear();
             return true;
@@ -106,6 +129,86 @@ namespace gladius::compute
         catch (...)
         {
             m_errorMessage = "Render scene materialization failed";
+            return false;
+        }
+    }
+
+    bool RenderBackendSession::updateParameterValues(nodes::Assembly const & assembly,
+                                                     std::uint64_t const parameterGeneration) noexcept
+    {
+        try
+        {
+            if (!m_scene || !m_snapshot || !m_parameterSnapshot ||
+                !m_snapshot->parameterLayout)
+            {
+                m_errorMessage = "Materialized scene has no runtime parameter layout";
+                return false;
+            }
+
+            auto values = m_parameterSnapshot->values;
+            auto const & layout = *m_snapshot->parameterLayout;
+            for (auto const & [modelId, model] : assembly.getFunctions())
+            {
+                if (!model)
+                {
+                    continue;
+                }
+
+                for (auto const & [parameterId, parameter] : model->getConstParameterRegistry())
+                {
+                    if (parameter == nullptr || parameter->getId() != parameterId)
+                    {
+                        continue;
+                    }
+
+                    auto const origin = nodes::ParameterOrigin{modelId, parameterId};
+                    if (layout.getDestinations(origin).empty())
+                    {
+                        continue;
+                    }
+
+                    auto const * variantParameter =
+                      dynamic_cast<nodes::VariantParameter const *>(parameter);
+                    if (variantParameter == nullptr ||
+                        !layout.apply(origin,
+                                      variantParameter->getValue(),
+                                      m_snapshot->sceneGeneration,
+                                      values))
+                    {
+                        m_errorMessage = "Unable to pack runtime parameter " +
+                                         std::to_string(parameterId);
+                        return false;
+                    }
+                }
+            }
+
+            auto parameterSnapshot = std::make_shared<const RenderParameterSnapshot>(
+              RenderParameterSnapshot{.sceneGeneration = m_snapshot->sceneGeneration,
+                                      .parameterGeneration = parameterGeneration,
+                                      .values = std::move(values)});
+            if (!parameterSnapshot->isValid() ||
+                !m_scene->updateParameterSnapshot(parameterSnapshot))
+            {
+                m_errorMessage = "Render backend rejected the runtime parameter snapshot";
+                return false;
+            }
+
+            if (m_boundsService)
+            {
+                m_boundsService->setParameterSnapshot(parameterSnapshot);
+            }
+            m_parameterSnapshot = std::move(parameterSnapshot);
+            m_errorMessage.clear();
+            return true;
+        }
+        catch (std::exception const & error)
+        {
+            m_errorMessage = error.what();
+            return false;
+        }
+        catch (...)
+        {
+            m_errorMessage = "Runtime parameter update failed";
             return false;
         }
     }

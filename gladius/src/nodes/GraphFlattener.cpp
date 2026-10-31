@@ -320,6 +320,10 @@ namespace gladius::nodes
             auto const & inputSource = input.getConstSource();
             if (!inputSource.has_value())
             {
+                if (!input.isInputSourceRequired())
+                {
+                    continue;
+                }
                 throw std::runtime_error(fmt::format("Input {} of function call {} has no source",
                                                      inputName,
                                                      functionCall.getUniqueName()));
@@ -461,6 +465,14 @@ namespace gladius::nodes
 
         auto const & input = inputIt->second;
         auto const & inputSource = input.getConstSource();
+        if (!inputSource.has_value() && !input.isInputSourceRequired())
+        {
+            parameter.setValue(input.getValue());
+            parameter.setModifiable(input.isModifiable());
+            parameter.setInputSourceRequired(false);
+            parameter.setOrigin(input.getOrigin());
+            return;
+        }
         if (!inputSource.has_value() || !inputSource.value().port)
         {
             throw std::runtime_error(fmt::format("Input {} has no valid source", sourcePortName));
@@ -628,6 +640,16 @@ namespace gladius::nodes
             auto const & sourceInOriginalModel = parameter->getSource();
             if (!sourceInOriginalModel.has_value())
             {
+                auto const * literal = dynamic_cast<VariantParameter const *>(parameter);
+                auto * consumer = dynamic_cast<VariantParameter *>(input);
+                if (literal && consumer && !literal->isInputSourceRequired())
+                {
+                    consumer->setValue(literal->getValue());
+                    consumer->setModifiable(literal->isModifiable());
+                    consumer->setInputSourceRequired(false);
+                    consumer->setOrigin(literal->getOrigin());
+                    continue;
+                }
                 throw std::runtime_error(fmt::format("Parameter {} of node {} has no source",
                                                      inputSourcePortName,
                                                      endNode->getUniqueName()));
@@ -638,6 +660,18 @@ namespace gladius::nodes
             {
                 throw std::runtime_error(
                   fmt::format("Parent node of output {} not found", inputSourcePortName));
+            }
+
+            if (dynamic_cast<Begin *>(parentNodeInOriginalModel.value()))
+            {
+                auto * targetParameter = dynamic_cast<VariantParameter *>(input);
+                if (!targetParameter)
+                {
+                    throw std::runtime_error("Function output consumer has an unsupported parameter type");
+                }
+                connectBeginNodeInput(target, functionCall, *targetParameter,
+                                      sourceInOriginalModel->shortName);
+                continue;
             }
 
             auto const & parentNodeNameInOriginalModel =

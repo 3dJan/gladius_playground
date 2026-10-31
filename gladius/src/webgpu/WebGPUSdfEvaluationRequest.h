@@ -10,4 +10,10 @@ namespace gladius::webgpu
       compute::RenderSceneSnapshot const & snapshot,
       float isoValue = 0.0F,
       bool returnColor = false);
+
+    [[nodiscard]] compute::SdfEvaluationRequest makeSdfEvaluationRequest(
+      compute::RenderSceneSnapshot const & snapshot,
+      compute::RenderParameterSnapshot const & parameters,
+      float isoValue = 0.0F,
+      bool returnColor = false);
 }

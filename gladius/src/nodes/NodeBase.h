@@ -260,6 +260,7 @@ namespace gladius::nodes
                 bool wasInputSourceRequired{true};
                 bool wasConsumedByFunction{false};
                 bool wasValid{true};
+                std::optional<ParameterOrigin> origin;
 
                 if (iter != m_parameter.end())
                 {
@@ -272,6 +273,7 @@ namespace gladius::nodes
                     wasInputSourceRequired = iter->second.isInputSourceRequired();
                     wasConsumedByFunction = iter->second.isConsumedByFunction();
                     wasValid = iter->second.isValid();
+                    origin = iter->second.getOrigin();
                 }
 
                 if (iter == m_parameter.end() || iter->second.getTypeIndex() != expectedType)
@@ -291,6 +293,7 @@ namespace gladius::nodes
                 parameterRef.setInputSourceRequired(wasInputSourceRequired);
                 parameterRef.setConsumedByFunction(wasConsumedByFunction);
                 parameterRef.setValid(wasValid);
+                parameterRef.setOrigin(origin);
 
                 if (!wasVisible)
                 {

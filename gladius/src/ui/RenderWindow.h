@@ -10,6 +10,7 @@
 #endif
 #include "render/AsyncRenderController.h"
 #include "render/NeutralRenderScheduler.h"
+#include "render/ParameterInteractionPolicy.h"
 #include "render/FramePresenter.h"
 #include "render/RealtimeRaymarchController.h"
 #include "RenderTranslucencyControls.h"
@@ -323,6 +324,32 @@ namespace gladius::ui
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
         void finishParameterInteraction();
 
+        /// @brief Drive neutral settlement even when readiness or resize defers rendering.
+        void updateNeutralParameterInteraction()
+        {
+            if (!m_neutralBackendActive ||
+                m_renderUpdateCoordinator.interactionState() !=
+                  async_rendering::RenderInteractionState::ParameterInteracting)
+            {
+                m_neutralParameterInteractionPolicy.reset();
+                return;
+            }
+
+            if (m_neutralParameterInteractionPolicy.consumeSettlement(
+                  async_rendering::ParameterInteractionPolicy::Clock::now()))
+            {
+                finishParameterInteraction();
+                if (m_view != nullptr)
+                {
+                    m_view->startAnimationMode();
+                }
+            }
+            else if (m_neutralParameterInteractionPolicy.hasPendingSettlement() && m_view != nullptr)
+            {
+                m_view->startAnimationMode();
+            }
+        }
+
         /// Render a single full-quality realtime frame synchronously on the UI thread.
         /// Pushes the latest parameters to the GPU, submits the OpenCL render kernel,
         /// blocks until the GPU is done, then immediately promotes the result to the
@@ -589,6 +616,7 @@ namespace gladius::ui
         compute::RenderFreshnessStamp m_neutralBoundsFreshness{};
         bool m_neutralBoundsFailed{false};
         bool m_neutralBackendActive{false};
+        async_rendering::ParameterInteractionPolicy m_neutralParameterInteractionPolicy;
         std::uint32_t m_neutralViewportWidth{0u};
         std::uint32_t m_neutralViewportHeight{0u};
         std::uint64_t m_lastNeutralDiagnosticSceneGeneration{0u};

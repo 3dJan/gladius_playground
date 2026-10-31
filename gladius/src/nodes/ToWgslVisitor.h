@@ -29,6 +29,9 @@ namespace gladius::nodes
         [[nodiscard]] std::size_t getRequiredParameterCount() const noexcept;
         [[nodiscard]] bool usesParameter(ParameterId parameterId) const noexcept;
 
+        /// Buffer numeric literals too, without changing persisted/OpenCL modifiability.
+        void setBufferNumericLiterals(bool enabled);
+
         /// @brief Select the End-node channel returned by the generated entry point.
         /// Must be set before the model is visited; defaults to ShapeAndColor.
         void setEvaluatorChannel(EvaluatorChannel channel);
@@ -114,5 +117,6 @@ namespace gladius::nodes
         mutable std::size_t m_requiredParameterCount{};
         mutable std::set<ParameterId> m_requiredParameterIds;
         bool m_functionClosed{};
+        bool m_bufferNumericLiterals{};
     };
 }

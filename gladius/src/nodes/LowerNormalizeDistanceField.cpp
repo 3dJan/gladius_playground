@@ -447,6 +447,7 @@ namespace gladius::nodes
         targetParam.setInputSourceRequired(sourceParam.isInputSourceRequired());
         targetParam.setModifiable(sourceParam.isModifiable());
         targetParam.setValid(sourceParam.isValid());
+        targetParam.setOrigin(sourceParam.getOrigin());
         if (sourceParam.isArgument())
         {
             targetParam.marksAsArgument();

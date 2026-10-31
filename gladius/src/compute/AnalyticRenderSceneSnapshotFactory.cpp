@@ -1,4 +1,5 @@
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
+#include "compute/ParameterLayout.h"
 
 #include "BeamLatticeResource.h"
 #include "BeamPayloadSerializer.h"
@@ -10,8 +11,11 @@
 #include "SpatialMeshResource.h"
 #include "nodes/Assembly.h"
 #include "nodes/GraphFlattener.h"
+#include "nodes/LowerFunctionGradient.h"
+#include "nodes/LowerNormalizeDistanceField.h"
 #include "nodes/Model.h"
 #include "nodes/ModelUtils.h"
+#include "nodes/OptimizeOutputs.h"
 #include "nodes/Parameter.h"
 #include "nodes/ToWgslVisitor.h"
 
@@ -26,13 +30,21 @@ namespace gladius::compute
 {
     namespace
     {
-        void assignParameterLookupIndices(nodes::Model & model)
+        void assignParameterLookupIndices(nodes::Model & model, bool const bufferNumericLiterals)
         {
             int nextIndex = 0;
             for (auto const & [parameterId, parameter] : model.getParameterRegistry())
             {
-                if (parameter == nullptr || parameter->getId() != parameterId || !parameter->isModifiable() ||
+                if (parameter == nullptr || parameter->getId() != parameterId ||
+                    (!parameter->isModifiable() && !bufferNumericLiterals) ||
                     parameter->getConstSource().has_value())
+                {
+                    continue;
+                }
+
+                auto const type = parameter->getTypeIndex();
+                if (bufferNumericLiterals && type != nodes::ParameterTypeIndex::Float &&
+                    type != nodes::ParameterTypeIndex::Float3 && type != nodes::ParameterTypeIndex::Matrix4)
                 {
                     continue;
                 }
@@ -44,9 +56,10 @@ namespace gladius::compute
 
         void writeParameterValues(nodes::IParameter const & parameter,
                                   std::vector<float> & parameterValues,
-                                  std::vector<bool> & assignedValues)
+                                  std::vector<bool> & assignedValues,
+                                  bool const bufferNumericLiterals)
         {
-            if (!parameter.isModifiable() || parameter.getConstSource().has_value())
+            if ((!parameter.isModifiable() && !bufferNumericLiterals) || parameter.getConstSource().has_value())
             {
                 return;
             }
@@ -124,7 +137,7 @@ namespace gladius::compute
 
         /// @brief Emit `fn evaluateTranslucency` for models exposing a scalar translucency channel.
         /// An empty result means the model is opaque and the renderer keeps first-hit shading.
-        TranslucencyEvaluator createTranslucencyEvaluator(nodes::Model & model)
+        TranslucencyEvaluator createTranslucencyEvaluator(nodes::Model & model, bool const bufferNumericLiterals)
         {
             TranslucencyEvaluator result;
             if (!nodes::isQualifiedForTranslucency(model))
@@ -135,6 +148,7 @@ namespace gladius::compute
             try
             {
                 nodes::ToWgslVisitor visitor;
+                visitor.setBufferNumericLiterals(bufferNumericLiterals);
                 visitor.setEvaluatorChannel(nodes::EvaluatorChannel::Translucency);
                 model.visitNodes(visitor);
 
@@ -168,20 +182,29 @@ namespace gladius::compute
     RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(nodes::Model & model,
                                                                     std::uint64_t const sceneGeneration)
     {
-        assignParameterLookupIndices(model);
+        return createModel(model, sceneGeneration, false);
+    }
+
+    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::createModel(nodes::Model & model,
+                                                                       std::uint64_t const sceneGeneration,
+                                                                       bool const bufferNumericLiterals)
+    {
+        assignParameterLookupIndices(model, bufferNumericLiterals);
 
         nodes::ToWgslVisitor visitor;
+        visitor.setBufferNumericLiterals(bufferNumericLiterals);
         model.visitNodes(visitor);
 
         std::ostringstream evaluator;
         visitor.write(evaluator);
 
-        auto const translucencyEvaluator = createTranslucencyEvaluator(model);
+        auto const translucencyEvaluator = createTranslucencyEvaluator(model, bufferNumericLiterals);
 
         auto const requiredCount =
             std::max(visitor.getRequiredParameterCount(), translucencyEvaluator.parameterCount);
         std::vector<float> parameterValues(requiredCount, 0.0f);
         std::vector<bool> assignedValues(parameterValues.size(), false);
+        auto layout = bufferNumericLiterals ? std::make_shared<ParameterLayout>(sceneGeneration) : nullptr;
         for (auto const & [parameterId, parameter] : model.getConstParameterRegistry())
         {
             bool const used = (parameter != nullptr) && (parameter->getId() == parameterId) &&
@@ -191,7 +214,12 @@ namespace gladius::compute
             {
                 continue;
             }
-            writeParameterValues(*parameter, parameterValues, assignedValues);
+            writeParameterValues(*parameter, parameterValues, assignedValues, bufferNumericLiterals);
+            if (layout && parameter->getOrigin().has_value() && !parameter->getConstSource().has_value())
+            {
+                layout->add(*parameter->getOrigin(), static_cast<std::size_t>(parameter->getLookUpIndex()),
+                            parameter->getTypeIndex());
+            }
         }
 
         return {.sceneGeneration = sceneGeneration,
@@ -201,13 +229,21 @@ namespace gladius::compute
                                               RendererCapability::TranslucentRendering,
                 .analyticEvaluatorWgsl = evaluator.str(),
                 .translucencyEvaluatorWgsl = translucencyEvaluator.source,
-                .parameterValues = std::move(parameterValues)};
+                .parameterValues = std::move(parameterValues),
+                .parameterLayout = std::move(layout)};
     }
 
     RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(
       nodes::Model & model, std::uint64_t const sceneGeneration, ResourceManager const & resourceManager)
     {
-        auto snapshot = create(model, sceneGeneration);
+                return createModel(model, sceneGeneration, resourceManager, false);
+        }
+
+        RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::createModel(
+            nodes::Model & model, std::uint64_t const sceneGeneration, ResourceManager const & resourceManager,
+            bool const bufferNumericLiterals)
+        {
+                auto snapshot = createModel(model, sceneGeneration, bufferNumericLiterals);
 
         // Collect mesh resource ids referenced by the lowered model. The visitor emits
         // gladiusSignedDistanceToMesh(pos, id) calls; the ids must match payload entries.
@@ -391,5 +427,46 @@ namespace gladius::compute
             return create(*flattenedModel, sceneGeneration, *resourceManager);
         }
         return create(*flattenedModel, sceneGeneration);
+    }
+
+    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::createRuntime(
+      nodes::Assembly const & assembly, std::uint64_t const sceneGeneration,
+      ResourceManager const * resourceManager)
+    {
+        auto detached = assembly;
+        for (auto const & [modelId, model] : detached.getFunctions())
+        {
+            if (!model)
+            {
+                continue;
+            }
+            for (auto const & [parameterId, parameter] : model->getParameterRegistry())
+            {
+                if (parameter && parameter->getId() == parameterId && !parameter->getOrigin().has_value())
+                {
+                    parameter->setOrigin(nodes::ParameterOrigin{modelId, parameterId});
+                }
+            }
+        }
+
+        nodes::LowerNormalizeDistanceField normalize(detached);
+        normalize.run();
+        nodes::LowerFunctionGradient gradient(detached);
+        gradient.run();
+        if (normalize.hadErrors() || gradient.hadErrors())
+        {
+            throw std::runtime_error("Runtime render scene lowering failed");
+        }
+        nodes::OptimizeOutputs optimizer{&detached};
+        optimizer.optimize();
+        nodes::GraphFlattener flattener(detached);
+        auto flattened = flattener.flatten();
+        auto const model = flattened.assemblyModel();
+        if (!model)
+        {
+            throw std::runtime_error("Runtime render scene has no assembly model");
+        }
+        return resourceManager ? createModel(*model, sceneGeneration, *resourceManager, true)
+                               : createModel(*model, sceneGeneration, true);
     }
 }

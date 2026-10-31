@@ -3,6 +3,7 @@
 #include <sstream>
 
 #include "BuildParameter.h"
+#include "ParameterOrigin.h"
 #include "Port.h"
 #include "ResourceKey.h"
 #include "nodesfwd.h"
@@ -79,6 +80,17 @@ namespace gladius::nodes
             return m_parameterId;
         }
 
+        /// Runtime-only provenance, assigned on a detached structural build input.
+        void setOrigin(std::optional<ParameterOrigin> origin)
+        {
+            m_origin = std::move(origin);
+        }
+
+        [[nodiscard]] auto getOrigin() const -> std::optional<ParameterOrigin> const &
+        {
+            return m_origin;
+        }
+
         void setParentId(NodeId parentId)
         {
             m_parentId = parentId;
@@ -116,6 +128,7 @@ namespace gladius::nodes
         ParameterId m_parameterId{-1};
         NodeId m_parentId{};
         bool m_isModifiable = true;
+        std::optional<ParameterOrigin> m_origin;
     };
 
     template <typename T>

@@ -199,4 +199,38 @@ namespace gladius::compute
             return RenderSceneSnapshot{}; // Invalid snapshot on failure
         }
     }
+
+    RenderSceneSnapshot ComputeRendererFactory::materializeRuntimeScene(
+      nodes::Assembly const & assembly,
+      std::uint64_t const generation,
+      ResourceManager const * resourceManager,
+      std::string * errorMessage)
+    {
+        if (errorMessage != nullptr)
+        {
+            errorMessage->clear();
+        }
+
+        try
+        {
+            return AnalyticRenderSceneSnapshotFactory::createRuntime(
+              assembly, generation, resourceManager);
+        }
+        catch (std::exception const & error)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = error.what();
+            }
+            return RenderSceneSnapshot{};
+        }
+        catch (...)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Unknown runtime render scene materialization failure";
+            }
+            return RenderSceneSnapshot{};
+        }
+    }
 }

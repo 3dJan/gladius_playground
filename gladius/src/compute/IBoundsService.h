@@ -52,6 +52,13 @@ namespace gladius::compute
           (void) snapshot;
         }
 
+        /// @brief Publish numeric values independently of the immutable scene payload.
+        virtual void setParameterSnapshot(
+          std::shared_ptr<const RenderParameterSnapshot> snapshot) noexcept
+        {
+          (void) snapshot;
+        }
+
         /// @brief Return a result only when a cached result exists for the requested model state.
         [[nodiscard]] virtual std::optional<BoundsResult>
         getCachedResult(RenderFreshnessStamp const & freshness) const noexcept = 0;
