@@ -36,6 +36,7 @@
 #include "io/3mf/FaceColorSampler.h"
 #include "io/3mf/IndexedTriangleMesh3mfWriter.h"
 #include "io/3mf/MmuSegmentationWriter.h"
+#include "io/3mf/PreparedDiscreteColorExport.h"
 #include "io/IndexedTriangleMeshWriter.h"
 #include "webgpu/WebGPUContourGenerator.h"
 #include "webgpu/WebGPUDualContouringExporter.h"
@@ -1457,6 +1458,12 @@ namespace gladius
             throwIfCancelled();
             report(0.3, "Generating mesh");
             io::IndexedTriangleMesh mesh;
+            auto manifoldOptions = request.extraction.manifoldDualContouring;
+            bool const coloredManifold = isManifold && !isStl && request.color.exportWithColors && hasVolumetricColor;
+            if (coloredManifold)
+            {
+                manifoldOptions = io::makeUnsimplifiedColorExtractionOptions(manifoldOptions);
+            }
             switch (request.extraction.method)
             {
             case io::SurfaceExtractionMethod::DualContouring:
@@ -1471,7 +1478,7 @@ namespace gladius
                   context,
                   *exportSnapshot,
                   *bounds,
-                  request.extraction.manifoldDualContouring,
+                  manifoldOptions,
                   shouldCancel);
                 break;
 #endif
@@ -1548,7 +1555,10 @@ namespace gladius
                 {
                     report(0.65, "Sampling model colors");
                     auto const wantsMmuSamples =
-                      request.color.targetApplication != io::TargetApplication::None;
+                                            request.color.targetApplication != io::TargetApplication::None ||
+                                            (coloredManifold &&
+                                             (request.extraction.manifoldDualContouring.simplificationMethod != io::SimplificationMethod::None ||
+                                                request.extraction.manifoldDualContouring.enableSimplification));
                     std::vector<io::FaceColors> sampleSets;
                     io::FaceColors faceColors;
                     if (wantsMmuSamples)
@@ -1559,6 +1569,7 @@ namespace gladius
                           mesh,
                           request.color.convertToSrgb,
                           shouldCancel);
+                        if (sampleSets.empty()) throw std::runtime_error("Color sampling produced no sample sets");
                         faceColors = sampleSets.front();
                     }
                     else
@@ -1578,7 +1589,7 @@ namespace gladius
                       io::ColorCompatibilityPlanner::decide(request.color,
                                                             uniqueColorCount,
                                                             hasTransparency);
-                    if (m_logger)
+                    if (m_logger && !io::isDiscreteColorRepresentation(decision.finalRepresentation))
                     {
                         for (auto const & warning : decision.warnings)
                         {
@@ -1596,14 +1607,30 @@ namespace gladius
                     {
                         auto const mmu = decision.finalRepresentation ==
                                          io::ExportRepresentation::ProprietaryMmuSegmentation;
-                        std::uint32_t const defaultLimit = static_cast<std::uint32_t>(
-                          std::min(uniqueColorCount,
-                                   mmu ? static_cast<std::size_t>(io::MmuSegmentationWriter::MAX_EXTRUDERS)
-                                       : std::size_t{256u}));
-                        auto const maxPalette = request.color.maxPaletteSize.value_or(defaultLimit);
-                        auto palette = mmu && !sampleSets.empty()
-                                         ? io::ColorQuantizer::quantizeOversampled(sampleSets, maxPalette)
-                                         : io::ColorQuantizer::quantize(faceColors, maxPalette);
+                        auto prepared = io::prepareDiscreteColorExport(request.color, faceColors, sampleSets);
+                        if (m_logger)
+                        {
+                            for (auto const & warning : prepared.decision.warnings)
+                            {
+                                m_logger->addEvent({warning, events::Severity::Warning});
+                            }
+                        }
+                        auto & palette = prepared.palette;
+                        if (coloredManifold)
+                        {
+                            report(0.75, "Simplifying material interiors");
+                            auto const warning = io::simplifyColoredMesh(
+                                mesh, palette, request.extraction.manifoldDualContouring, throwIfCancelled,
+                                [&report](int progress)
+                                {
+                                    report(0.75 + 0.1 * static_cast<double>(progress) / 100.0,
+                                           "Simplifying material interiors");
+                                });
+                            if (warning && m_logger) m_logger->addEvent({*warning, events::Severity::Warning});
+                        }
+                        io::validateDiscretePalette(palette, mesh.indices.size() / 3U);
+                        throwIfCancelled();
+                        report(0.9, "Writing colored 3MF");
                         if (mmu)
                         {
                             writer.exportMeshWithMmuSegmentation(request.filename, mesh, meshName, palette, std::move(thumbnailPng));

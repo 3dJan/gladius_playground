@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace gladius::compute
@@ -85,24 +86,37 @@ namespace gladius::compute
             return errM;
         }
 
-        /// Compute the minimum-error edge for a triangle and store minEdgeIdx
+        /// Protected vertices cannot participate in a collapse, including candidate ranking.
+        float candidateError(std::uint32_t first,
+                             std::uint32_t second,
+                             std::vector<Eigen::Vector3f> const & positions,
+                             std::vector<SymMat> const & quadrics,
+                             std::vector<bool> const & protectedVertices)
+        {
+            if (!protectedVertices.empty() &&
+                (protectedVertices[first] || protectedVertices[second]))
+            {
+                return std::numeric_limits<float>::infinity();
+            }
+            Eigen::Vector3f dummy;
+            return edgeError(quadrics[first], quadrics[second], positions[first], positions[second], dummy);
+        }
+
+        /// Compute the minimum-error eligible edge for a triangle and store minEdgeIdx
         float evalTriMinEdge(std::uint32_t t,
                              std::vector<std::uint32_t> const & indices,
                              std::vector<Eigen::Vector3f> const & positions,
                              std::vector<SymMat> const & quadrics,
-                             std::vector<TriInfo> & tris)
+                             std::vector<TriInfo> & tris,
+                             std::vector<bool> const & protectedVertices)
         {
             auto const i0 = indices[t * 3U + 0U];
             auto const i1 = indices[t * 3U + 1U];
             auto const i2 = indices[t * 3U + 2U];
 
-            Eigen::Vector3f dummy;
-            float const err0 = edgeError(quadrics[i0], quadrics[i1],
-                                         positions[i0], positions[i1], dummy);
-            float const err1 = edgeError(quadrics[i1], quadrics[i2],
-                                         positions[i1], positions[i2], dummy);
-            float const err2 = edgeError(quadrics[i2], quadrics[i0],
-                                         positions[i2], positions[i0], dummy);
+            float const err0 = candidateError(i0, i1, positions, quadrics, protectedVertices);
+            float const err1 = candidateError(i1, i2, positions, quadrics, protectedVertices);
+            float const err2 = candidateError(i2, i0, positions, quadrics, protectedVertices);
 
             float minErr = err0;
             std::uint8_t minIdx = 0U;
@@ -333,12 +347,18 @@ namespace gladius::compute
         /// Compact the mesh: remove deleted triangles and unreferenced vertices
         void compactMeshFast(std::vector<Eigen::Vector3f> & positions,
                              std::vector<std::uint32_t> & indices,
-                             std::vector<TriInfo> const & tris)
+                             std::vector<TriInfo> const & tris,
+                             std::vector<std::uint32_t> * faceLabels)
         {
             std::size_t const triCount = indices.size() / 3U;
 
             std::vector<std::uint32_t> newIndices;
             newIndices.reserve(indices.size());
+            std::vector<std::uint32_t> newLabels;
+            if (faceLabels != nullptr)
+            {
+                newLabels.reserve(triCount);
+            }
             for (std::size_t t = 0U; t < triCount; ++t)
             {
                 if (tris[t].deleted) continue;
@@ -349,6 +369,10 @@ namespace gladius::compute
                 newIndices.push_back(i0);
                 newIndices.push_back(i1);
                 newIndices.push_back(i2);
+                if (faceLabels != nullptr)
+                {
+                    newLabels.push_back((*faceLabels)[t]);
+                }
             }
 
             std::vector<std::uint32_t> remap(positions.size(), UINT32_MAX);
@@ -377,16 +401,58 @@ namespace gladius::compute
 
             positions = std::move(newPositions);
             indices = std::move(newIndices);
+            if (faceLabels != nullptr)
+            {
+                *faceLabels = std::move(newLabels);
+            }
         }
-    } // anonymous namespace
 
-    std::size_t fastQemSimplify(
+    std::size_t fastQemSimplifyImpl(
         std::vector<Eigen::Vector3f> & positions,
         std::vector<std::uint32_t> & indices,
+        std::vector<std::uint32_t> * faceLabels,
         FastQemConfig const & config,
         std::function<void()> throwOnCancel,
         std::function<void(int)> progressFn)
     {
+        if (indices.size() % 3U != 0U ||
+            (faceLabels != nullptr && faceLabels->size() != indices.size() / 3U))
+        {
+            throw std::invalid_argument("Mesh triangles and face labels must have matching cardinality");
+        }
+        if (config.cancelCheckPeriod == 0U || !std::isfinite(config.targetReductionPercent) ||
+            config.targetReductionPercent < 0.0F || config.targetReductionPercent > 100.0F ||
+            std::isnan(config.maxError) || config.maxError < 0.0F ||
+            !std::isfinite(config.flipThreshold) || config.flipThreshold < -1.0F || config.flipThreshold > 1.0F)
+        {
+            throw std::invalid_argument("Invalid mesh simplification configuration");
+        }
+        if (throwOnCancel)
+        {
+            throwOnCancel();
+        }
+        for (std::size_t i = 0U; i < indices.size(); ++i)
+        {
+            if (throwOnCancel && i % 1024U == 0U)
+            {
+                throwOnCancel();
+            }
+            if (indices[i] >= positions.size())
+            {
+                throw std::invalid_argument("Mesh simplification index is out of range");
+            }
+        }
+        for (std::size_t i = 0U; i < positions.size(); ++i)
+        {
+            if (throwOnCancel && i % 1024U == 0U)
+            {
+                throwOnCancel();
+            }
+            if (!positions[i].allFinite())
+            {
+                throw std::invalid_argument("Mesh simplification positions must be finite");
+            }
+        }
         if (positions.empty() || indices.size() < 3U)
         {
             return 0U;
@@ -419,6 +485,8 @@ namespace gladius::compute
         // Weld duplicate vertices: merge vertices at the same position into a
         // single canonical index.  This fixes cracks from dual contouring where
         // different octree cells emit separate vertices at the same location.
+        // Labeled meshes retain their original sheets and face semantics.
+        if (faceLabels == nullptr)
         {
             struct Float3Hash
             {
@@ -513,6 +581,10 @@ namespace gladius::compute
             std::size_t const triCount = indices.size() / 3U;
             for (std::uint32_t t = 0U; t < static_cast<std::uint32_t>(triCount); ++t)
             {
+                if (throwOnCancel && t % 1024U == 0U)
+                {
+                    throwOnCancel();
+                }
                 vtx2tri[indices[t * 3U + 0U]].push_back(t);
                 vtx2tri[indices[t * 3U + 1U]].push_back(t);
                 vtx2tri[indices[t * 3U + 2U]].push_back(t);
@@ -525,6 +597,10 @@ namespace gladius::compute
 
         for (std::uint32_t t = 0U; t < static_cast<std::uint32_t>(initialTriCount); ++t)
         {
+            if (throwOnCancel && t % 1024U == 0U)
+            {
+                throwOnCancel();
+            }
             auto const i0 = indices[t * 3U + 0U];
             auto const i1 = indices[t * 3U + 1U];
             auto const i2 = indices[t * 3U + 2U];
@@ -541,6 +617,33 @@ namespace gladius::compute
             quadrics[i0] += q;
             quadrics[i1] += q;
             quadrics[i2] += q;
+        }
+
+        std::vector<bool> protectedVertices;
+        if (faceLabels != nullptr)
+        {
+            protectedVertices.resize(positions.size(), false);
+            for (std::size_t v = 0U; v < vtx2tri.size(); ++v)
+            {
+                if (throwOnCancel && v % 1024U == 0U)
+                {
+                    throwOnCancel();
+                }
+                std::optional<std::uint32_t> material;
+                for (auto const t : vtx2tri[v])
+                {
+                    if (tris[t].deleted) continue;
+                    auto const label = (*faceLabels)[t];
+                    if (material.has_value() && *material != label)
+                    {
+                        protectedVertices[v] = true;
+                        break;
+                    }
+                    material = label;
+                }
+            }
+            // Interior-only collapses cannot introduce a new material at either endpoint,
+            // so initial conservative locks remain valid throughout simplification.
         }
 
         // Per-triangle heap index tracking (indexed by triangle index)
@@ -568,7 +671,11 @@ namespace gladius::compute
             if (tris[t].deleted) continue;
             TriError te;
             te.triIdx = t;
-            te.value = evalTriMinEdge(t, indices, positions, quadrics, tris);
+            if (throwOnCancel && t % 1024U == 0U)
+            {
+                throwOnCancel();
+            }
+            te.value = evalTriMinEdge(t, indices, positions, quadrics, tris, protectedVertices);
             pq.push(te);
         }
 
@@ -583,10 +690,11 @@ namespace gladius::compute
         // should stop.
         std::size_t popsSinceLastCollapse = 0U;
         std::size_t pqSizeAfterLastCollapse = pq.size();
+        std::size_t candidatesChecked = 0U;
 
         while (!pq.empty() && currentTriCount > targetTriCount)
         {
-            if (throwOnCancel && (totalCollapsed % config.cancelCheckPeriod == 0U))
+            if (throwOnCancel && (candidatesChecked++ % config.cancelCheckPeriod == 0U))
             {
                 throwOnCancel();
             }
@@ -615,7 +723,7 @@ namespace gladius::compute
             auto const triIdx = best.triIdx;
             if (tris[triIdx].deleted) continue;
 
-            if (best.value > config.maxError)
+            if (!std::isfinite(best.value) || best.value > config.maxError)
             {
                 break;
             }
@@ -631,13 +739,9 @@ namespace gladius::compute
             auto const ti0 = indices[triIdx * 3U + 0U];
             auto const ti1 = indices[triIdx * 3U + 1U];
             auto const ti2 = indices[triIdx * 3U + 2U];
-            Eigen::Vector3f dummy;
-            float const err0 = edgeError(quadrics[ti0], quadrics[ti1],
-                                         positions[ti0], positions[ti1], dummy);
-            float const err1 = edgeError(quadrics[ti1], quadrics[ti2],
-                                         positions[ti1], positions[ti2], dummy);
-            float const err2 = edgeError(quadrics[ti2], quadrics[ti0],
-                                         positions[ti2], positions[ti0], dummy);
+            float const err0 = candidateError(ti0, ti1, positions, quadrics, protectedVertices);
+            float const err1 = candidateError(ti1, ti2, positions, quadrics, protectedVertices);
+            float const err2 = candidateError(ti2, ti0, positions, quadrics, protectedVertices);
 
             std::array<std::uint8_t, 3> edgeOrder = {0U, 1U, 2U};
             std::array<float, 3> const edgeErr = {err0, err1, err2};
@@ -653,7 +757,7 @@ namespace gladius::compute
 
             for (auto const edgeIdx : edgeOrder)
             {
-                if (edgeErr[edgeIdx] > config.maxError)
+                if (!std::isfinite(edgeErr[edgeIdx]) || edgeErr[edgeIdx] > config.maxError)
                 {
                     break;
                 }
@@ -819,7 +923,7 @@ namespace gladius::compute
                 for (auto const t : vtx2tri[id0])
                 {
                     if (tris[t].deleted) continue;
-                    float const newErr = evalTriMinEdge(t, indices, positions, quadrics, tris);
+                    float const newErr = evalTriMinEdge(t, indices, positions, quadrics, tris, protectedVertices);
                     if (triHeapIdx[t] < pq.size() &&
                         pq[triHeapIdx[t]].triIdx == static_cast<std::uint32_t>(t))
                     {
@@ -853,9 +957,35 @@ namespace gladius::compute
             progressFn(100);
         }
 
-        compactMeshFast(positions, indices, tris);
+        if (throwOnCancel)
+        {
+            throwOnCancel();
+        }
+        compactMeshFast(positions, indices, tris, faceLabels);
 
         return totalCollapsed;
+    }
+    } // anonymous namespace
+
+    std::size_t fastQemSimplify(
+        std::vector<Eigen::Vector3f> & positions,
+        std::vector<std::uint32_t> & indices,
+        FastQemConfig const & config,
+        std::function<void()> throwOnCancel,
+        std::function<void(int)> progressFn)
+    {
+        return fastQemSimplifyImpl(positions, indices, nullptr, config, throwOnCancel, progressFn);
+    }
+
+    std::size_t fastQemSimplify(
+        std::vector<Eigen::Vector3f> & positions,
+        std::vector<std::uint32_t> & indices,
+        std::vector<std::uint32_t> & faceLabels,
+        FastQemConfig const & config,
+        std::function<void()> throwOnCancel,
+        std::function<void(int)> progressFn)
+    {
+        return fastQemSimplifyImpl(positions, indices, &faceLabels, config, throwOnCancel, progressFn);
     }
 
 } // namespace gladius::compute

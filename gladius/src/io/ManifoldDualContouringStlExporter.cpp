@@ -2,7 +2,9 @@
 
 #include "3mf/MeshColorExportPipeline.h"
 #include "3mf/MeshSamplingGeometry.h"
+#include "3mf/FaceColorSampler.h"
 #include "MeshExporter.h"
+#include "MeshExportJob.h"
 #include "WindingRepair.h"
 
 #include "ComputeContext.h"
@@ -131,6 +133,10 @@ namespace gladius::io
                     m_state = State::Idle;
                 }
             }
+            catch (MeshExportCancelled const &)
+            {
+                m_state = State::Idle;
+            }
             catch (std::exception const & ex)
             {
                 m_state = State::Failed;
@@ -247,8 +253,10 @@ namespace gladius::io
         config.sharpFeatureAngleThreshold = m_options.sharpFeatureAngleThreshold;
         config.subdivisionIterations = m_options.subdivisionIterations;
         config.projectToSurface = m_options.projectToSurface;
+        auto const extractionOptions = m_exportWithColors && m_outputFormat == MeshOutputFileFormat::ThreeMF
+                         ? makeUnsimplifiedColorExtractionOptions(m_options) : m_options;
         // Simplification method mapping
-        switch (m_options.simplificationMethod)
+        switch (extractionOptions.simplificationMethod)
         {
             case SimplificationMethod::None:
                 config.simplificationMethod = compute::SimplificationMethod::None;
@@ -260,7 +268,7 @@ namespace gladius::io
                 config.simplificationMethod = compute::SimplificationMethod::QemSdfAware;
                 break;
         }
-        config.enableSimplification = m_options.enableSimplification;  // Legacy support
+        config.enableSimplification = extractionOptions.enableSimplification;  // Legacy support
         config.simplificationMaxSdfError = m_options.simplificationMaxSdfError;
         config.simplificationMaxQemError = m_options.simplificationMaxQemError;
         config.simplificationMaxNormalDeviation = m_options.simplificationMaxNormalDeviation;
@@ -472,6 +480,56 @@ namespace gladius::io
                                 events::Severity::Info});
         }
 
+        std::optional<PreparedDiscreteColorExport> preparedColors;
+        IndexedTriangleMesh coloredMesh;
+        bool const wantsColoredSimplification = m_exportWithColors &&
+            m_outputFormat == MeshOutputFileFormat::ThreeMF &&
+            (m_options.simplificationMethod != SimplificationMethod::None || m_options.enableSimplification);
+        if (wantsColoredSimplification)
+        {
+            auto * samplingProgram = generator.getProgramManager().getDualContouringSamplingProgram();
+            auto const primitives = generator.getPrimitives();
+            if (samplingProgram != nullptr && primitives != nullptr)
+            {
+                auto const throwIfCancelled = [this]()
+                {
+                    if (isCancellationRequested()) throw MeshExportCancelled{};
+                };
+                auto const samplingGeometry = MeshSamplingGeometry::fromIndexedTriangles(positions, repairedIndices);
+                auto const samples = FaceColorSampler::sampleFaceColorsMultipoint(
+                    samplingGeometry.vertices, samplingGeometry.faces, *samplingProgram, *primitives,
+                    [this, &throwIfCancelled](float progress)
+                    {
+                        throwIfCancelled();
+                        m_progress.store(std::max(m_progress.load(), 0.82 + 0.04 * progress), std::memory_order_relaxed);
+                    }, m_convertToSrgb);
+                throwIfCancelled();
+                if (samples.empty()) throw std::runtime_error("Color sampling produced no sample sets");
+                MeshColorExportSettings const settings{m_exportWithColors, m_convertToSrgb, m_colorMode,
+                                                       m_quantizationMode, m_targetApplication, m_maxPaletteSize};
+                preparedColors = prepareDiscreteColorExport(settings, samples.front(), samples);
+                coloredMesh.positions = positions;
+                coloredMesh.indices = repairedIndices;
+                m_progress.store(0.86, std::memory_order_relaxed);
+                auto const warning = simplifyColoredMesh(coloredMesh, preparedColors->palette, m_options, throwIfCancelled,
+                    [this](int progress)
+                    {
+                        m_progress.store(0.86 + 0.06 * static_cast<double>(progress) / 100.0, std::memory_order_relaxed);
+                    });
+                if (m_logger)
+                {
+                    for (auto const & message : preparedColors->decision.warnings)
+                    {
+                        m_logger->addEvent({message, events::Severity::Warning});
+                    }
+                    if (warning) m_logger->addEvent({*warning, events::Severity::Warning});
+                }
+                repairedIndices = std::move(coloredMesh.indices);
+                m_progress.store(0.92, std::memory_order_relaxed);
+            }
+        }
+        auto const & exportPositions = preparedColors ? coloredMesh.positions : positions;
+        auto const & exportNormals = preparedColors ? coloredMesh.normals : normals;
         Mesh convertedMesh(*computeContext);
 
         // Pre-allocate and fill the Mesh buffers in parallel using OpenMP.
@@ -493,20 +551,20 @@ namespace gladius::io
             auto const idxB = static_cast<std::size_t>(repairedIndices[base + 1U]);
             auto const idxC = static_cast<std::size_t>(repairedIndices[base + 2U]);
 
-            if (idxA >= positions.size() || idxB >= positions.size() || idxC >= positions.size())
+            if (idxA >= exportPositions.size() || idxB >= exportPositions.size() || idxC >= exportPositions.size())
             {
                 hasOutOfRangeIndex.store(true, std::memory_order_relaxed);
                 continue;
             }
 
-            Eigen::Vector3f const a = positions[idxA];
-            Eigen::Vector3f const b = positions[idxB];
-            Eigen::Vector3f const c = positions[idxC];
+            Eigen::Vector3f const a = exportPositions[idxA];
+            Eigen::Vector3f const b = exportPositions[idxB];
+            Eigen::Vector3f const c = exportPositions[idxC];
 
             Eigen::Vector3f normal = (b - a).cross(c - a);
             if (normal.squaredNorm() <= 1e-12F)
             {
-                normal = (idxA < normals.size()) ? normals[idxA]
+                normal = (idxA < exportNormals.size()) ? exportNormals[idxA]
                                                  : Eigen::Vector3f{0.0F, 0.0F, 1.0F};
             }
             else
@@ -520,11 +578,11 @@ namespace gladius::io
             verticesVec[fi * 3U + 1U] = {b.x(), b.y(), b.z(), 0.F};
             verticesVec[fi * 3U + 2U] = {c.x(), c.y(), c.z(), 0.F};
 
-            if (idxA < normals.size() && idxB < normals.size() && idxC < normals.size())
+            if (idxA < exportNormals.size() && idxB < exportNormals.size() && idxC < exportNormals.size())
             {
-                auto const& nA = normals[idxA];
-                auto const& nB = normals[idxB];
-                auto const& nC = normals[idxC];
+                auto const& nA = exportNormals[idxA];
+                auto const& nB = exportNormals[idxB];
+                auto const& nC = exportNormals[idxC];
                 vertexNormalsVec[fi * 3U + 0U] = {nA.x(), nA.y(), nA.z(), 0.F};
                 vertexNormalsVec[fi * 3U + 1U] = {nB.x(), nB.y(), nB.z(), 0.F};
                 vertexNormalsVec[fi * 3U + 2U] = {nC.x(), nC.y(), nC.z(), 0.F};
@@ -555,7 +613,8 @@ namespace gladius::io
         // Write to the appropriate format
         if (m_outputFormat == MeshOutputFileFormat::ThreeMF)
         {
-            m_progress.store(0.85, std::memory_order_relaxed);
+            double const writeStart = preparedColors ? 0.94 : 0.85;
+            m_progress.store(writeStart, std::memory_order_relaxed);
 
             MeshColorExportSettings const settings{m_exportWithColors,
                                                    m_convertToSrgb,
@@ -565,13 +624,14 @@ namespace gladius::io
                                                    m_maxPaletteSize};
 
             MeshColorExportPipelineOptions pipelineOptions{};
+            pipelineOptions.preparedColors = preparedColors ? &*preparedColors : nullptr;
             pipelineOptions.faceSamplingMode =
               m_options.simplificationMethod != SimplificationMethod::None
                 ? FaceColorSamplingMode::MajorityVote
                 : FaceColorSamplingMode::Centroid;
-            pipelineOptions.progressCallback = [this](double progress)
+            pipelineOptions.progressCallback = [this, writeStart](double progress)
             {
-                double const mappedProgress = 0.85 + (progress * 0.15);
+                double const mappedProgress = writeStart + (progress * (1.0 - writeStart));
                 m_progress.store(mappedProgress, std::memory_order_relaxed);
             };
 

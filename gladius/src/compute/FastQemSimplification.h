@@ -39,7 +39,7 @@ namespace gladius::compute
         /// Threshold for flip detection: minimum dot product between old and new normals
         float flipThreshold{0.2F};
 
-        /// How often to check for cancellation (every N collapses)
+        /// How often to check for cancellation (every N collapse candidates)
         std::uint32_t cancelCheckPeriod{16U};
     };
 
@@ -274,6 +274,21 @@ namespace gladius::compute
     std::size_t fastQemSimplify(
         std::vector<Eigen::Vector3f> & positions,
         std::vector<std::uint32_t> & indices,
+        FastQemConfig const & config,
+        std::function<void()> throwOnCancel = nullptr,
+        std::function<void(int)> progressFn = nullptr);
+
+    /**
+     * @brief Simplify material interiors while preserving the original labeled boundaries.
+     * @param faceLabels IN/OUT material ID per triangle, compacted with surviving faces.
+     * Vertices incident to different labels remain fixed. Coincident vertices are not welded
+     * because they may belong to distinct material sheets. Invalid inputs throw before mutation.
+     * Cancellation throws; callers must discard the partially modified mesh.
+     */
+    std::size_t fastQemSimplify(
+        std::vector<Eigen::Vector3f> & positions,
+        std::vector<std::uint32_t> & indices,
+        std::vector<std::uint32_t> & faceLabels,
         FastQemConfig const & config,
         std::function<void()> throwOnCancel = nullptr,
         std::function<void(int)> progressFn = nullptr);

@@ -16,6 +16,7 @@
 #include "io/3mf/ColorQuantizer.h"
 #include "io/3mf/ColorRegionizer.h"
 #include "io/3mf/MmuSegmentationWriter.h"
+#include "io/3mf/PreparedDiscreteColorExport.h"
 #include "io/3mf/SlicerConfigWriter.h"
 #include "io/3mf/ThreeMfPostProcessor.h"
 #include "nodes/Model.h"
@@ -631,9 +632,9 @@ namespace gladius::io
                     }
                 }
 
-                if (trianglesAdded == 0)
+                if (trianglesAdded != region.triangleIndices.size())
                 {
-                    continue;
+                    throw std::runtime_error("3MF triangle filtering would remove faces from a material region");
                 }
 
                 regionMeshObject->SetAllTriangleProperties(triProps);
@@ -686,6 +687,7 @@ namespace gladius::io
         {
             throw std::runtime_error("Invalid mesh for export");
         }
+        validateDiscretePalette(palette, mesh.getNumberOfFaces());
 
         try
         {
@@ -699,6 +701,10 @@ namespace gladius::io
             }
 
             auto meshObject = addMeshToModel(model3mf, mesh, meshName);
+            if (meshObject->GetTriangleCount() != palette.sourceToPaletteMap.size())
+            {
+                throw std::runtime_error("3MF triangle filtering would invalidate the per-face material assignments");
+            }
             createBuildItem(model3mf, meshObject, meshName);
 
             attachThumbnailIfRequested(model3mf, sourceDocument, writeThumbnail);

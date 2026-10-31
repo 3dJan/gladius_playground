@@ -7,6 +7,7 @@
 
 #include "ColorCompatibilityPlanner.h"
 #include "MeshSamplingGeometry.h"
+#include "PreparedDiscreteColorExport.h"
 
 #include "EventLogger.h"
 
@@ -47,6 +48,7 @@ namespace gladius::io
     {
         FaceColorSamplingMode faceSamplingMode = FaceColorSamplingMode::Centroid;
         std::function<void(double)> progressCallback;
+        PreparedDiscreteColorExport const * preparedColors = nullptr;
     };
 
     /**

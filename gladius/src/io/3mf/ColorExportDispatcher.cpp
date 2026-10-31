@@ -9,11 +9,41 @@
 #include "ColorRegionizer.h"
 #include "MeshWriter3mf.h"
 #include "MmuSegmentationWriter.h"
+#include "Mesh.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace gladius::io
 {
+
+    void dispatchPreparedColorExport(
+        MeshWriter3mf & writer,
+        std::filesystem::path const & filePath,
+        Mesh const & mesh,
+        std::string const & meshName,
+        PreparedDiscreteColorExport const & prepared,
+        Document const * sourceDocument,
+        bool writeThumbnail)
+    {
+        validateDiscretePalette(prepared.palette, mesh.getNumberOfFaces());
+        auto const representation = prepared.decision.finalRepresentation;
+        if (!isDiscreteColorRepresentation(representation))
+        {
+            throw std::invalid_argument("Prepared color dispatch requires discrete materials");
+        }
+        if (representation == ExportRepresentation::ProprietaryMmuSegmentation)
+        {
+            writer.exportMeshWithMmuSegmentation(filePath, mesh, meshName, prepared.palette, sourceDocument, writeThumbnail);
+            return;
+        }
+        auto const kind = representation == ExportRepresentation::StandardDiscreteObjects
+                            ? PrintableRegionKind::Object
+                            : (representation == ExportRepresentation::StandardBuildItems
+                                 ? PrintableRegionKind::BuildItem : PrintableRegionKind::Component);
+        auto const regions = ColorRegionizer::regionize(prepared.palette, kind);
+        writer.exportMeshWithRegions(filePath, mesh, meshName, prepared.palette, regions, sourceDocument, writeThumbnail);
+    }
 
     void dispatchColorExport(
         MeshWriter3mf& writer,
@@ -50,9 +80,7 @@ namespace gladius::io
         case ExportRepresentation::StandardDiscreteObjects:
         case ExportRepresentation::StandardBuildItems:
         {
-            std::uint32_t const maxPalette =
-                settings.maxPaletteSize.value_or(
-                    static_cast<std::uint32_t>(std::min(uniqueColors, std::size_t{256})));
+            auto const maxPalette = resolveDiscretePaletteLimit(settings, uniqueColors, false);
 
             auto palette = ColorQuantizer::quantize(faceColors, maxPalette);
 
@@ -73,12 +101,7 @@ namespace gladius::io
         }
         case ExportRepresentation::ProprietaryMmuSegmentation:
         {
-            std::uint32_t const maxPalette =
-                settings.maxPaletteSize.value_or(
-                    static_cast<std::uint32_t>(
-                        std::min(uniqueColors,
-                                 static_cast<std::size_t>(
-                                     MmuSegmentationWriter::MAX_EXTRUDERS))));
+            auto const maxPalette = resolveDiscretePaletteLimit(settings, uniqueColors, true);
 
             if (multipointSupplier)
             {

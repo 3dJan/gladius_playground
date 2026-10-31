@@ -624,14 +624,16 @@ namespace gladius::ui
             ImGui::Text("Mesh Simplification");
             
             ImGui::Checkbox("Enable mesh simplification", &m_manifoldEnableSimplification);
-            if (m_exportWithColors && m_modelHasVolumetricColor)
+            if (m_outputFormat == MeshOutputFormat::ThreeMF && m_exportWithColors &&
+                m_modelHasVolumetricColor && !m_enableShellBasedExport)
             {
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0F, 0.7F, 0.0F, 1.0F), "(!)" );
+                ImGui::TextDisabled("(?)");
                 if (ImGui::IsItemHovered())
                 {
-                    ImGui::SetTooltip("Color exports may look better with\n"
-                                      "simplification disabled.");
+                    ImGui::SetTooltip("Simplifies material interiors while keeping sampled color boundaries fixed.\n"
+                                      "Color boundaries can limit triangle reduction. Details below the\n"
+                                      "original mesh sampling resolution cannot be preserved.");
                 }
             }
             

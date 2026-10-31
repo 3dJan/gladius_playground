@@ -10,6 +10,7 @@
 
 #include "ColorCompatibilityPlanner.h"
 #include "FaceColors.h"
+#include "PreparedDiscreteColorExport.h"
 
 #include <filesystem>
 #include <functional>
@@ -31,6 +32,16 @@ namespace gladius::io
 
     /// Callback type for multi-point face color sampling (only invoked for MMU path)
     using MultipointColorSupplier = std::function<std::vector<FaceColors>()>;
+
+    /// Serialize carried material IDs without sampling or re-quantizing the palette.
+    void dispatchPreparedColorExport(
+        MeshWriter3mf & writer,
+        std::filesystem::path const & filePath,
+        Mesh const & mesh,
+        std::string const & meshName,
+        PreparedDiscreteColorExport const & prepared,
+        Document const * sourceDocument,
+        bool writeThumbnail);
 
     /**
      * @brief Dispatch colored export based on a compatibility decision

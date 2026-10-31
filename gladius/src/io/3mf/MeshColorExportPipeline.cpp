@@ -63,6 +63,18 @@ namespace gladius::io
             return result;
         }
 
+        if (options.preparedColors != nullptr)
+        {
+            auto const & prepared = *options.preparedColors;
+            dispatchPreparedColorExport(writer, filePath, mesh, meshName, prepared, sourceDocument, writeThumbnail);
+            result.representation = prepared.decision.finalRepresentation;
+            result.standardsOnly = !prepared.decision.needsProprietaryTags;
+            result.transparencyIgnored = prepared.transparencyIgnored;
+            result.warnings = prepared.decision.warnings;
+            reportProgress(options, 1.0);
+            return result;
+        }
+
         auto * samplingProgram = computeCore.getProgramManager().getDualContouringSamplingProgram();
         auto primitives = computeCore.getPrimitives();
 
