@@ -1227,6 +1227,7 @@ namespace gladius::tests
                 auto const wrapper = io::loadLib3mfScoped();
                 auto const model = wrapper->CreateModel();
                 ASSERT_NO_THROW(model->QueryReader("3mf")->ReadFromFile(path.string()));
+                EXPECT_TRUE(model->HasPackageThumbnailAttachment());
                 auto const objects = model->GetMeshObjects();
                 ASSERT_TRUE(objects->MoveNext());
                 auto const object = objects->GetCurrentMeshObject();

@@ -46,6 +46,11 @@ namespace gladius::vdb
         m_targetApplication = targetApplication;
     }
 
+    void MeshExporter3mf::setThumbnailPng(std::vector<Lib3MF_uint8> thumbnailPng)
+    {
+        m_thumbnailPng = std::move(thumbnailPng);
+    }
+
     ColoredMeshExportResult const& MeshExporter3mf::getExportResult() const
     {
         return m_exportResult;
@@ -103,8 +108,10 @@ namespace gladius::vdb
                                                              *m_computeCore,
                                                              settings,
                                                              m_sourceDocument,
-                                                             true,
-                                                             m_logger);
+                                                             !m_thumbnailPng.empty(),
+                                                             m_logger,
+                                                             {},
+                                                             m_thumbnailPng);
         }
         catch (std::exception const & e)
         {

@@ -71,6 +71,12 @@ namespace gladius::io
     {
         m_document = doc;
     }
+
+    void ManifoldDualContouringStlExporter::setThumbnailPng(
+      std::vector<Lib3MF_uint8> thumbnailPng)
+    {
+        m_thumbnailPng = std::move(thumbnailPng);
+    }
     
     void ManifoldDualContouringStlExporter::setExportWithColors(bool exportWithColors)
     {
@@ -577,9 +583,10 @@ namespace gladius::io
                                         generator,
                                         settings,
                                         m_document,
-                                        true,
+                                        !m_thumbnailPng.empty(),
                                         m_logger,
-                                        pipelineOptions);
+                                        pipelineOptions,
+                                        m_thumbnailPng);
         }
         else
         {

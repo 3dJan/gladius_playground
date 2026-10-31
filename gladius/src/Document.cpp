@@ -14,6 +14,7 @@
 #include "SpatialMeshResource.h"
 #include "TimeMeasurement.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
+#include "ComputeContext.h"
 #include "compute/ComputeCore.h"
 #include "io/DualContouringStlExporter.h"
 #include "io/ManifoldDualContouringStlExporter.h"
@@ -70,6 +71,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fmt/format.h>
+#include <functional>
 #include <iostream>
 #include <thread>
 #include <tracy/Tracy.hpp>
@@ -116,6 +118,51 @@ namespace gladius
                 compute::applyTranslucency(renderingSettings, backup);
                 throw;
             }
+        }
+
+        [[nodiscard]] std::vector<Lib3MF_uint8> renderOpenClThumbnailFromSnapshot(
+          Document const & sourceDocument,
+          std::filesystem::path const & scratchFilename,
+          events::SharedLogger const & logger)
+        {
+            auto snapshot = sourceDocument.createSaveSnapshot();
+            auto thumbnailInput = scratchFilename;
+            thumbnailInput.replace_extension(".thumbnail.3mf");
+            struct TemporaryFileCleanup
+            {
+                std::filesystem::path filename;
+
+                ~TemporaryFileCleanup()
+                {
+                    std::error_code error;
+                    std::filesystem::remove(filename, error);
+                }
+            } cleanup{thumbnailInput};
+
+            io::Writer3mf snapshotWriter(logger);
+            if (!snapshotWriter.save(thumbnailInput, snapshot, false))
+            {
+                throw std::runtime_error("Could not serialize the model snapshot for thumbnail rendering");
+            }
+
+            auto thumbnailContext = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+            if (!thumbnailContext->isValid())
+            {
+                throw std::runtime_error("No valid compute context is available for thumbnail generation");
+            }
+
+            auto thumbnailCore = std::make_shared<ComputeCore>(
+              thumbnailContext, RequiredCapabilities::ComputeOnly, logger);
+            auto thumbnailDocument = std::make_shared<Document>(thumbnailCore);
+            thumbnailDocument->setUiMode(false);
+            thumbnailDocument->load(thumbnailInput);
+            if (!thumbnailCore->prepareImageRendering())
+            {
+                throw std::runtime_error("The isolated thumbnail renderer could not prepare the snapshot model");
+            }
+
+            auto thumbnail = thumbnailCore->createThumbnailPng();
+            return std::move(thumbnail.data);
         }
 #endif
 
@@ -1331,11 +1378,10 @@ namespace gladius
 
             auto const generation =
               m_webGpuExportSceneGeneration.fetch_add(1u, std::memory_order_relaxed);
-                        hasVolumetricColor = io::FaceColorSampler::hasVolumetricColor(
-                            *flatAssembly->assemblyModel());
-            auto snapshot = compute::AnalyticRenderSceneSnapshotFactory::create(
-              *flatAssembly->assemblyModel(), generation, getResourceManager());
-                        throwIfCancelled();
+            auto & assemblyModel = *flatAssembly->assemblyModel();
+            hasVolumetricColor = io::FaceColorSampler::hasVolumetricColor(assemblyModel);
+            auto snapshot = compute::AnalyticRenderSceneSnapshotFactory::create(assemblyModel, generation, getResourceManager());
+            throwIfCancelled();
             if (!snapshot.isValid())
             {
                 throw std::runtime_error(
@@ -1443,6 +1489,37 @@ namespace gladius
             }
 
             throwIfCancelled();
+            std::vector<Lib3MF_uint8> thumbnailPng;
+            if (!isStl)
+            {
+                report(0.45, "Rendering 3MF thumbnail");
+                try
+                {
+                    auto thumbnail = co_await webgpu::WebGPUThumbnailRenderer::renderPngAsync(
+                      context,
+                      exportSnapshot,
+                      *bounds->modelBounds,
+                      256u,
+                      256u,
+                      {},
+                      [&shouldCancel]() { return shouldCancel && shouldCancel(); });
+                    throwIfCancelled();
+                    thumbnailPng.assign(thumbnail.data.begin(), thumbnail.data.end());
+                }
+                catch (std::exception const & error)
+                {
+                    throwIfCancelled();
+                    if (m_logger)
+                    {
+                        m_logger->addEvent(
+                          {fmt::format("Could not render WebGPU mesh-export thumbnail; "
+                                       "continuing without one: {}",
+                                       error.what()),
+                           events::Severity::Warning});
+                    }
+                }
+            }
+
             if (isStl)
             {
                 report(0.9, "Writing STL");
@@ -1461,7 +1538,11 @@ namespace gladius
                            events::Severity::Warning});
                     }
                     report(0.9, "Writing geometry-only 3MF");
-                    writer.exportMesh(request.filename, mesh, meshName);
+                    writer.exportMesh(request.filename,
+                                      mesh,
+                                      meshName,
+                                      io::IndexedTriangleMeshValidationPolicy::Strict,
+                                      std::move(thumbnailPng));
                 }
                 else
                 {
@@ -1508,7 +1589,8 @@ namespace gladius
                     if (decision.finalRepresentation == io::ExportRepresentation::StandardTriangleColor ||
                         decision.finalRepresentation == io::ExportRepresentation::StandardVertexColor)
                     {
-                        writer.exportMeshWithColors(request.filename, mesh, meshName, faceColors);
+                        writer.exportMeshWithColors(
+                          request.filename, mesh, meshName, faceColors, std::move(thumbnailPng));
                     }
                     else
                     {
@@ -1524,8 +1606,7 @@ namespace gladius
                                          : io::ColorQuantizer::quantize(faceColors, maxPalette);
                         if (mmu)
                         {
-                            writer.exportMeshWithMmuSegmentation(
-                              request.filename, mesh, meshName, palette);
+                            writer.exportMeshWithMmuSegmentation(request.filename, mesh, meshName, palette, std::move(thumbnailPng));
                         }
                         else
                         {
@@ -1541,8 +1622,7 @@ namespace gladius
                                 regionKind = io::PrintableRegionKind::BuildItem;
                             }
                             auto const regions = io::ColorRegionizer::regionize(palette, regionKind);
-                            writer.exportMeshWithRegions(
-                              request.filename, mesh, meshName, palette, regions);
+                            writer.exportMeshWithRegions(request.filename, mesh, meshName, palette, regions, std::move(thumbnailPng));
                         }
                     }
                 }
@@ -1810,6 +1890,7 @@ namespace gladius
         {
             throw std::runtime_error("OpenCL mesh export requires an active compute core");
         }
+        auto const isThreeMf = request.format == io::MeshExportFormat::ThreeMf;
 
         auto stagingFilename = request.filename;
         stagingFilename.replace_filename(
@@ -1841,6 +1922,38 @@ namespace gladius
         };
         refreshModelBlocking();
         throwIfCancelled();
+
+        std::vector<Lib3MF_uint8> thumbnailPng;
+        bool const supportsThreeMfThumbnail =
+          request.shell.has_value() ||
+          request.extraction.method == io::SurfaceExtractionMethod::LayeredMarchingCubes ||
+          request.extraction.method == io::SurfaceExtractionMethod::ManifoldDualContouring;
+        if (isThreeMf && supportsThreeMfThumbnail)
+        {
+            try
+            {
+                throwIfCancelled();
+                thumbnailPng = renderOpenClThumbnailFromSnapshot(
+                  *this, stagingFilename, getSharedLogger());
+            }
+            catch (io::MeshExportCancelled const &)
+            {
+                throw;
+            }
+            catch (std::exception const & error)
+            {
+                if (auto logger = getSharedLogger())
+                {
+                    logger->addEvent(
+                      {fmt::format("Could not render OpenCL mesh-export thumbnail; "
+                                   "continuing without one: {}",
+                                   error.what()),
+                       events::Severity::Warning});
+                }
+            }
+            throwIfCancelled();
+        }
+
         io::CancellationToken cancellationToken;
         auto requestCancellation = [&]() {
             if (shouldCancel && shouldCancel())
@@ -1848,9 +1961,18 @@ namespace gladius
                 cancellationToken.requestCancellation();
             }
         };
-        auto runExporter = [&](io::IExporter & exporter, std::string_view phase) {
+        auto runExporter = [&](io::IExporter & exporter,
+                               std::string_view phase,
+                               std::function<void()> beginExport = {}) {
             exporter.setCancellationToken(&cancellationToken);
-            exporter.beginExport(stagingFilename, *m_core);
+            if (beginExport)
+            {
+                beginExport();
+            }
+            else
+            {
+                exporter.beginExport(stagingFilename, *m_core);
+            }
             bool hasMoreWork = true;
             while (hasMoreWork)
             {
@@ -1864,13 +1986,12 @@ namespace gladius
             }
             return cancellationToken.isCancelled() && exporter.getProgress() < 1.0;
         };
-        auto const isThreeMf = request.format == io::MeshExportFormat::ThreeMf;
-
         if (request.shell.has_value())
         {
             io::ShellExporter exporter(getSharedLogger());
             exporter.setConfig(*request.shell);
             exporter.setDocument(this);
+            exporter.setThumbnailPng(thumbnailPng);
             exporter.setCancellationToken(&cancellationToken);
             bool const cancelled = runExporter(exporter, "Generating colored shells");
             bool const failed = exporter.hasError();
@@ -1906,7 +2027,11 @@ namespace gladius
                 exporter.setQuantizationMode(request.color.quantizationMode);
                 exporter.setMaxPaletteSize(request.color.maxPaletteSize);
                 exporter.setTargetApplication(request.color.targetApplication);
-                bool const cancelled = runExporter(exporter, "Sampling layered mesh");
+                exporter.setThumbnailPng(thumbnailPng);
+                bool const cancelled = runExporter(
+                    exporter,
+                    "Sampling layered mesh",
+                    [&]() { exporter.beginExport(stagingFilename, *m_core, this); });
                 if (cancelled)
                 {
                     exporter.finalize();
@@ -1965,6 +2090,7 @@ namespace gladius
             exporter.setOutputFormat(isThreeMf ? io::MeshOutputFileFormat::ThreeMF
                                                : io::MeshOutputFileFormat::STL);
             exporter.setDocument(this);
+            exporter.setThumbnailPng(thumbnailPng);
             bool const exportColors = isThreeMf && request.color.exportWithColors;
             exporter.setExportWithColors(exportColors);
             exporter.setConvertToSrgb(request.color.convertToSrgb);

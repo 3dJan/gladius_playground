@@ -51,6 +51,11 @@ namespace gladius::io
         m_document = doc;
     }
 
+    void ShellExporter::setThumbnailPng(std::vector<Lib3MF_uint8> thumbnailPng)
+    {
+        m_thumbnailPng = std::move(thumbnailPng);
+    }
+
     void ShellExporter::beginExport(std::filesystem::path const& fileName, ComputeCore& generator)
     {
         if (m_config.filamentStack.empty())
@@ -372,7 +377,10 @@ namespace gladius::io
         }
 
         MeshWriter3mf writer(m_logger);
-        writer.exportMeshesWithMaterialColors(m_targetFile, meshesWithColors, m_document, true);
+        bool const writeThumbnail = !m_thumbnailPng.empty();
+        writer.setThumbnailPng(std::move(m_thumbnailPng));
+        writer.exportMeshesWithMaterialColors(
+            m_targetFile, meshesWithColors, m_document, writeThumbnail);
 
         m_progress.store(1.0, std::memory_order_release);
 

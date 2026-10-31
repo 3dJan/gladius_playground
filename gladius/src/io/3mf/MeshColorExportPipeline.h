@@ -10,6 +10,8 @@
 
 #include "EventLogger.h"
 
+#include <lib3mf_abi.hpp>
+
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -55,14 +57,15 @@ namespace gladius::io
      * to OpenVDB, manifold dual contouring, or future surface extractors.
      */
     ColoredMeshExportResult exportMeshWithColorPipeline(
-      std::filesystem::path const & filePath,
-      Mesh & mesh,
-      std::string const & meshName,
-      MeshSamplingGeometry const & samplingGeometry,
-      ComputeCore & computeCore,
-      MeshColorExportSettings const & settings,
-      Document const * sourceDocument,
-      bool writeThumbnail,
-      events::SharedLogger const & logger,
-      MeshColorExportPipelineOptions const & options = {});
+        std::filesystem::path const & filePath,
+        Mesh & mesh,
+        std::string const & meshName,
+        MeshSamplingGeometry const & samplingGeometry,
+        ComputeCore & computeCore,
+        MeshColorExportSettings const & settings,
+        Document const * sourceDocument,
+        bool writeThumbnail,
+        events::SharedLogger const & logger,
+        MeshColorExportPipelineOptions const & options = {},
+        std::vector<Lib3MF_uint8> thumbnailPng = {});
 }

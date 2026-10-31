@@ -71,7 +71,8 @@ namespace gladius::io
         std::filesystem::path const & filePath,
         IndexedTriangleMesh const & mesh,
         std::string const & meshName,
-        IndexedTriangleMeshValidationPolicy policy)
+        IndexedTriangleMeshValidationPolicy policy,
+        std::vector<Lib3MF_uint8> thumbnailPng)
     {
         if (filePath.empty())
         {
@@ -109,6 +110,11 @@ namespace gladius::io
             auto const buildItem = model->AddBuildItem(meshObject.get(), transform);
             buildItem->SetPartNumber(meshName.empty() ? "Gladius Mesh" : meshName);
 
+            if (!thumbnailPng.empty())
+            {
+                (void) attachThumbnail(model, thumbnailPng);
+            }
+
             auto const writer = model->QueryWriter("3mf");
             writer->WriteToFile(temporaryPath.string());
             verifyFileWritten(temporaryPath);
@@ -143,10 +149,11 @@ namespace gladius::io
     }
 
     void IndexedTriangleMesh3mfWriter::exportMeshWithColors(
-      std::filesystem::path const & filePath,
-      IndexedTriangleMesh const & mesh,
-      std::string const & meshName,
-      FaceColors const & faceColors)
+        std::filesystem::path const & filePath,
+        IndexedTriangleMesh const & mesh,
+        std::string const & meshName,
+        FaceColors const & faceColors,
+        std::vector<Lib3MF_uint8> thumbnailPng)
     {
         if (filePath.empty())
         {
@@ -218,6 +225,10 @@ namespace gladius::io
 
             auto const buildItem = model->AddBuildItem(meshObject.get(), m_wrapper->GetIdentityTransform());
             buildItem->SetPartNumber(meshName.empty() ? "Gladius Mesh" : meshName);
+            if (!thumbnailPng.empty())
+            {
+                (void) attachThumbnail(model, thumbnailPng);
+            }
             writeModelToFile(model, temporaryPath);
             publishTemporaryFile(temporaryPath, filePath);
         }
@@ -229,11 +240,12 @@ namespace gladius::io
     }
 
     void IndexedTriangleMesh3mfWriter::exportMeshWithRegions(
-      std::filesystem::path const & filePath,
-      IndexedTriangleMesh const & mesh,
-      std::string const & meshName,
-      QuantizedPalette const & palette,
-      std::vector<PrintableRegion> const & regions)
+        std::filesystem::path const & filePath,
+        IndexedTriangleMesh const & mesh,
+        std::string const & meshName,
+        QuantizedPalette const & palette,
+        std::vector<PrintableRegion> const & regions,
+        std::vector<Lib3MF_uint8> thumbnailPng)
     {
         if (filePath.empty())
         {
@@ -327,6 +339,10 @@ namespace gladius::io
                 throw std::runtime_error("3MF export produced no printable regions");
             }
 
+            if (!thumbnailPng.empty())
+            {
+                (void) attachThumbnail(model, thumbnailPng);
+            }
             writeModelToFile(model, temporaryPath);
             publishTemporaryFile(temporaryPath, filePath);
         }
@@ -338,10 +354,11 @@ namespace gladius::io
     }
 
     void IndexedTriangleMesh3mfWriter::exportMeshWithMmuSegmentation(
-      std::filesystem::path const & filePath,
-      IndexedTriangleMesh const & mesh,
-      std::string const & meshName,
-      QuantizedPalette const & palette)
+        std::filesystem::path const & filePath,
+        IndexedTriangleMesh const & mesh,
+        std::string const & meshName,
+        QuantizedPalette const & palette,
+        std::vector<Lib3MF_uint8> thumbnailPng)
     {
         if (filePath.empty())
         {
@@ -380,6 +397,10 @@ namespace gladius::io
             auto const buildItem = model->AddBuildItem(meshObject.get(), m_wrapper->GetIdentityTransform());
             buildItem->SetPartNumber(objectName);
 
+            if (!thumbnailPng.empty())
+            {
+                (void) attachThumbnail(model, thumbnailPng);
+            }
             writeModelToFile(model, temporaryPath);
             auto const mmuAttributes = MmuSegmentationWriter::encodeFaceExtruders(palette);
             SlicerVolumeInfo volume;

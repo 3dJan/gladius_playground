@@ -85,6 +85,29 @@ namespace gladius::io
     {
     }
 
+    void MeshWriter3mf::setThumbnailPng(std::vector<Lib3MF_uint8> thumbnailPng)
+    {
+        m_thumbnailPng = std::move(thumbnailPng);
+    }
+
+    void MeshWriter3mf::attachThumbnailIfRequested(Lib3MF::PModel model3mf,
+                                                    Document const * sourceDocument,
+                                                    bool writeThumbnail)
+    {
+        if (!writeThumbnail)
+        {
+            return;
+        }
+        if (!m_thumbnailPng.empty())
+        {
+            (void) attachThumbnail(std::move(model3mf), m_thumbnailPng);
+        }
+        else if (sourceDocument)
+        {
+            updateThumbnail(const_cast<Document &>(*sourceDocument), std::move(model3mf));
+        }
+    }
+
     void MeshWriter3mf::exportMesh(std::filesystem::path const & filePath,
                                    Mesh const & mesh,
                                    std::string const & meshName,
@@ -116,11 +139,7 @@ namespace gladius::io
             // Create build item
             createBuildItem(model3mf, meshObject, meshName);
 
-            // Add thumbnail if requested and source document is available
-            if (writeThumbnail && sourceDocument)
-            {
-                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
-            }
+            attachThumbnailIfRequested(model3mf, sourceDocument, writeThumbnail);
 
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
@@ -188,11 +207,7 @@ namespace gladius::io
                 createBuildItem(model3mf, meshObject, name);
             }
 
-            // Add thumbnail if requested and source document is available
-            if (writeThumbnail && sourceDocument)
-            {
-                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
-            }
+            attachThumbnailIfRequested(model3mf, sourceDocument, writeThumbnail);
 
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
@@ -302,10 +317,7 @@ namespace gladius::io
                      events::Severity::Info});
             }
 
-            if (writeThumbnail && sourceDocument)
-            {
-                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
-            }
+            attachThumbnailIfRequested(model3mf, sourceDocument, writeThumbnail);
 
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
@@ -375,11 +387,7 @@ namespace gladius::io
             // Create build item
             createBuildItem(model3mf, meshObject, meshName);
 
-            // Add thumbnail if requested and source document is available
-            if (writeThumbnail && sourceDocument)
-            {
-                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
-            }
+            attachThumbnailIfRequested(model3mf, sourceDocument, writeThumbnail);
 
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
@@ -450,11 +458,7 @@ namespace gladius::io
             // Create build item
             createBuildItem(model3mf, meshObject, meshName);
 
-            // Add thumbnail if requested and source document is available
-            if (writeThumbnail && sourceDocument)
-            {
-                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
-            }
+            attachThumbnailIfRequested(model3mf, sourceDocument, writeThumbnail);
 
             // Write to file
             auto writer = model3mf->QueryWriter("3mf");
@@ -643,10 +647,7 @@ namespace gladius::io
                     "3MF export failed: no valid regions produced triangles");
             }
 
-            if (writeThumbnail && sourceDocument)
-            {
-                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
-            }
+            attachThumbnailIfRequested(model3mf, sourceDocument, writeThumbnail);
 
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());
@@ -700,10 +701,7 @@ namespace gladius::io
             auto meshObject = addMeshToModel(model3mf, mesh, meshName);
             createBuildItem(model3mf, meshObject, meshName);
 
-            if (writeThumbnail && sourceDocument)
-            {
-                updateThumbnail(const_cast<Document &>(*sourceDocument), model3mf);
-            }
+            attachThumbnailIfRequested(model3mf, sourceDocument, writeThumbnail);
 
             auto writer = model3mf->QueryWriter("3mf");
             writer->WriteToFile(filePath.string());

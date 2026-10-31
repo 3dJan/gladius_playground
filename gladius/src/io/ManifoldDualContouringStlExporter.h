@@ -45,6 +45,9 @@ namespace gladius::io
         
         /// @brief Set the document for 3MF thumbnail generation
         void setDocument(Document const * doc);
+
+        /// @brief Set pre-rendered PNG bytes for the exported 3MF package thumbnail.
+        void setThumbnailPng(std::vector<Lib3MF_uint8> thumbnailPng);
         
         /// @brief Enable/disable color export (samples volumetric colors at face centroids)
         /// @param exportWithColors If true, sample and include per-face colors in 3MF output
@@ -101,6 +104,7 @@ namespace gladius::io
         // Output format and document for 3MF
         MeshOutputFileFormat m_outputFormat{MeshOutputFileFormat::STL};
         Document const * m_document{nullptr};
+        std::vector<Lib3MF_uint8> m_thumbnailPng;
         bool m_exportWithColors{false};  ///< Whether to sample and export volumetric colors
         bool m_convertToSrgb{true};  ///< Whether to convert linear RGB to sRGB
         ColorMode m_colorMode{ColorMode::PerFace}; ///< The color mode to use

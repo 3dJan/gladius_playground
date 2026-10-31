@@ -99,6 +99,38 @@ namespace gladius::webgpu
                                  .endRow = height},
                     .freshness = {.sceneGeneration = sceneGeneration}};
         }
+
+        [[nodiscard]] PlainImage encodeFrameToPng(compute::RenderFrame const & frame,
+                                                  std::uint32_t const width,
+                                                  std::uint32_t const height)
+        {
+            if (!frame.isValid() || frame.firstRow != 0u || frame.endRow != height ||
+                frame.width != width || frame.height != height)
+            {
+                throw std::runtime_error("WebGPU thumbnail render returned an invalid frame");
+            }
+
+            std::vector<unsigned char> rgba;
+            rgba.reserve(frame.pixels.size() * 4u);
+            for (auto const pixel : frame.pixels)
+            {
+                rgba.push_back(static_cast<unsigned char>(pixel & 0xffu));
+                rgba.push_back(static_cast<unsigned char>((pixel >> 8u) & 0xffu));
+                rgba.push_back(static_cast<unsigned char>((pixel >> 16u) & 0xffu));
+                rgba.push_back(static_cast<unsigned char>((pixel >> 24u) & 0xffu));
+            }
+
+            PlainImage image;
+            image.width = width;
+            image.height = height;
+            auto const error = lodepng::encode(image.data, rgba, width, height);
+            if (error != 0u)
+            {
+                throw std::runtime_error("Unable to encode WebGPU thumbnail PNG: " +
+                                         std::string{lodepng_error_text(error)});
+            }
+            return image;
+        }
     } // namespace
 
     PlainImage WebGPUThumbnailRenderer::renderPng(
@@ -153,31 +185,115 @@ namespace gladius::webgpu
         }
 
         auto frame = submission->takeFrame();
-        if (!frame.has_value() || !frame->isValid() || frame->firstRow != 0u ||
-            frame->endRow != height || frame->width != width || frame->height != height)
+        if (!frame.has_value())
         {
             throw std::runtime_error("WebGPU thumbnail render returned an invalid frame");
         }
 
-        std::vector<unsigned char> rgba;
-        rgba.reserve(frame->pixels.size() * 4u);
-        for (auto const pixel : frame->pixels)
+        return encodeFrameToPng(*frame, width, height);
+    }
+
+    PlainImage WebGPUThumbnailRenderer::renderPng(
+      std::shared_ptr<WebGPUComputeContext> context,
+      std::shared_ptr<const compute::RenderSceneSnapshot> sceneSnapshot,
+      compute::RenderBounds modelBounds,
+      std::uint32_t const width,
+      std::uint32_t const height,
+      std::function<bool()> shouldCancel)
+    {
+        auto const pumpEvents = [&context]()
         {
-            rgba.push_back(static_cast<unsigned char>(pixel & 0xffu));
-            rgba.push_back(static_cast<unsigned char>((pixel >> 8u) & 0xffu));
-            rgba.push_back(static_cast<unsigned char>((pixel >> 16u) & 0xffu));
-            rgba.push_back(static_cast<unsigned char>((pixel >> 24u) & 0xffu));
+            if (context && context->isValid())
+            {
+                context->processEvents();
+            }
+        };
+        auto task = renderPngAsync(context,
+                                   std::move(sceneSnapshot),
+                                   modelBounds,
+                                   width,
+                                   height,
+                                   {},
+                                   std::move(shouldCancel));
+        return compute::runBlocking(std::move(task), pumpEvents);
+    }
+
+    compute::AsyncTask<PlainImage> WebGPUThumbnailRenderer::renderPngAsync(
+      std::shared_ptr<WebGPUComputeContext> context,
+      std::shared_ptr<const compute::RenderSceneSnapshot> sceneSnapshot,
+      compute::RenderBounds modelBounds,
+      std::uint32_t const width,
+      std::uint32_t const height,
+      compute::RenderSettingsSnapshot settings,
+      std::function<bool()> shouldCancel)
+    {
+        if (width == 0u || height == 0u)
+        {
+            throw std::invalid_argument("WebGPU thumbnail dimensions must be greater than zero");
+        }
+        if (!context || !context->isValid())
+        {
+            throw std::runtime_error("WebGPU thumbnail context is unavailable");
+        }
+        if (!sceneSnapshot || !sceneSnapshot->isValid())
+        {
+            throw std::invalid_argument("WebGPU thumbnail scene snapshot is invalid");
+        }
+        if (!modelBounds.isValid())
+        {
+            throw std::invalid_argument("WebGPU thumbnail model bounds are invalid");
+        }
+        if (shouldCancel && shouldCancel())
+        {
+            throw std::runtime_error("WebGPU thumbnail render was cancelled");
         }
 
-        PlainImage image;
-        image.width = width;
-        image.height = height;
-        auto const error = lodepng::encode(image.data, rgba, width, height);
-        if (error != 0u)
+        auto const sceneGeneration = sceneSnapshot->sceneGeneration;
+        WebGPUComputeRenderer renderer(context);
+        std::unique_ptr<compute::IRenderScene> scene;
         {
-            throw std::runtime_error("Unable to encode WebGPU thumbnail PNG: " +
-                                     std::string{lodepng_error_text(error)});
+            WebGPUComputeContext::DeviceLock const deviceLock(*context);
+            scene = renderer.materializeScene(std::move(sceneSnapshot));
         }
-        return image;
+
+        auto const request = createRequest(modelBounds,
+                                           width,
+                                           height,
+                                           sceneGeneration,
+                                           {},
+                                           settings);
+        auto submission = renderer.submitFrame(*scene, request);
+        bool cancellationRequested = false;
+        while (submission->getStatus() == compute::RenderSubmissionStatus::Pending)
+        {
+            if (shouldCancel && shouldCancel())
+            {
+                cancellationRequested = true;
+                submission->requestCancellation();
+            }
+            submission->progress();
+            if (submission->getStatus() == compute::RenderSubmissionStatus::Pending)
+            {
+                co_await compute::AsyncYield{};
+            }
+        }
+
+        auto const status = submission->getStatus();
+        if (cancellationRequested || status == compute::RenderSubmissionStatus::Cancelled)
+        {
+            throw std::runtime_error("WebGPU thumbnail render was cancelled");
+        }
+        if (status != compute::RenderSubmissionStatus::Succeeded)
+        {
+            throw std::runtime_error("WebGPU thumbnail render failed: " +
+                                     submission->getErrorMessage());
+        }
+
+        auto frame = submission->takeFrame();
+        if (!frame.has_value())
+        {
+            throw std::runtime_error("WebGPU thumbnail render returned an invalid frame");
+        }
+        co_return encodeFrameToPng(*frame, width, height);
     }
 } // namespace gladius::webgpu

@@ -4,6 +4,8 @@
 #include "3mf/ShellExportOptions.h"
 #include "../EventLogger.h"
 
+#include <lib3mf_abi.hpp>
+
 #include <atomic>
 #include <filesystem>
 #include <future>
@@ -36,6 +38,9 @@ namespace gladius::io
         /// @brief Set the document for metadata and thumbnail
         void setDocument(Document const* doc);
 
+        /// @brief Set pre-rendered PNG bytes for the exported 3MF package thumbnail.
+        void setThumbnailPng(std::vector<Lib3MF_uint8> thumbnailPng);
+
         // IExporter interface
         void beginExport(std::filesystem::path const& fileName, ComputeCore& generator) override;
         bool advanceExport(ComputeCore& generator) override;
@@ -65,6 +70,7 @@ namespace gladius::io
         events::SharedLogger m_logger;
         ShellExportConfig m_config;
         Document const* m_document = nullptr;
+        std::vector<Lib3MF_uint8> m_thumbnailPng;
         std::filesystem::path m_targetFile;
 
         std::atomic<State> m_state{State::Idle};

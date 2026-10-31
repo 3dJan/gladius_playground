@@ -16,6 +16,7 @@
 #include <fmt/format.h>
 
 #include <stdexcept>
+#include <utility>
 
 namespace gladius::io
 {
@@ -40,7 +41,8 @@ namespace gladius::io
       Document const * sourceDocument,
       bool writeThumbnail,
       events::SharedLogger const & logger,
-      MeshColorExportPipelineOptions const & options)
+    MeshColorExportPipelineOptions const & options,
+    std::vector<Lib3MF_uint8> thumbnailPng)
     {
         if (!samplingGeometry.matchesFaceCount(mesh))
         {
@@ -51,6 +53,7 @@ namespace gladius::io
         }
 
         MeshWriter3mf writer(logger);
+        writer.setThumbnailPng(std::move(thumbnailPng));
         ColoredMeshExportResult result{};
 
         if (!settings.exportWithColors)

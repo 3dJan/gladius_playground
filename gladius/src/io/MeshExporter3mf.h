@@ -56,6 +56,9 @@ namespace gladius::vdb
         /// @brief Set the target application for optional proprietary optimization
         void setTargetApplication(io::TargetApplication targetApplication);
 
+        /// @brief Set pre-rendered PNG bytes for the exported 3MF package thumbnail.
+        void setThumbnailPng(std::vector<Lib3MF_uint8> thumbnailPng);
+
         /// @brief Get the result of the last export (available after finalize)
         [[nodiscard]] ColoredMeshExportResult const& getExportResult() const;
 
@@ -71,6 +74,7 @@ namespace gladius::vdb
         io::QuantizationMode m_quantizationMode = io::QuantizationMode::Adaptive;
         std::optional<std::uint32_t> m_maxPaletteSize;
         io::TargetApplication m_targetApplication = io::TargetApplication::None;
+        std::vector<Lib3MF_uint8> m_thumbnailPng;
 
         // Export result
         ColoredMeshExportResult m_exportResult;

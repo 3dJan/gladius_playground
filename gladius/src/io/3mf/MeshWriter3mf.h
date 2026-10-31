@@ -40,6 +40,9 @@ namespace gladius::io
       public:
         explicit MeshWriter3mf(events::SharedLogger logger);
 
+        /// @brief Sets pre-rendered thumbnail PNG bytes for subsequent exports.
+        void setThumbnailPng(std::vector<Lib3MF_uint8> thumbnailPng);
+
         void exportMesh(std::filesystem::path const & filePath,
                         Mesh const & mesh,
                         std::string const & meshName,
@@ -99,6 +102,10 @@ namespace gladius::io
         bool validateMesh(Mesh const & mesh);
 
       private:
+        void attachThumbnailIfRequested(Lib3MF::PModel model3mf,
+                                        Document const * sourceDocument,
+                                        bool writeThumbnail);
+
         Lib3MF::PMeshObject
         addMeshToModel(Lib3MF::PModel model3mf, Mesh const & mesh, std::string const & meshName);
 
@@ -119,6 +126,8 @@ namespace gladius::io
         void createBuildItem(Lib3MF::PModel model3mf,
                              Lib3MF::PMeshObject meshObject,
                              std::string const & partNumber);
+
+        std::vector<Lib3MF_uint8> m_thumbnailPng;
     };
 
     void exportMeshTo3mfCore(std::filesystem::path const & filePath,

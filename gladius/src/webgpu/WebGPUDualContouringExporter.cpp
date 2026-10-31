@@ -4,6 +4,10 @@
 #include "io/IndexedTriangleMeshWriter.h"
 #include "io/MeshExportJob.h"
 #include "io/3mf/IndexedTriangleMesh3mfWriter.h"
+#include "webgpu/WebGPUThumbnailRenderer.h"
+
+#include <exception>
+#include <vector>
 #include "webgpu/WebGPUSdfEvaluationRequest.h"
 
 #include <algorithm>
@@ -228,16 +232,50 @@ namespace gladius::webgpu
       io::DualContouringOptions const & options,
       WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
     {
-        auto mesh = generateMesh(std::move(context),
+        auto mesh = generateMesh(context,
                                  snapshot,
                                  bounds,
                                  options,
-                                                                 shouldCancel);
+                                 shouldCancel);
+        if (shouldCancel && shouldCancel())
+        {
+            throw io::MeshExportCancelled{};
+        }
+        std::vector<Lib3MF_uint8> thumbnailPng;
+        if (bounds.modelBounds.has_value())
+        {
+            try
+            {
+                auto thumbnail = WebGPUThumbnailRenderer::renderPng(
+                  context,
+                  std::make_shared<const compute::RenderSceneSnapshot>(snapshot),
+                  *bounds.modelBounds,
+                  256u,
+                  256u,
+                  shouldCancel);
                 if (shouldCancel && shouldCancel())
                 {
-                        throw io::MeshExportCancelled{};
+                    throw io::MeshExportCancelled{};
                 }
+                thumbnailPng.assign(thumbnail.data.begin(), thumbnail.data.end());
+            }
+            catch (io::MeshExportCancelled const &)
+            {
+                throw;
+            }
+            catch (std::exception const &)
+            {
+                if (shouldCancel && shouldCancel())
+                {
+                    throw io::MeshExportCancelled{};
+                }
+            }
+        }
         io::IndexedTriangleMesh3mfWriter writer;
-        writer.exportMesh(filePath, mesh, filePath.stem().string());
+        writer.exportMesh(filePath,
+                          mesh,
+                          filePath.stem().string(),
+                          io::IndexedTriangleMeshValidationPolicy::Strict,
+                          std::move(thumbnailPng));
     }
 }

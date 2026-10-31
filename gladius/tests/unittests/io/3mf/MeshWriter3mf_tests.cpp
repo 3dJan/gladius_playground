@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include "io/3mf/Lib3mfLoader.h"
 #include <lib3mf_implicit.hpp>
+#include <lodepng.h>
 
 #include <chrono>
 #include <filesystem>
@@ -470,6 +471,41 @@ namespace gladius_tests
         ASSERT_NO_THROW(writer.exportMesh(outputPath, *mesh, "test_cube", nullptr, false));
 
         validate3mfFile(outputPath, 1);
+    }
+
+    TEST_F(MeshWriter3mfTest, ExportSingleMesh_WithPreRenderedThumbnail_AttachesPng)
+    {
+        SKIP_IF_OPENCL_UNAVAILABLE();
+
+        auto mesh = createTestCube();
+        std::filesystem::path const outputPath = m_tempDir / "cube_with_png_thumbnail.3mf";
+        std::vector<unsigned char> rgba{255u, 0u, 0u, 255u,
+                                        0u, 255u, 0u, 255u,
+                                        0u, 0u, 255u, 255u,
+                                        255u, 255u, 0u, 255u};
+        std::vector<unsigned char> encoded;
+        ASSERT_EQ(lodepng::encode(encoded, rgba, 2u, 2u), 0u);
+
+        MeshWriter3mf writer(m_logger);
+                writer.setThumbnailPng(
+                    std::vector<Lib3MF_uint8>(encoded.begin(), encoded.end()));
+        ASSERT_NO_THROW(writer.exportMesh(outputPath, *mesh, "test_cube", nullptr, true));
+
+        auto const wrapper = loadLib3mfScoped();
+        auto const model = wrapper->CreateModel();
+        ASSERT_NO_THROW(model->QueryReader("3mf")->ReadFromFile(outputPath.string()));
+        ASSERT_TRUE(model->HasPackageThumbnailAttachment());
+
+        auto const attachment = model->GetPackageThumbnailAttachment();
+        ASSERT_TRUE(attachment);
+        std::vector<Lib3MF_uint8> attachedPng;
+        attachment->WriteToBuffer(attachedPng);
+        std::vector<unsigned char> decoded;
+        unsigned int width = 0u;
+        unsigned int height = 0u;
+        ASSERT_EQ(lodepng::decode(decoded, width, height, attachedPng), 0u);
+        EXPECT_EQ(width, 2u);
+        EXPECT_EQ(height, 2u);
     }
 
     TEST_F(MeshWriter3mfTest, ExportMultipleMeshes_WithThumbnailParameter_DoesNotCrash)
