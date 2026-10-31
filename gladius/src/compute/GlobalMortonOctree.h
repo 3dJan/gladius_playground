@@ -174,6 +174,12 @@ namespace gladius::compute
         std::size_t triangleCount{0U};
         std::size_t boundaryEdges{0U};          ///< Should be 0 for watertight mesh
         std::size_t nonManifoldEdges{0U};       ///< Should be 0 for manifold mesh
+        std::size_t neighborMisses{0U};         ///< Owned surface edges missing same-depth neighbor cells
+        std::size_t missingVertexQuads{0U};     ///< Candidate quads missing a component vertex
+        std::size_t halfDegenerateQuads{0U};     ///< Emitted quads with a near-degenerate triangle
+        std::size_t duplicateOwnedEdgesSkipped{0U}; ///< Duplicate geometric edge ownership attempts
+        std::size_t perimeterEdgesOverused{0U};  ///< Perimeter edges used by more than two quads
+        std::size_t zeroDiagonalKeys{0U};         ///< Candidate quads with a zero diagonal key
         double constructionTimeMs{0.0};
         double vertexGenerationTimeMs{0.0};
         double meshExtractionTimeMs{0.0};

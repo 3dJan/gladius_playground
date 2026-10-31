@@ -73,7 +73,10 @@ namespace gladius::webgpu
                 modelBounds.max[0], modelBounds.max[1], modelBounds.max[2]);
             Eigen::Vector3f const size = max - min;
             float const maxExtent = size.maxCoeff();
-            float const margin = 2.0F * maxExtent / static_cast<float>(1U << maxDepth);
+            // Numerical bounds locate sampled crossings, not exact surface extrema.
+            // Retain their uncertainty as well as the two-cell extraction halo.
+            float const margin = bounds.errorBound +
+                2.0F * (maxExtent + 2.0F * bounds.errorBound) / static_cast<float>(1U << maxDepth);
             Eigen::Vector3f const paddedMin = min - Eigen::Vector3f::Constant(margin);
             Eigen::Vector3f const paddedMax = max + Eigen::Vector3f::Constant(margin);
 
@@ -285,6 +288,11 @@ namespace gladius::webgpu
         if (octree.hasSamplingError())
         {
             throw std::runtime_error("WebGPU manifold mesh extraction failed during SDF sampling");
+        }
+        auto const& extractionStats = octree.getStats();
+        if (extractionStats.boundaryEdges != 0U || extractionStats.nonManifoldEdges != 0U)
+        {
+            throw std::runtime_error("WebGPU manifold raw extraction is not closed and manifold");
         }
         if (useFastQem || options.enableSimplification)
         {

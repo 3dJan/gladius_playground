@@ -3571,6 +3571,13 @@ namespace gladius::compute
             ++emittedQuads;
         }
 
+        m_stats.neighborMisses = boundaryEdges;
+        m_stats.missingVertexQuads = missingVertexQuads;
+        m_stats.halfDegenerateQuads = halfDegenerateQuads;
+        m_stats.duplicateOwnedEdgesSkipped = duplicateOwnedEdgesSkipped;
+        m_stats.perimeterEdgesOverused = perimeterEdgesOverused;
+        m_stats.zeroDiagonalKeys = zeroDiagonalKeys;
+
         if (boundaryEdges > 0U || missingVertexQuads > 0U || halfDegenerateQuads > 0U || duplicateOwnedEdgesSkipped > 0U ||
             perimeterEdgesOverused > 0U || zeroDiagonalKeys > 0U)
         {

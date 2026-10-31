@@ -123,6 +123,7 @@ target_link_libraries(${BINARY} PUBLIC
 file(GLOB TEST_FILES
   "testdata/*.*"
   "${CMAKE_CURRENT_SOURCE_DIR}/../integrationtests/testdata/honeycombecase_connectable_007.3mf"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../integrationtests/testdata/keycaps.3mf"
 )
 
 file(COPY ${TEST_FILES} DESTINATION "testdata")

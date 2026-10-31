@@ -1360,35 +1360,52 @@ namespace gladius
             boundsRequest.probeSettings.tileSize = {64u, 64u, 64u};
             boundsRequest.probeSettings.allowMetadataFallback = false;
 
-            auto submission = boundsService->submit(boundsRequest);
-            if (!submission)
+            bool const isManifold =
+                request.extraction.method == io::SurfaceExtractionMethod::ManifoldDualContouring;
+            if (isManifold)
             {
-                throw std::runtime_error("WebGPU bounds service rejected the export request");
+                boundsRequest.probeSettings.isoValue = request.extraction.manifoldDualContouring.isoValue;
             }
-            bool cancellationRequested = false;
-            while (submission->getStatus() == compute::BoundsSubmissionStatus::Pending)
+            std::optional<compute::BoundsResult> bounds;
+            // Resolve the global probe's uncertainty in a local probe before selecting the
+            // Fine/UltraFine extraction domain; simply inflating it would reduce spatial quality.
+            for (std::size_t pass = 0U; pass < (isManifold ? 2U : 1U); ++pass)
             {
-                submission->progress();
-                if (!cancellationRequested && shouldCancel && shouldCancel())
+                auto submission = boundsService->submit(boundsRequest);
+                if (!submission)
                 {
-                    submission->requestCancellation();
-                    cancellationRequested = true;
+                    throw std::runtime_error("WebGPU bounds service rejected the export request");
                 }
-                report(0.15, "Calculating model bounds");
-                co_await compute::AsyncYield{};
-            }
-            submission->wait();
-            throwIfCancelled();
-            auto const bounds = submission->takeResult();
-            if (!bounds.has_value() || !bounds->isUsable())
-            {
-                auto const message = bounds.has_value() ? bounds->diagnostics.message
-                                                        : submission->getErrorMessage();
-                throw std::runtime_error(
-                  fmt::format("WebGPU {} export requires authoritative, unclipped model bounds{}{}",
-                              formatName,
-                              message.empty() ? "" : ": ",
-                              message));
+                bool cancellationRequested = false;
+                while (submission->getStatus() == compute::BoundsSubmissionStatus::Pending)
+                {
+                    submission->progress();
+                    if (!cancellationRequested && shouldCancel && shouldCancel())
+                    {
+                        submission->requestCancellation();
+                        cancellationRequested = true;
+                    }
+                    report(0.15, "Calculating model bounds");
+                    co_await compute::AsyncYield{};
+                }
+                submission->wait();
+                throwIfCancelled();
+                bounds = submission->takeResult();
+                if (!bounds.has_value() || !bounds->isUsable())
+                {
+                    auto const message = bounds.has_value() ? bounds->diagnostics.message
+                                                            : submission->getErrorMessage();
+                    throw std::runtime_error(
+                      fmt::format("WebGPU {} export requires authoritative, unclipped model bounds{}{}",
+                                  formatName,
+                                  message.empty() ? "" : ": ",
+                                  message));
+                }
+                if (isManifold && pass == 0U)
+                {
+                    auto const domain = bounds->modelBounds->expanded(2.0F * bounds->errorBound);
+                    boundsRequest.probeDomain = {.min = domain.min, .max = domain.max};
+                }
             }
 
             throwIfCancelled();

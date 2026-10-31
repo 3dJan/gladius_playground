@@ -5,6 +5,7 @@
 #include "Document.h"
 #include "EventLogger.h"
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
+#include "compute/ApplicationComputeRuntime.h"
 #include "compute/BoundingBoxContracts.h"
 #include "compute/GlobalMortonOctree.h"
 #include "compute/ManifoldDualContouringGpu.h"
@@ -13,12 +14,14 @@
 #include "io/ManifoldDualContouringStlExporter.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "io/WindingRepair.h"
+#include "io/3mf/Lib3mfLoader.h"
 #include "webgpu/WebGPUComputeContext.h"
 #include "webgpu/WebGPUManifoldDualContouringExporter.h"
 #include "webgpu/WebGPUManifoldSdfSampler.h"
 #include "webgpu/WebGPUSdfShaderComposer.h"
 
 #include <gtest/gtest.h>
+#include <lib3mf_abi.hpp>
 
 #include <algorithm>
 #include <array>
@@ -32,6 +35,7 @@
 #include <map>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -166,8 +170,9 @@ namespace gladius::tests
             std::vector<std::uint32_t> indices;
             positions.reserve(triangleSoup.positions.size());
             indices.reserve(triangleSoup.indices.size());
-            for (auto const& position : triangleSoup.positions)
+            for (auto const sourceIndex : triangleSoup.indices)
             {
+                auto const& position = triangleSoup.positions[sourceIndex];
                 std::array<std::int64_t, 3> const key{
                     static_cast<std::int64_t>(std::llround(position.x() * weldScale)),
                     static_cast<std::int64_t>(std::llround(position.y() * weldScale)),
@@ -553,6 +558,7 @@ namespace gladius::tests
         bool useDialogDefaults;
         float isoValue{0.0F};
         bool useBoundedFastQem{true};
+        bool useFinePreset{false};
     };
 
     class ManifoldDualContouringBackendParity
@@ -610,7 +616,14 @@ namespace gladius::tests
         }
 
         io::ManifoldDualContouringOptions options{};
-        if (settings.useDialogDefaults)
+        if (settings.useFinePreset)
+        {
+            options.qualityPreset = io::ManifoldDualContouringQuality::Fine;
+            options.applyPreset();
+            ASSERT_EQ(options.initialDepth, 6U);
+            ASSERT_EQ(options.maxDepth, 8U);
+        }
+        else if (settings.useDialogDefaults)
         {
             options.qualityPreset = io::ManifoldDualContouringQuality::UltraFine;
             options.applyPreset();
@@ -730,6 +743,7 @@ namespace gladius::tests
         std::vector<AdaptiveOctreeCornerSamples> openClCornerSamples;
         std::vector<Eigen::Vector3f> openClRegistryPositions;
         io::IndexedTriangleMesh openClOctreeMesh;
+        compute::OctreeStats openClOctreeStats;
         {
             compute::GlobalMortonOctree openClOctree{openClSampler};
             openClOctree.build(octreeConfig);
@@ -740,6 +754,7 @@ namespace gladius::tests
                 openClOctreeMesh.positions,
                 openClOctreeMesh.normals,
                 openClOctreeMesh.indices);
+            openClOctreeStats = openClOctree.getStats();
         }
 
         auto nodeKeyLess = [](auto const& lhs, auto const& rhs)
@@ -770,6 +785,7 @@ namespace gladius::tests
         float maximumSignDisagreementMagnitude = 0.0F;
         std::vector<Eigen::Vector3f> webGpuRegistryPositions;
         io::IndexedTriangleMesh webGpuOctreeMesh;
+        compute::OctreeStats webGpuOctreeStats;
         {
             compute::GlobalMortonOctree webGpuOctree{webGpuSampler};
             webGpuOctree.build(octreeConfig);
@@ -779,6 +795,7 @@ namespace gladius::tests
                 webGpuOctreeMesh.positions,
                 webGpuOctreeMesh.normals,
                 webGpuOctreeMesh.indices);
+            webGpuOctreeStats = webGpuOctree.getStats();
             auto const& webGpuNodes = webGpuOctree.getNodes();
             std::vector<compute::GlobalOctreeNode const*> webGpuNodesByKey;
             webGpuNodesByKey.reserve(webGpuNodes.size());
@@ -925,30 +942,82 @@ namespace gladius::tests
             io::repairTriangleWindingConsistency(openClOctreeMesh.positions, openClOctreeMesh.indices);
         [[maybe_unused]] auto const webGpuOctreeWindingRepair =
             io::repairTriangleWindingConsistency(webGpuOctreeMesh.positions, webGpuOctreeMesh.indices);
-        ASSERT_FALSE(openClOctreeMesh.validationError(octreeValidationPolicy).has_value());
-        ASSERT_FALSE(webGpuOctreeMesh.validationError(octreeValidationPolicy).has_value());
-        auto const openClOctreeTopologyError =
-            openClOctreeMesh.closedOrientedTopologyError(octreeValidationPolicy);
-        auto const webGpuOctreeTopologyError =
-            webGpuOctreeMesh.closedOrientedTopologyError(octreeValidationPolicy);
-        ASSERT_FALSE(openClOctreeTopologyError.has_value())
-            << openClOctreeTopologyError.value_or("OpenCL octree mesh is not closed");
-        ASSERT_FALSE(webGpuOctreeTopologyError.has_value())
-            << webGpuOctreeTopologyError.value_or("WebGPU octree mesh is not closed");
-        auto const openClOctreeDiagnostics =
-            io::computeIndexedTriangleMeshDiagnostics(openClOctreeMesh);
-        auto const webGpuOctreeDiagnostics =
-            io::computeIndexedTriangleMeshDiagnostics(webGpuOctreeMesh);
-        EXPECT_EQ(openClOctreeDiagnostics.connectedComponentCount,
-                  webGpuOctreeDiagnostics.connectedComponentCount);
-        if (settings.expectedComponentCount > 0U)
+        auto const openClOctreeValidationError = openClOctreeMesh.validationError(octreeValidationPolicy);
+        auto const webGpuOctreeValidationError = webGpuOctreeMesh.validationError(octreeValidationPolicy);
+        if (settings.useFinePreset)
         {
-            EXPECT_EQ(openClOctreeDiagnostics.connectedComponentCount,
-                      settings.expectedComponentCount);
+            EXPECT_FALSE(openClOctreeValidationError.has_value())
+                << openClOctreeValidationError.value_or("OpenCL octree mesh validation failed");
+            EXPECT_FALSE(webGpuOctreeValidationError.has_value())
+                << webGpuOctreeValidationError.value_or("WebGPU octree mesh validation failed");
         }
         else
         {
-            EXPECT_GT(openClOctreeDiagnostics.connectedComponentCount, 0U);
+            ASSERT_FALSE(openClOctreeValidationError.has_value())
+                << openClOctreeValidationError.value_or("OpenCL octree mesh validation failed");
+            ASSERT_FALSE(webGpuOctreeValidationError.has_value())
+                << webGpuOctreeValidationError.value_or("WebGPU octree mesh validation failed");
+        }
+        auto const openClOctreeTopologyError = openClOctreeValidationError.has_value()
+            ? openClOctreeValidationError
+            : openClOctreeMesh.closedOrientedTopologyError(octreeValidationPolicy);
+        auto const webGpuOctreeTopologyError = webGpuOctreeValidationError.has_value()
+            ? webGpuOctreeValidationError
+            : webGpuOctreeMesh.closedOrientedTopologyError(octreeValidationPolicy);
+        auto printRawOctreeDiagnostics = [](char const* backend,
+                                            compute::OctreeStats const& stats,
+                                            std::optional<std::string> const& topologyError)
+        {
+            std::cout << "MDC_WEBGPU_PARITY_RAW backend=" << backend
+                      << " totalNodes=" << stats.totalNodes
+                      << " intersectingLeaves=" << stats.intersectingLeaves
+                      << " vertices=" << stats.vertexCount
+                      << " triangles=" << stats.triangleCount
+                      << " neighborMisses=" << stats.neighborMisses
+                      << " missingVertexQuads=" << stats.missingVertexQuads
+                      << " halfDegenerateQuads=" << stats.halfDegenerateQuads
+                      << " duplicateOwnedEdgesSkipped=" << stats.duplicateOwnedEdgesSkipped
+                      << " perimeterEdgesOverused=" << stats.perimeterEdgesOverused
+                      << " zeroDiagonalKeys=" << stats.zeroDiagonalKeys
+                      << " boundaryEdges=" << stats.boundaryEdges
+                      << " nonManifoldEdges=" << stats.nonManifoldEdges
+                      << " topologyError=" << topologyError.value_or("none") << std::endl;
+        };
+        printRawOctreeDiagnostics("opencl", openClOctreeStats, openClOctreeTopologyError);
+        printRawOctreeDiagnostics("webgpu", webGpuOctreeStats, webGpuOctreeTopologyError);
+        if (settings.useFinePreset)
+        {
+            EXPECT_FALSE(openClOctreeTopologyError.has_value())
+                << openClOctreeTopologyError.value_or("OpenCL octree mesh is not closed");
+            EXPECT_FALSE(webGpuOctreeTopologyError.has_value())
+                << webGpuOctreeTopologyError.value_or("WebGPU octree mesh is not closed");
+        }
+        else
+        {
+            ASSERT_FALSE(openClOctreeTopologyError.has_value())
+                << openClOctreeTopologyError.value_or("OpenCL octree mesh is not closed");
+            ASSERT_FALSE(webGpuOctreeTopologyError.has_value())
+                << webGpuOctreeTopologyError.value_or("WebGPU octree mesh is not closed");
+        }
+        std::size_t openClOctreeComponentCount = 0U;
+        if (!openClOctreeValidationError.has_value() && !webGpuOctreeValidationError.has_value())
+        {
+            auto const openClOctreeDiagnostics =
+                io::computeIndexedTriangleMeshDiagnostics(openClOctreeMesh);
+            auto const webGpuOctreeDiagnostics =
+                io::computeIndexedTriangleMeshDiagnostics(webGpuOctreeMesh);
+            openClOctreeComponentCount = openClOctreeDiagnostics.connectedComponentCount;
+            EXPECT_EQ(openClOctreeDiagnostics.connectedComponentCount,
+                      webGpuOctreeDiagnostics.connectedComponentCount);
+            if (settings.expectedComponentCount > 0U)
+            {
+                EXPECT_EQ(openClOctreeDiagnostics.connectedComponentCount,
+                          settings.expectedComponentCount);
+            }
+            else
+            {
+                EXPECT_GT(openClOctreeDiagnostics.connectedComponentCount, 0U);
+            }
         }
 
         TemporaryFile openClStl{makeTemporaryStlPath(std::string{settings.name} + "_opencl")};
@@ -1087,11 +1156,157 @@ namespace gladius::tests
                   << " trianglesWebGPU=" << webGpuDiagnostics.triangleCount
                   << " degenerateTrianglesOpenCL=" << openClDiagnostics.degenerateTriangleCount
                   << " degenerateTrianglesWebGPU=" << webGpuDiagnostics.degenerateTriangleCount
-                  << " octreeComponents=" << openClOctreeDiagnostics.connectedComponentCount
+                  << " octreeComponents=" << openClOctreeComponentCount
                   << " maxSampledSurfaceDistance=" << maximumSurfaceDistance
                   << " surfaceTolerance=" << surfaceDistanceTolerance
                   << " signedVolumeOpenCL=" << openClDiagnostics.signedVolume
                   << " signedVolumeWebGPU=" << webGpuDiagnostics.signedVolume << std::endl;
+    }
+
+    TEST(WebGPUManifoldDocumentExport, ExportMesh_KeycapsFine_ProducesReadableStlAndClosed3mf)
+    {
+        if (!gpuParityTestsEnabled())
+        {
+            GTEST_SKIP() << "GPU export regression is opt-in";
+        }
+        auto runtime = compute::ApplicationComputeRuntime::createWebGPU();
+        ASSERT_TRUE(runtime->isAvailable()) << runtime->getErrorMessage();
+        auto logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+        Document document{logger};
+        document.setBackendRuntime(runtime.get());
+        auto const fixture = std::filesystem::path{"testdata"} / "keycaps.3mf";
+        ASSERT_TRUE(std::filesystem::exists(fixture));
+        ASSERT_NO_THROW(document.load(fixture));
+
+        io::MeshExportRequest request;
+        request.extraction.method = io::SurfaceExtractionMethod::ManifoldDualContouring;
+        auto& options = request.extraction.manifoldDualContouring;
+        options.qualityPreset = io::ManifoldDualContouringQuality::Fine;
+        options.applyPreset();
+        options.simplificationMethod = io::SimplificationMethod::QemFast;
+        options.enableSimplification = true;
+        options.simplificationTerminationMode = io::SimplificationTerminationMode::ErrorBounded;
+        options.simplificationMaxError = 0.05F * 0.05F;
+        request.color.exportWithColors = false;
+
+        auto openClContext = std::make_shared<ComputeContext>(EnableGLOutput::disabled);
+        ASSERT_TRUE(openClContext->isValid());
+        Document referenceDocument{std::make_shared<ComputeCore>(
+            openClContext, RequiredCapabilities::ComputeOnly, logger)};
+        ASSERT_NO_THROW(referenceDocument.load(fixture));
+        TemporaryFile referenceOutput{makeTemporaryStlPath("keycaps_document_opencl")};
+        request.filename = referenceOutput.path();
+        request.format = io::MeshExportFormat::Stl;
+        ASSERT_NO_THROW(referenceDocument.exportMesh(request));
+        auto const referenceMesh = readBinaryStlAsTriangleSoup(referenceOutput.path());
+        auto const referenceDiagnostics = io::computeIndexedTriangleMeshDiagnostics(referenceMesh);
+        auto const referenceVolumes = computeTriangleSoupComponentVolumes(referenceMesh);
+        ASSERT_EQ(referenceVolumes.size(), 2U);
+
+        for (auto const format : {io::MeshExportFormat::Stl, io::MeshExportFormat::ThreeMf})
+        {
+            SCOPED_TRACE(format == io::MeshExportFormat::Stl ? "STL" : "3MF");
+            auto path = makeTemporaryStlPath("keycaps_document");
+            if (format == io::MeshExportFormat::ThreeMf)
+            {
+                path.replace_extension(".3mf");
+            }
+            TemporaryFile output{path};
+            request.filename = path;
+            request.format = format;
+            ASSERT_NO_THROW(document.exportMesh(request));
+            ASSERT_TRUE(std::filesystem::exists(path));
+            io::IndexedTriangleMesh mesh;
+            if (format == io::MeshExportFormat::Stl)
+            {
+                mesh = readBinaryStlAsTriangleSoup(path);
+                EXPECT_GT(mesh.indices.size(), 0U);
+            }
+            else
+            {
+                auto const wrapper = io::loadLib3mfScoped();
+                auto const model = wrapper->CreateModel();
+                ASSERT_NO_THROW(model->QueryReader("3mf")->ReadFromFile(path.string()));
+                auto const objects = model->GetMeshObjects();
+                ASSERT_TRUE(objects->MoveNext());
+                auto const object = objects->GetCurrentMeshObject();
+                for (Lib3MF_uint32 index = 0U; index < object->GetVertexCount(); ++index)
+                {
+                    auto const vertex = object->GetVertex(index);
+                    mesh.positions.emplace_back(vertex.m_Coordinates[0], vertex.m_Coordinates[1], vertex.m_Coordinates[2]);
+                }
+                for (Lib3MF_uint32 index = 0U; index < object->GetTriangleCount(); ++index)
+                {
+                    auto const triangle = object->GetTriangle(index);
+                    mesh.indices.insert(mesh.indices.end(), {triangle.m_Indices[0], triangle.m_Indices[1], triangle.m_Indices[2]});
+                }
+                auto const error = mesh.closedOrientedTopologyError();
+                EXPECT_FALSE(error.has_value()) << error.value_or("");
+            }
+            auto const diagnostics = io::computeIndexedTriangleMeshDiagnostics(mesh);
+            EXPECT_EQ(diagnostics.degenerateTriangleCount, 0U);
+            EXPECT_GT(diagnostics.signedVolume, 0.0);
+            EXPECT_NEAR(diagnostics.signedVolume, referenceDiagnostics.signedVolume,
+                        referenceDiagnostics.signedVolume * 1.0e-3);
+            double const surfaceDistance = maximumSymmetricSampledSurfaceDistance(referenceMesh, mesh);
+            EXPECT_LE(surfaceDistance, 0.05);
+            EXPECT_LE((diagnostics.boundsMin - referenceDiagnostics.boundsMin).cwiseAbs().maxCoeff(), 0.05F);
+            EXPECT_LE((diagnostics.boundsMax - referenceDiagnostics.boundsMax).cwiseAbs().maxCoeff(), 0.05F);
+            auto const volumes = computeTriangleSoupComponentVolumes(mesh);
+            ASSERT_EQ(volumes.size(), referenceVolumes.size());
+            for (std::size_t component = 0U; component < volumes.size(); ++component)
+            {
+                EXPECT_GT(volumes[component], 0.0);
+                EXPECT_NEAR(volumes[component], referenceVolumes[component], referenceVolumes[component] * 1.0e-3);
+            }
+            std::cout << "MDC_DOCUMENT_PARITY format=" << (format == io::MeshExportFormat::Stl ? "STL" : "3MF")
+                      << " surfaceDistance=" << surfaceDistance
+                      << " volumeOpenCL=" << referenceDiagnostics.signedVolume
+                      << " volumeWebGPU=" << diagnostics.signedVolume << std::endl;
+        }
+    }
+
+    TEST(WebGPUManifoldDocumentExport, GenerateMesh_UncertainBounds_PreservesEntireSphereWithoutSimplification)
+    {
+        if (!gpuParityTestsEnabled())
+        {
+            GTEST_SKIP() << "GPU export regression is opt-in";
+        }
+        auto context = std::make_shared<webgpu::WebGPUComputeContext>();
+        ASSERT_TRUE(context->isValid());
+        compute::RenderSceneSnapshot snapshot{
+            .sceneGeneration = 1U,
+            .requiredCapabilities = compute::RendererCapability::AnalyticRendering,
+            .analyticEvaluatorWgsl =
+                "fn evaluateModel(position: vec3<f32>) -> vec4<f32> { "
+                "return vec4<f32>(vec3<f32>(1.0f), length(position) - 1.0f); }"};
+        compute::BoundsResult bounds;
+        bounds.status = compute::BoundsResultStatus::Ready;
+        bounds.modelBounds = compute::RenderBounds{.min = {-0.8F, -0.8F, -0.8F}, .max = {0.8F, 0.8F, 0.8F}};
+        bounds.source = compute::BoundsSource::GpuProbe;
+        bounds.guarantee = compute::BoundsGuarantee::NumericalOpenClParity;
+        bounds.authoritative = true;
+        bounds.errorBound = 0.3F;
+        io::ManifoldDualContouringOptions options;
+        options.initialDepth = 4U;
+        options.maxDepth = 5U;
+        options.enableHierarchicalOctree = true;
+        options.enableSimplification = false;
+        options.simplificationMethod = io::SimplificationMethod::None;
+        options.projectToSurface = false;
+
+        auto const mesh = webgpu::WebGPUManifoldDualContouringExporter::generateMesh(
+            context, snapshot, bounds, options);
+
+        auto const error = mesh.closedOrientedTopologyError(io::IndexedTriangleMeshValidationPolicy::AllowGeometricDegenerates);
+        EXPECT_FALSE(error.has_value()) << error.value_or("");
+        auto const diagnostics = io::computeIndexedTriangleMeshDiagnostics(mesh);
+        EXPECT_EQ(diagnostics.connectedComponentCount, 1U);
+        for (Eigen::Index axis = 0; axis < 3; ++axis)
+        {
+            EXPECT_NEAR(diagnostics.boundsMin[axis], -1.0F, 0.02F);
+            EXPECT_NEAR(diagnostics.boundsMax[axis], 1.0F, 0.02F);
+        }
     }
 
     INSTANTIATE_TEST_SUITE_P(
@@ -1107,7 +1322,8 @@ namespace gladius::tests
                                          2U,
                                          false,
                                          0.05F,
-                                         false}),
+                                         false},
+                          ParitySettings{"KeycapsFine", "keycaps.3mf", 6U, 8U, 0U, false, 0.0F, true, true}),
         [](auto const& info) { return info.param.name; });
 }
 
