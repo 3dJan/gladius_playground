@@ -670,12 +670,13 @@ namespace gladius::ui
 
                 if (!isAssembly && !model.second->isManaged())
                 {
-                    // Check if function can be safely deleted
-                    auto safeResult =
-                      m_doc->isItSafeToDeleteResource(ResourceKey(model.second->getResourceId()));
-                    if (ImGui::Button("Delete"))
+                                        bool const deleteClicked = ImGui::Button("Delete");
+                                        bool const deleteHovered = ImGui::IsItemHovered();
+                                        if (deleteClicked || deleteHovered)
                     {
-                        if (safeResult.canBeRemoved)
+                                                auto safeResult = m_doc->isItSafeToDeleteResource(
+                                                    ResourceKey(model.second->getResourceId()));
+                                                if (deleteClicked && safeResult.canBeRemoved)
                         {
                             m_doc->deleteFunction(model.second->getResourceId());
                             m_currentModel = m_assembly->assemblyModel();
@@ -684,12 +685,9 @@ namespace gladius::ui
                             ImGui::PopID();
                             break; // Map was modified, iterator is invalidated
                         }
-                    }
 
-                    // Display tooltip with dependency information if function cannot be deleted
-                    if (!safeResult.canBeRemoved)
-                    {
-                        if (ImGui::IsItemHovered())
+                        // Display dependency details only while the delete button is hovered.
+                        if (!safeResult.canBeRemoved && deleteHovered)
                         {
                             ImGui::BeginTooltip();
                             ImGui::TextColored(

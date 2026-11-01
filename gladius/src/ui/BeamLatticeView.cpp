@@ -143,19 +143,18 @@ namespace gladius::ui
                     }
 
                     // Delete button (similar to other resource views)
-                    auto safeResult = document->isItSafeToDeleteResource(key);
-                    if (ImGui::Button("Delete"))
+                    bool const deleteClicked = ImGui::Button("Delete");
+                    bool const deleteHovered = ImGui::IsItemHovered();
+                    if (deleteClicked || deleteHovered)
                     {
-                        if (safeResult.canBeRemoved)
+                        auto safeResult = document->isItSafeToDeleteResource(key);
+                        if (deleteClicked && safeResult.canBeRemoved)
                         {
                             pendingResourceDeletion = key;
                             propertiesChanged = true;
                         }
-                    }
 
-                    if (!safeResult.canBeRemoved)
-                    {
-                        if (ImGui::IsItemHovered())
+                        if (!safeResult.canBeRemoved && deleteHovered)
                         {
                             ImGui::BeginTooltip();
                             ImGui::TextColored(

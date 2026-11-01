@@ -22,6 +22,11 @@ namespace gladius::io
 
     void ResourceDependencyGraph::buildGraph()
     {
+        m_graph = std::make_unique<nodes::graph::AdjacencyListDirectedGraph>();
+        m_resourcesById.clear();
+        m_dependentResourceIds.clear();
+        m_dependentBuildItems.clear();
+
         if (m_logger)
             m_logger->addEvent(
               {"Building resource dependency graph", gladius::events::Severity::Info});
@@ -41,10 +46,27 @@ namespace gladius::io
         while (resourceIterator->MoveNext())
         {
             Lib3MF::PResource resource = resourceIterator->GetCurrent();
-            m_graph->addVertex(resource->GetResourceID());
+            if (!resource)
+            {
+                continue;
+            }
+
+            Lib3MF_uint32 const resourceId = resource->GetResourceID();
+            m_graph->addVertex(resourceId);
+            m_resourcesById[resourceId] = resource;
         }
 
         // Reset the iterator
+
+        Lib3MF::PBuildItemIterator buildItemIterator = m_model->GetBuildItems();
+        while (buildItemIterator->MoveNext())
+        {
+            Lib3MF::PBuildItem buildItem = buildItemIterator->GetCurrent();
+            if (buildItem)
+            {
+                m_dependentBuildItems[buildItem->GetObjectResourceID()].push_back(buildItem);
+            }
+        }
         resourceIterator = m_model->GetResources();
 
         // Second pass: process each resource and add dependencies
@@ -222,14 +244,10 @@ namespace gladius::io
             return matchingItems;
         }
         Lib3MF_uint32 targetId = resource->GetResourceID();
-        Lib3MF::PBuildItemIterator buildItemIterator = m_model->GetBuildItems();
-        while (buildItemIterator->MoveNext())
+        auto const dependentItems = m_dependentBuildItems.find(targetId);
+        if (dependentItems != m_dependentBuildItems.end())
         {
-            Lib3MF::PBuildItem buildItem = buildItemIterator->GetCurrent();
-            if (buildItem && buildItem->GetObjectResourceID() == targetId)
-            {
-                matchingItems.push_back(buildItem);
-            }
+            matchingItems = dependentItems->second;
         }
         return matchingItems;
     }
@@ -249,17 +267,20 @@ namespace gladius::io
         Lib3MF_uint32 resourceIdToRemove = resourceToBeRemoved->GetResourceID();
 
         // 1. Check for dependent resources
-        Lib3MF::PResourceIterator resourceIterator = m_model->GetResources();
-        while (resourceIterator->MoveNext())
+        auto const dependentResources = m_dependentResourceIds.find(resourceIdToRemove);
+        if (dependentResources != m_dependentResourceIds.end())
         {
-            Lib3MF::PResource currentResource = resourceIterator->GetCurrent();
-            if (currentResource && currentResource->GetResourceID() != resourceIdToRemove)
+            for (Lib3MF_uint32 const dependentId : dependentResources->second)
             {
-                Lib3MF_uint32 currentResourceId = currentResource->GetResourceID();
-                // Check if currentResource directly depends on resourceIdToRemove
-                if (m_graph->isDirectlyDependingOn(currentResourceId, resourceIdToRemove))
+                if (dependentId == resourceIdToRemove)
                 {
-                    result.dependentResources.push_back(currentResource);
+                    continue;
+                }
+
+                auto const dependentResource = m_resourcesById.find(dependentId);
+                if (dependentResource != m_resourcesById.end())
+                {
+                    result.dependentResources.push_back(dependentResource->second);
                     result.canBeRemoved = false;
                 }
             }
@@ -273,6 +294,13 @@ namespace gladius::io
         }
 
         return result;
+    }
+
+    void ResourceDependencyGraph::addDependency(Lib3MF_uint32 resourceId,
+                                                Lib3MF_uint32 dependencyId)
+    {
+        m_graph->addDependency(resourceId, dependencyId);
+        m_dependentResourceIds[dependencyId].insert(resourceId);
     }
 
     void ResourceDependencyGraph::processLevelSet(Lib3MF::PLevelSet levelSet)
@@ -291,7 +319,7 @@ namespace gladius::io
             if (function)
             {
                 Lib3MF_uint32 functionId = function->GetResourceID();
-                m_graph->addDependency(levelSetId, functionId);
+                addDependency(levelSetId, functionId);
             }
         }
         catch (const std::exception & e)
@@ -310,7 +338,7 @@ namespace gladius::io
             if (mesh)
             {
                 Lib3MF_uint32 meshId = mesh->GetResourceID();
-                m_graph->addDependency(levelSetId, meshId);
+                addDependency(levelSetId, meshId);
             }
         }
         catch (const std::exception & e)
@@ -329,7 +357,7 @@ namespace gladius::io
             if (volumeData)
             {
                 Lib3MF_uint32 volumeDataId = volumeData->GetResourceID();
-                m_graph->addDependency(levelSetId, volumeDataId);
+                addDependency(levelSetId, volumeDataId);
             }
         }
         catch (const std::exception & e)
@@ -378,7 +406,7 @@ namespace gladius::io
                             {
                                 Lib3MF_uint32 referencedResourceId =
                                   referencedResource->GetResourceID();
-                                m_graph->addDependency(functionId, referencedResourceId);
+                                addDependency(functionId, referencedResourceId);
                             }
                         }
                         catch (const std::exception & e)
@@ -430,8 +458,7 @@ namespace gladius::io
                                         {
                                             Lib3MF_uint32 referencedFunctionId =
                                               resourceIdNode->GetResource()->GetResourceID();
-                                            m_graph->addDependency(functionId,
-                                                                   referencedFunctionId);
+                                            addDependency(functionId, referencedFunctionId);
                                         }
                                         break;
                                     }
@@ -472,7 +499,7 @@ namespace gladius::io
                 if (image)
                 {
                     Lib3MF_uint32 imageId = image->GetResourceID();
-                    m_graph->addDependency(functionId, imageId);
+                    addDependency(functionId, imageId);
                 }
             }
             catch (const std::exception & e)
@@ -506,7 +533,7 @@ namespace gladius::io
                 if (component)
                 {
                     Lib3MF_uint32 objectResourceId = component->GetObjectResourceID();
-                    m_graph->addDependency(componentsObjectId, objectResourceId);
+                    addDependency(componentsObjectId, objectResourceId);
                 }
             }
         }
@@ -534,7 +561,7 @@ namespace gladius::io
             Lib3MF::PObject baseObject = booleanObject->GetBaseObject();
             if (baseObject)
             {
-                m_graph->addDependency(booleanObjectId, baseObject->GetResourceID());
+                addDependency(booleanObjectId, baseObject->GetResourceID());
             }
         }
         catch (const std::exception & e)
@@ -558,7 +585,7 @@ namespace gladius::io
                 (void) booleanObject->GetOperand(operandIndex, operandObject);
                 if (operandObject)
                 {
-                    m_graph->addDependency(booleanObjectId, operandObject->GetResourceID());
+                    addDependency(booleanObjectId, operandObject->GetResourceID());
                 }
             }
         }
@@ -592,7 +619,7 @@ namespace gladius::io
 
             if (meshObject->GetObjectLevelProperty(propertyResourceId, propertyId))
             {
-                m_graph->addDependency(meshObjectId, propertyResourceId);
+                addDependency(meshObjectId, propertyResourceId);
             }
         }
         catch (const std::exception & e)
@@ -616,13 +643,13 @@ namespace gladius::io
 
                 if (clipResourceId > 0)
                 {
-                    m_graph->addDependency(meshObjectId, clipResourceId);
+                    addDependency(meshObjectId, clipResourceId);
                 }
 
                 Lib3MF_uint32 representationResourceId;
                 if (beamLattice->GetRepresentation(representationResourceId))
                 {
-                    m_graph->addDependency(meshObjectId, representationResourceId);
+                    addDependency(meshObjectId, representationResourceId);
                 }
             }
         }
@@ -642,7 +669,7 @@ namespace gladius::io
             if (volumeData)
             {
                 Lib3MF_uint32 volumeDataId = volumeData->GetResourceID();
-                m_graph->addDependency(meshObjectId, volumeDataId);
+                addDependency(meshObjectId, volumeDataId);
             }
         }
         catch (const std::exception & e)
@@ -692,7 +719,7 @@ namespace gladius::io
                 if (materialGroup)
                 {
                     Lib3MF_uint32 materialGroupId = materialGroup->GetResourceID();
-                    m_graph->addDependency(volumeDataId, materialGroupId);
+                    addDependency(volumeDataId, materialGroupId);
                 }
 
                 // Process all material mappings
@@ -752,7 +779,7 @@ namespace gladius::io
             Lib3MF_uint32 functionResourceId = functionRef->GetFunctionResourceID();
             if (functionResourceId > 0)
             {
-                m_graph->addDependency(resourceId, functionResourceId);
+                addDependency(resourceId, functionResourceId);
             }
         }
         catch (const std::exception & e)

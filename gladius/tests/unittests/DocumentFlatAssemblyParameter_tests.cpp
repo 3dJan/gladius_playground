@@ -72,4 +72,23 @@ namespace gladius_tests
         EXPECT_EQ(flatModel->getGraph().getSize(), graphSize);
         EXPECT_EQ(flatModel->getOutputOrder(), outputOrder);
     }
+
+    TEST(DocumentResourceRemoval, MissingDependencyGraph_IsBuiltBeforeCheckingResource)
+    {
+        events::SharedLogger logger = std::make_shared<events::Logger>();
+        gladius::Document document{std::move(logger)};
+        auto model = document.get3mfModel();
+        ASSERT_NE(model, nullptr);
+
+        auto function = model->AddImplicitFunction();
+        ASSERT_NE(function, nullptr);
+        auto const resourceId = function->GetModelResourceID();
+        ASSERT_NE(resourceId, 0u);
+        ASSERT_EQ(document.getResourceDependencyGraphSnapshot(), nullptr);
+
+        auto const result = document.isItSafeToDeleteResource(ResourceKey(resourceId));
+
+        EXPECT_TRUE(result.canBeRemoved);
+        EXPECT_NE(document.getResourceDependencyGraphSnapshot(), nullptr);
+    }
 }

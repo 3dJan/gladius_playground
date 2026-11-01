@@ -131,10 +131,6 @@ namespace gladius
          * @brief Waits until the assembly mutex can be locked and returns a token that keeps it
          * locked.
          *
-         * The token is an RAII wrapper that automatically releases the mutex when it goes out of
-         * scope. Use this method when you need guaranteed access to the assembly and are willing to
-         * wait.
-         *
          * @return AssemblyToken An RAII token that keeps the mutex locked for its lifetime
          */
         AssemblyToken waitForAssemblyToken() const;
@@ -434,9 +430,17 @@ namespace gladius
         std::vector<Lib3MF::PResource> findUnusedResources();
 
         /**
-         * @brief Get the ResourceDependencyGraph object
+         * @brief Get a stable snapshot of the ResourceDependencyGraph.
          *
-         * @return A pointer to the resource dependency graph (nullptr if not available)
+         * @return A shared snapshot, or an empty pointer if the graph is not available.
+         */
+        [[nodiscard]] std::shared_ptr<const gladius::io::ResourceDependencyGraph>
+        getResourceDependencyGraphSnapshot() const;
+
+        /**
+         * @brief Get the ResourceDependencyGraph object.
+         * @return A pointer to the graph, or nullptr if it is not available.
+         * @note Prefer getResourceDependencyGraphSnapshot() when retaining the graph.
          */
         [[nodiscard]] const gladius::io::ResourceDependencyGraph *
         getResourceDependencyGraph() const;
@@ -656,7 +660,8 @@ namespace gladius
         std::chrono::time_point<std::chrono::system_clock> m_lastBackupTime;
 
         /// Dependency graph for resource removal checks
-        std::unique_ptr<gladius::io::ResourceDependencyGraph> m_resourceDependencyGraph;
+        std::shared_ptr<gladius::io::ResourceDependencyGraph> m_resourceDependencyGraph;
+        mutable std::mutex m_resourceDependencyGraphMutex;
 
         /// Mutex for protecting m_assembly
         mutable std::mutex m_assemblyMutex;

@@ -7,6 +7,8 @@
 #include <lib3mf_implicit.hpp>
 #include <memory>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector> // Added for std::vector
 
 namespace gladius::io
@@ -114,6 +116,9 @@ namespace gladius::io
         [[nodiscard]] Lib3MF::PResource getResourceById(Lib3MF_uint32 resourceId) const;
 
       private:
+        /** @brief Add a dependency and update the reverse dependency index. */
+        void addDependency(Lib3MF_uint32 resourceId, Lib3MF_uint32 dependencyId);
+
         /**
          * @brief Process a LevelSet resource and add its dependencies to the graph
          * @param levelSet Pointer to the LevelSet resource
@@ -163,6 +168,17 @@ namespace gladius::io
 
         /** @brief The directed graph representing resource dependencies */
         std::unique_ptr<nodes::graph::IDirectedGraph> m_graph;
+
+        /** @brief Resources indexed by their Lib3MF resource ID. */
+        std::unordered_map<Lib3MF_uint32, Lib3MF::PResource> m_resourcesById;
+
+        /** @brief Direct dependents indexed by the resource they reference. */
+        std::unordered_map<Lib3MF_uint32, std::unordered_set<Lib3MF_uint32>>
+          m_dependentResourceIds;
+
+        /** @brief Build items indexed by the resource they reference. */
+        std::unordered_map<Lib3MF_uint32, std::vector<Lib3MF::PBuildItem>>
+          m_dependentBuildItems;
 
         /** @brief Shared logger for event handling */
         gladius::events::SharedLogger m_logger;

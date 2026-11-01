@@ -607,20 +607,21 @@ namespace gladius
             return;
         }
 
-        if (m_resourceDependencyGraph)
+                auto dependencyGraph = getResourceDependencyGraphSnapshot();
+                if (dependencyGraph)
         {
             ZoneScopedN("Document::loadReachableMeshResources");
             importer.loadMeshes(
               m_3mfmodel,
               *this,
-              m_resourceDependencyGraph->getAllRequiredResourceIdsForBuildItems());
+                            dependencyGraph->getAllRequiredResourceIdsForBuildItems());
             return;
         }
 
         // The normal load path builds this graph before mesh extraction so
         // unused mesh resources can be skipped. If this fallback path is used,
         // keep loading all meshes rather than risking missing geometry.
-        assert(m_resourceDependencyGraph &&
+         assert(dependencyGraph &&
                "Resource dependency graph should be built before loading meshes");
         importer.loadMeshes(m_3mfmodel, *this);
     }
@@ -844,10 +845,11 @@ namespace gladius
             nodes::OptimizeOutputs optimizer{&assemblyToFlat};
             optimizer.optimize();
 
-            // Pass the dependency graph to the flattener if available
+                        // Pass a stable dependency graph snapshot to the flattener if available.
+                        auto dependencyGraph = getResourceDependencyGraphSnapshot();
             nodes::GraphFlattener flattener =
-              m_resourceDependencyGraph
-                ? nodes::GraphFlattener(assemblyToFlat, m_resourceDependencyGraph.get())
+                            dependencyGraph
+                                ? nodes::GraphFlattener(assemblyToFlat, dependencyGraph.get())
                 : nodes::GraphFlattener(assemblyToFlat);
 
             m_flatAssembly = std::make_shared<nodes::Assembly>(flattener.flatten());
@@ -1060,6 +1062,10 @@ namespace gladius
         }
         m_modelFileName.clear();
         m_3mfmodel.reset();
+        {
+            std::lock_guard<std::mutex> lock(m_resourceDependencyGraphMutex);
+            m_resourceDependencyGraph.reset();
+        }
 
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
@@ -1090,6 +1096,10 @@ namespace gladius
         }
         m_modelFileName.clear();
         m_3mfmodel.reset();
+        {
+            std::lock_guard<std::mutex> lock(m_resourceDependencyGraphMutex);
+            m_resourceDependencyGraph.reset();
+        }
 
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
@@ -3036,6 +3046,8 @@ namespace gladius
     void Document::set3mfModel(Lib3MF::PModel model)
     {
         m_3mfmodel = std::move(model);
+        std::lock_guard<std::mutex> lock(m_resourceDependencyGraphMutex);
+        m_resourceDependencyGraph.reset();
     }
 
     Lib3MF::PModel Document::get3mfModel() const
@@ -4006,15 +4018,17 @@ namespace gladius
 
     void Document::rebuildResourceDependencyGraph()
     {
-
         if (!m_3mfmodel)
         {
             return;
         }
 
-        m_resourceDependencyGraph =
-          std::make_unique<io::ResourceDependencyGraph>(m_3mfmodel, getSharedLogger());
-        m_resourceDependencyGraph->buildGraph();
+                auto dependencyGraph =
+                    std::make_shared<io::ResourceDependencyGraph>(m_3mfmodel, getSharedLogger());
+                dependencyGraph->buildGraph();
+
+                std::lock_guard<std::mutex> lock(m_resourceDependencyGraphMutex);
+                m_resourceDependencyGraph = std::move(dependencyGraph);
     }
 
     io::CanResourceBeRemovedResult Document::isItSafeToDeleteResource(ResourceKey key)
@@ -4033,13 +4047,25 @@ namespace gladius
             return result;
         }
 
+        auto dependencyGraph = getResourceDependencyGraphSnapshot();
+        if (!dependencyGraph)
+        {
+            rebuildResourceDependencyGraph();
+            dependencyGraph = getResourceDependencyGraphSnapshot();
+        }
+        if (!dependencyGraph)
+        {
+            result.canBeRemoved = false;
+            return result;
+        }
+
         // map model ResourceId to UniqueResourceID for graph lookup
         Lib3MF_uint32 uniqueResId =
           io::resourceIdToUniqueResourceId(m_3mfmodel, modelResIdOpt.value());
         try
         {
             auto resource = m_3mfmodel->GetResourceByID(uniqueResId);
-            result = m_resourceDependencyGraph->checkResourceRemoval(resource);
+            result = dependencyGraph->checkResourceRemoval(resource);
             return result;
         }
         catch (const Lib3MF::ELib3MFException & e)
@@ -4070,7 +4096,7 @@ namespace gladius
 
     std::size_t Document::removeUnusedResources()
     {
-        if (!m_3mfmodel || !m_resourceDependencyGraph)
+        if (!m_3mfmodel || !getResourceDependencyGraphSnapshot())
         {
             auto logger = getSharedLogger();
             if (logger)
@@ -4090,8 +4116,12 @@ namespace gladius
         rebuildResourceDependencyGraph();
 
         // Find all unused resources
-        std::vector<Lib3MF::PResource> unusedResources =
-          m_resourceDependencyGraph->findUnusedResources();
+                auto dependencyGraph = getResourceDependencyGraphSnapshot();
+                if (!dependencyGraph)
+                {
+                        return 0;
+                }
+                std::vector<Lib3MF::PResource> unusedResources = dependencyGraph->findUnusedResources();
 
         if (unusedResources.empty())
         {
@@ -4177,7 +4207,7 @@ namespace gladius
 
     std::vector<Lib3MF::PResource> Document::findUnusedResources()
     {
-        if (!m_3mfmodel || !m_resourceDependencyGraph)
+        if (!m_3mfmodel || !getResourceDependencyGraphSnapshot())
         {
             auto logger = getSharedLogger();
             if (logger)
@@ -4193,12 +4223,22 @@ namespace gladius
         rebuildResourceDependencyGraph();
 
         // Find all unused resources
-        return m_resourceDependencyGraph->findUnusedResources();
+        auto dependencyGraph = getResourceDependencyGraphSnapshot();
+        return dependencyGraph ? dependencyGraph->findUnusedResources()
+                               : std::vector<Lib3MF::PResource>{};
     }
 
-    const gladius::io::ResourceDependencyGraph * Document::getResourceDependencyGraph() const
+    std::shared_ptr<const gladius::io::ResourceDependencyGraph>
+    Document::getResourceDependencyGraphSnapshot() const
     {
-        return m_resourceDependencyGraph.get();
+        std::lock_guard<std::mutex> lock(m_resourceDependencyGraphMutex);
+        return m_resourceDependencyGraph;
+    }
+
+    const gladius::io::ResourceDependencyGraph *
+    Document::getResourceDependencyGraph() const
+    {
+        return getResourceDependencyGraphSnapshot().get();
     }
 
     void Document::markValidationDirty()

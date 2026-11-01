@@ -362,19 +362,17 @@ namespace gladius::ui
                         ImGui::EndTable();
                     }
 
-                    // always show delete button, but indicate dependencies
-                    auto safeResult = document->isItSafeToDeleteResource(key);
-                    if (ImGui::Button("Delete"))
+                    bool const deleteClicked = ImGui::Button("Delete");
+                    bool const deleteHovered = ImGui::IsItemHovered();
+                    if (deleteClicked || deleteHovered)
                     {
-                        if (safeResult.canBeRemoved)
+                        auto safeResult = document->isItSafeToDeleteResource(key);
+                        if (deleteClicked && safeResult.canBeRemoved)
                         {
                             pendingResourceDeletion = key;
                         }
-                    }
 
-                    if (!safeResult.canBeRemoved)
-                    {
-                        if (ImGui::IsItemHovered())
+                        if (!safeResult.canBeRemoved && deleteHovered)
                         {
                             ImGui::BeginTooltip();
                             ImGui::TextColored(
@@ -631,9 +629,6 @@ namespace gladius::ui
                         ImGui::TreePop();
                     }
 
-                    // delete image stack
-                    auto safeResult = document->isItSafeToDeleteResource(key);
-
                     // Create FunctionFromImage3D button
                     ImGui::BeginDisabled(exportInProgress);
                     if (ImGui::Button("Create Function"))
@@ -743,17 +738,17 @@ namespace gladius::ui
                     }
 
                     ImGui::SameLine();
-                    if (ImGui::Button("Delete"))
+                    bool const deleteClicked = ImGui::Button("Delete");
+                    bool const deleteHovered = ImGui::IsItemHovered();
+                    if (deleteClicked || deleteHovered)
                     {
-                        if (safeResult.canBeRemoved)
+                        auto safeResult = document->isItSafeToDeleteResource(key);
+                        if (deleteClicked && safeResult.canBeRemoved)
                         {
                             pendingResourceDeletion = key;
                         }
-                    }
 
-                    if (!safeResult.canBeRemoved)
-                    {
-                        if (ImGui::IsItemHovered())
+                        if (!safeResult.canBeRemoved && deleteHovered)
                         {
                             ImGui::BeginTooltip();
                             ImGui::TextColored(
