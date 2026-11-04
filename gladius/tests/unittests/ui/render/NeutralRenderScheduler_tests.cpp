@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -296,6 +297,45 @@ namespace gladius::ui::async_rendering::tests
         ASSERT_EQ(result.completions.size(), 1u);
         EXPECT_TRUE(result.completions.front().taskResult.succeeded());
         EXPECT_FALSE(scheduler.hasInFlightSubmissions());
+    }
+
+    TEST(NeutralRenderScheduler, FullHeightProgressiveTask_SubmitsContiguousBoundedChunks)
+    {
+        NeutralRenderScheduler scheduler{makeRequest};
+        ImmediateRenderer renderer;
+        auto task = makeTask();
+        task.width = 1920u;
+        task.height = 137u;
+        task.startLine = 0u;
+        task.lineCount = task.height;
+
+                auto const rowsPerChunk = NeutralRenderScheduler::MAX_PROGRESSIVE_CHUNK_PIXELS / task.width;
+                auto const expectedChunkCount =
+                    (static_cast<std::size_t>(task.height) + rowsPerChunk - 1u) / rowsPerChunk;
+                std::uint32_t completedRow{};
+                std::size_t chunkCount{};
+                while (completedRow < task.height)
+        {
+            ASSERT_TRUE(scheduler.submit(task, renderer));
+            auto result = scheduler.poll();
+            ASSERT_EQ(result.acceptedFrames.size(), 1u);
+            ASSERT_EQ(result.completions.size(), 1u);
+            auto const & frame = result.acceptedFrames.front().frame;
+                        auto const expectedEndRow = static_cast<std::uint32_t>(std::min<std::size_t>(
+                            static_cast<std::size_t>(completedRow) + rowsPerChunk, task.height));
+                        EXPECT_EQ(frame.firstRow, completedRow);
+                        EXPECT_EQ(frame.endRow, expectedEndRow);
+                        EXPECT_LE(static_cast<std::size_t>(frame.endRow - frame.firstRow), rowsPerChunk);
+            EXPECT_EQ(result.completions.front().taskResult.completedFrame,
+                      frame.endRow == task.height);
+            completedRow = frame.endRow;
+                        EXPECT_TRUE(scheduler.workflow().presentCandidate(result.acceptedFrames.front().candidate));
+                        ++task.requestId;
+                        ++chunkCount;
+                }
+
+                EXPECT_EQ(chunkCount, expectedChunkCount);
+        EXPECT_TRUE(scheduler.workflow().isHighQualityFrameCurrent());
     }
 
     TEST(NeutralRenderScheduler, SubmitAndPoll_WithLowResolutionTask_ReturnsAcceptedFrame)

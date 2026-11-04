@@ -152,6 +152,24 @@ file(COPY "../../examples/template.3mf" DESTINATION "examples/")
 # Copy example implicit models used by library export tests
 file(COPY "../../examples/implicit/RadialRadiator.3mf" DESTINATION "testdata/")
 
+# Copy shipped parametric building-block assets used by the native 3MF smoke test.
+set(BUILDING_BLOCK_LIBRARY_ASSETS
+  "${CMAKE_SOURCE_DIR}/library/mechanical/brick_stud.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/brick_socket_cutter.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/building_brick_nm.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/brick_8mm_pitch_nm.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/brick_16mm_pitch_nm.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/plate_8mm_pitch_nm.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/tile_8mm_pitch_nm.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/plate_16mm_pitch_nm.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/tile_16mm_pitch_nm.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/building_brick_fit_coupon.3mf"
+  "${CMAKE_SOURCE_DIR}/library/mechanical/car_coupler_16mm_pitch.3mf"
+)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/testdata/mechanical")
+file(COPY ${BUILDING_BLOCK_LIBRARY_ASSETS}
+  DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/testdata/mechanical")
+
 # Use gtest_discover_tests for automatic test discovery with 'unit' label
 # DISCOVERY_MODE POST_BUILD allows set_tests_properties to work after discovery
 gtest_discover_tests(${BINARY}

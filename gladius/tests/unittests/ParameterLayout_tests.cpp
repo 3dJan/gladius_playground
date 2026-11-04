@@ -195,6 +195,39 @@ namespace gladius::compute::tests
         EXPECT_FLOAT_EQ(snapshot.parameterValues[destinations.front().offset], 99.0f);
     }
 
+    TEST(AnalyticRenderSceneSnapshotFactory,
+         CreateRuntimeFromFlat_LiteralEdit_ChangesOnlyParameterValues)
+    {
+        nodes::Assembly assembly;
+        auto model = assembly.assemblyModel();
+        model->createBeginEndWithDefaultInAndOuts();
+        auto * scalar = model->create<nodes::ConstantScalar>();
+        auto & parameter = scalar->parameter().at(nodes::FieldNames::Value);
+        parameter.setValue(-0.25f);
+        parameter.setModifiable(false);
+        nodes::ParameterOrigin const origin{model->getResourceId(), parameter.getId()};
+        parameter.setOrigin(origin);
+        ASSERT_TRUE(model->addLink(scalar->getValueOutputPort().getId(),
+                                  model->getEndNode()->parameter().at(nodes::FieldNames::Shape).getId()));
+
+        nodes::GraphFlattener flattener{assembly};
+        auto const flattened = flattener.flatten();
+        auto snapshot = AnalyticRenderSceneSnapshotFactory::createRuntimeFromFlat(flattened, 9u);
+        auto const originalWgsl = snapshot.analyticEvaluatorWgsl;
+
+        ASSERT_TRUE(snapshot.isValid());
+        ASSERT_NE(snapshot.parameterLayout, nullptr);
+        auto const destinations = snapshot.parameterLayout->getDestinations(origin);
+        ASSERT_EQ(destinations.size(), 1u);
+        EXPECT_FLOAT_EQ(snapshot.parameterValues[destinations.front().offset], -0.25f);
+        ASSERT_TRUE(snapshot.parameterLayout->apply(origin,
+                                                    nodes::VariantType{0.75f},
+                                                    snapshot.sceneGeneration,
+                                                    snapshot.parameterValues));
+        EXPECT_FLOAT_EQ(snapshot.parameterValues[destinations.front().offset], 0.75f);
+        EXPECT_EQ(snapshot.analyticEvaluatorWgsl, originalWgsl);
+    }
+
     TEST_F(RuntimeParameterLayoutTest, CreateRuntime_RepeatedCallsWithCollidingLocalIds_SeparatesModelOrigins)
     {
         configureScalarFunction(1001u);
