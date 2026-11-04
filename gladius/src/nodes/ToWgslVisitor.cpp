@@ -87,6 +87,11 @@ namespace gladius::nodes
         m_bufferNumericLiterals = enabled;
     }
 
+    void ToWgslVisitor::setParameterLookupIndices(ParameterLookupIndices const * const indices) noexcept
+    {
+        m_parameterLookupIndices = indices;
+    }
+
     bool ToWgslVisitor::beginNode(NodeBase const & node)
     {
         if (m_functionClosed)
@@ -126,7 +131,19 @@ namespace gladius::nodes
         auto const & value = variantParameter->getValue();
         if (parameter.isModifiable() || m_bufferNumericLiterals)
         {
-            auto const lookupIndex = const_cast<IParameter &>(parameter).getLookUpIndex();
+            int lookupIndex = -1;
+            if (m_parameterLookupIndices != nullptr)
+            {
+                auto const index = m_parameterLookupIndices->find(parameter.getId());
+                if (index != m_parameterLookupIndices->end())
+                {
+                    lookupIndex = index->second;
+                }
+            }
+            else
+            {
+                lookupIndex = const_cast<IParameter &>(parameter).getLookUpIndex();
+            }
             if (lookupIndex < 0)
             {
                 throw std::runtime_error("WGSL evaluator received an invalid parameter lookup index");

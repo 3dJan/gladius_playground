@@ -109,5 +109,12 @@ namespace gladius::compute
             std::uint64_t generation,
             ResourceManager const * resourceManager = nullptr,
             std::string * errorMessage = nullptr);
+
+                /// @brief Build a runtime snapshot from Document’s already-lowered flattened assembly.
+                [[nodiscard]] static RenderSceneSnapshot materializeRuntimeFlatScene(
+                    nodes::Assembly const & flattenedAssembly,
+                    std::uint64_t generation,
+                    ResourceManager const * resourceManager = nullptr,
+                    std::string * errorMessage = nullptr);
     };
 }

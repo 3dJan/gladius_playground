@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FramePresentationTypes.h"
 #include "compute/RenderContracts.h"
 
 #include <array>
@@ -19,7 +20,8 @@ namespace gladius::ui::async_rendering
         FramePresenter(FramePresenter const &) = delete;
         FramePresenter & operator=(FramePresenter const &) = delete;
 
-        [[nodiscard]] virtual bool present(compute::RenderFrame const & frame) = 0;
+        [[nodiscard]] virtual bool present(compute::RenderFrame const & frame,
+                  FramePresentationCandidate const & candidate) = 0;
         virtual void release() noexcept = 0;
         [[nodiscard]] virtual std::uintptr_t getTextureId() const noexcept = 0;
         [[nodiscard]] virtual std::uint32_t getWidth() const noexcept = 0;

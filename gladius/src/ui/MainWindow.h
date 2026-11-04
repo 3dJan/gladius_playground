@@ -103,6 +103,8 @@ namespace gladius::ui
         void renderSettingsDialog();
         void open(const std::filesystem::path & filename);
         void setStartupFile(std::filesystem::path filename);
+        void startUiFpsBenchmark(std::filesystem::path outputPath,
+                     std::chrono::seconds measurementDuration);
         void startMainLoop();
         void setup();
 

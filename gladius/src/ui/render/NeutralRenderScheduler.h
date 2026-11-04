@@ -4,12 +4,20 @@
 #include "RenderWorkflowController.h"
 #include "compute/RenderBackendSession.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <vector>
 
 namespace gladius::ui::async_rendering
 {
+  struct NeutralRenderSubmissionTimings
+  {
+    double requestFactoryMs{0.0};
+    double backendSubmitMs{0.0};
+  };
+
     /**
      * @brief Accepted backend-neutral frame ready for a UI-thread presenter upload.
      */
@@ -40,6 +48,8 @@ namespace gladius::ui::async_rendering
     class NeutralRenderScheduler
     {
       public:
+        static constexpr std::size_t MAX_PROGRESSIVE_CHUNK_PIXELS = 2u * 1024u;
+
         using RequestFactory = std::function<std::optional<compute::RenderRequest>(RenderTaskRequest const &)>;
 
         explicit NeutralRenderScheduler(RequestFactory requestFactory);
@@ -49,7 +59,8 @@ namespace gladius::ui::async_rendering
                  compute::IComputeRenderer & renderer,
                  compute::IRenderScene const & scene);
         [[nodiscard]] bool submit(RenderTaskRequest const & task,
-                 compute::RenderBackendSession & session);
+                                  compute::RenderBackendSession & session,
+                                  NeutralRenderSubmissionTimings * timings = nullptr);
         void requestCancellationForStale() noexcept;
         void requestCancellationForAll() noexcept;
         [[nodiscard]] NeutralRenderPollResult poll(bool scheduleFollowUp = true);
@@ -66,9 +77,16 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] static std::optional<FramePresentationCandidate> findCandidate(
           RenderWorkflowDecision const & decision,
           std::uint64_t requestId) noexcept;
+        [[nodiscard]] RenderTaskRequest prepareTaskForSubmission(RenderTaskRequest const & task);
+        void resetProgressiveSequence() noexcept;
 
         RequestFactory m_requestFactory;
         NeutralFrameSubmissionTracker m_submissions;
         RenderWorkflowController m_workflow;
+        std::optional<RenderStamp> m_progressiveStamp;
+        std::uint32_t m_progressiveWidth{};
+        std::uint32_t m_progressiveHeight{};
+        std::uint32_t m_progressiveNextRow{};
+        bool m_progressiveSequenceActive{false};
     };
 }

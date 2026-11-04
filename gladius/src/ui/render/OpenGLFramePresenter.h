@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace gladius::ui::async_rendering
 {
@@ -24,7 +25,8 @@ namespace gladius::ui::async_rendering
         OpenGLFramePresenter & operator=(OpenGLFramePresenter const &) = delete;
 
         [[nodiscard]] static bool canPresent(compute::RenderFrame const & frame) noexcept;
-        [[nodiscard]] bool present(compute::RenderFrame const & frame) override;
+        [[nodiscard]] bool present(compute::RenderFrame const & frame,
+                 FramePresentationCandidate const & candidate) override;
         void release() noexcept override;
 
         [[nodiscard]] std::uintptr_t getTextureId() const noexcept override;
@@ -39,5 +41,8 @@ namespace gladius::ui::async_rendering
         std::uint32_t m_width{};
         std::uint32_t m_height{};
         std::optional<compute::RenderFreshnessStamp> m_freshness;
+        std::optional<compute::RenderFrame> m_previewSeedFrame;
+        std::optional<FramePresentationCandidate> m_previewSeedCandidate;
+        std::vector<std::uint32_t> m_stagingPixels;
     };
 }

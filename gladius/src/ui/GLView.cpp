@@ -768,10 +768,19 @@ namespace gladius
         ImGuiStyle & style = ImGui::GetStyle();
         style.ScaleAllSizes(m_uiScale);
 
+        auto const viewCallbacksStart =
+          m_uiFpsBenchmark ? ui::UiFpsBenchmark::Clock::now()
+                           : ui::UiFpsBenchmark::Clock::time_point{};
         for (std::size_t callbackIndex = 0; callbackIndex < m_viewCallBacks.size(); ++callbackIndex)
         {
             m_viewCallBacks[callbackIndex]();
         }
+        m_uiFpsBenchmarkViewCallbacksMs =
+          m_uiFpsBenchmark
+            ? std::chrono::duration<double, std::milli>(
+                ui::UiFpsBenchmark::Clock::now() - viewCallbacksStart)
+                .count()
+            : 0.0;
 
 
 #if defined(GLADIUS_UI_BACKEND_WEBGPU)
@@ -1240,11 +1249,16 @@ namespace gladius
             return;
         }
 
+        auto const frameStart = ui::UiFpsBenchmark::Clock::now();
+        bool const benchmarkActive = m_uiFpsBenchmark != nullptr;
         FrameMark;
 
     #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glfwMakeContextCurrent(m_window);
     #endif
+        auto const renderCallbackStart =
+          benchmarkActive ? ui::UiFpsBenchmark::Clock::now()
+                          : ui::UiFpsBenchmark::Clock::time_point{};
         try
         {
             m_render();
@@ -1262,7 +1276,16 @@ namespace gladius
             std::cerr << "Render exception: " << ex.what() << "\n";
 #endif
         }
+                auto const applicationRenderMs =
+                    benchmarkActive
+                        ? std::chrono::duration<double, std::milli>(ui::UiFpsBenchmark::Clock::now() -
+                                                                                                                renderCallbackStart)
+                                .count()
+                        : 0.0;
 
+                auto const uiDisplayStart =
+                    benchmarkActive ? ui::UiFpsBenchmark::Clock::now()
+                                                    : ui::UiFpsBenchmark::Clock::time_point{};
         try
         {
             displayUI();
@@ -1280,6 +1303,12 @@ namespace gladius
             std::cerr << "DisplayUI exception: " << ex.what() << "\n";
 #endif
         }
+                auto const uiDisplayMs =
+                    benchmarkActive
+                        ? std::chrono::duration<double, std::milli>(ui::UiFpsBenchmark::Clock::now() -
+                                                                                                                uiDisplayStart)
+                                .count()
+                        : 0.0;
 
         // ImGui automatically saves settings periodically, but this ensures
         // we're using our custom file path if ImGui decides to save this frame
@@ -1291,9 +1320,55 @@ namespace gladius
 
         processPendingScreenshot();
 
+                auto const bufferSwapStart =
+                    benchmarkActive ? ui::UiFpsBenchmark::Clock::now()
+                                                    : ui::UiFpsBenchmark::Clock::time_point{};
     #if defined(GLADIUS_UI_BACKEND_OPENGL)
         glfwSwapBuffers(m_window);
     #endif
+                auto const bufferSwapMs =
+                    benchmarkActive
+                        ? std::chrono::duration<double, std::milli>(ui::UiFpsBenchmark::Clock::now() -
+                                                                                                                bufferSwapStart)
+                                .count()
+                        : 0.0;
+
+        if (m_uiFpsBenchmark)
+        {
+            try
+            {
+                auto benchmarkState = m_uiFpsBenchmarkReadiness
+                                        ? m_uiFpsBenchmarkReadiness()
+                                        : ui::UiFpsBenchmarkState{};
+                benchmarkState.stageTimings.preDisplayHookMs = applicationRenderMs;
+                benchmarkState.stageTimings.viewCallbacksMs = m_uiFpsBenchmarkViewCallbacksMs;
+                benchmarkState.stageTimings.uiDisplayMs = uiDisplayMs;
+                benchmarkState.stageTimings.bufferSwapMs = bufferSwapMs;
+                auto const & io = ImGui::GetIO();
+                bool const completed = m_uiFpsBenchmark->recordFrame(
+                  frameStart,
+                  ui::UiFpsBenchmark::Clock::now(),
+                  benchmarkState,
+                  static_cast<std::uint32_t>(std::max(io.DisplaySize.x, 0.0f)),
+                  static_cast<std::uint32_t>(std::max(io.DisplaySize.y, 0.0f)),
+                  {io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y},
+                  m_isAnimationRunning);
+                if (completed)
+                {
+                    std::cerr << "[UI FPS benchmark] "
+                              << (m_uiFpsBenchmark->didTimeOut()
+                                    ? "Timed out waiting for a settled frame; report written to "
+                                    : "Report written to ")
+                              << m_uiFpsBenchmark->outputPath().string() << '\n';
+                    m_stateCloseRequested = true;
+                }
+            }
+            catch (std::exception const & exception)
+            {
+                std::cerr << "[UI FPS benchmark] Failed: " << exception.what() << '\n';
+                m_stateCloseRequested = true;
+            }
+        }
     }
 
     std::chrono::milliseconds getTimeStamp_ms()
@@ -1396,7 +1471,9 @@ namespace gladius
                 else
                 {
                     auto durationSinceAnimation = getTimeStamp_ms() - lastAnimationTimePoint_ms;
-                    if (durationSinceAnimation < std::chrono::seconds{5})
+                    // A benchmark measures active UI cadence; do not enter the normal
+                    // event-driven idle wait while collecting its frame intervals.
+                    if (m_uiFpsBenchmark || durationSinceAnimation < std::chrono::seconds{5})
                     {
                         glfwPollEvents();
                     }
@@ -1427,6 +1504,16 @@ namespace gladius
     {
         m_render = func;
     }
+
+        void GLView::startUiFpsBenchmark(
+            std::filesystem::path outputPath,
+            std::chrono::seconds measurementDuration,
+            std::function<ui::UiFpsBenchmarkState()> readinessProvider)
+        {
+                m_uiFpsBenchmark = std::make_unique<ui::UiFpsBenchmark>(
+                    std::move(outputPath), measurementDuration);
+                m_uiFpsBenchmarkReadiness = std::move(readinessProvider);
+        }
 
     void GLView::setFileDropCallback(const FileDropCallBack & func)
     {

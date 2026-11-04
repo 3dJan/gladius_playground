@@ -233,4 +233,38 @@ namespace gladius::compute
             return RenderSceneSnapshot{};
         }
     }
+
+    RenderSceneSnapshot ComputeRendererFactory::materializeRuntimeFlatScene(
+      nodes::Assembly const & flattenedAssembly,
+      std::uint64_t const generation,
+      ResourceManager const * resourceManager,
+      std::string * errorMessage)
+    {
+        if (errorMessage != nullptr)
+        {
+            errorMessage->clear();
+        }
+
+        try
+        {
+            return AnalyticRenderSceneSnapshotFactory::createRuntimeFromFlat(
+              flattenedAssembly, generation, resourceManager);
+        }
+        catch (std::exception const & error)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = error.what();
+            }
+            return RenderSceneSnapshot{};
+        }
+        catch (...)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Unknown flattened runtime render scene materialization failure";
+            }
+            return RenderSceneSnapshot{};
+        }
+    }
 }

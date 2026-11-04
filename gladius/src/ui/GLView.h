@@ -1,8 +1,10 @@
 #pragma once
 
 #include "Theme.h"
+#include "UiFpsBenchmark.h"
 
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -59,6 +61,11 @@ namespace gladius
     #endif
 
         void startMainLoop();
+
+        /// @brief Start an opt-in frame-cadence benchmark that exits after its report is written.
+        void startUiFpsBenchmark(std::filesystem::path outputPath,
+                     std::chrono::seconds measurementDuration,
+                     std::function<ui::UiFpsBenchmarkState()> readinessProvider);
 
         void render();
 
@@ -206,6 +213,9 @@ namespace gladius
         void handleDropCallback(GLFWwindow * window, int count, const char ** paths);
         ViewCallBack m_render = noOp;
         RequestCloseCallBack m_close = noOp;
+        std::unique_ptr<ui::UiFpsBenchmark> m_uiFpsBenchmark;
+        std::function<ui::UiFpsBenchmarkState()> m_uiFpsBenchmarkReadiness;
+        double m_uiFpsBenchmarkViewCallbacksMs{0.0};
 
         FileDropCallBack m_fileDrop = noOpFileDrop;
         std::string m_screenshotPath;

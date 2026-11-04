@@ -1,5 +1,6 @@
 #include "WebGPUFramePresenter.h"
 
+#include "ProgressivePreviewSeed.h"
 #include "webgpu/WebGPUComputeContext.h"
 
 #include <algorithm>
@@ -21,7 +22,8 @@ namespace gladius::ui::async_rendering
         release();
     }
 
-    bool WebGPUFramePresenter::present(compute::RenderFrame const & frame)
+    bool WebGPUFramePresenter::present(compute::RenderFrame const & frame,
+                                       FramePresentationCandidate const & candidate)
     {
         if (!frame.isValid() || !m_context || !m_context->isValid())
         {
@@ -86,8 +88,24 @@ namespace gladius::ui::async_rendering
                 return false;
             }
             auto const clearSizeBytes = alignedBytesPerRow * static_cast<std::size_t>(frame.height);
-            m_clearData.resize(clearSizeBytes);
+            m_clearData.resize(clearSizeBytes / sizeof(std::uint32_t));
             std::fill(m_clearData.begin(), m_clearData.end(), 0u);
+
+            bool const hasCompatibleSeed =
+              startsProgressiveFrame && m_previewSeedFrame && m_previewSeedCandidate &&
+              canSeedProgressiveFrame(*m_previewSeedFrame,
+                                      *m_previewSeedCandidate,
+                                      frame,
+                                      candidate);
+            if (hasCompatibleSeed &&
+                !resampleCompleteFrameToBuffer(*m_previewSeedFrame,
+                                               frame.width,
+                                               frame.height,
+                                               m_clearData.data(),
+                                               alignedBytesPerRow / sizeof(std::uint32_t)))
+            {
+                std::fill(m_clearData.begin(), m_clearData.end(), 0u);
+            }
 
             wgpu::TexelCopyTextureInfo clearDestination;
             clearDestination.texture = m_texture;
@@ -100,7 +118,7 @@ namespace gladius::ui::async_rendering
                                        .depthOrArrayLayers = 1u};
             m_context->getQueue().WriteTexture(&clearDestination,
                                                m_clearData.data(),
-                                               m_clearData.size(),
+                                               clearSizeBytes,
                                                &clearLayout,
                                                &clearExtent);
         }
@@ -157,6 +175,19 @@ namespace gladius::ui::async_rendering
         m_width = frame.width;
         m_height = frame.height;
         m_freshness = frame.freshness;
+        if (isCompletePreviewSeedFrame(frame, candidate))
+        {
+            m_previewSeedFrame = frame;
+            m_previewSeedCandidate = candidate;
+        }
+        else if (isPreviewFrameSource(candidate.source) ||
+                 (m_previewSeedCandidate &&
+                  !matchesProgressivePreviewSeedStamp(m_previewSeedCandidate->stamp,
+                                                       candidate.stamp)))
+        {
+            m_previewSeedFrame.reset();
+            m_previewSeedCandidate.reset();
+        }
         ++m_presentCount;
         return true;
     }
@@ -174,6 +205,8 @@ namespace gladius::ui::async_rendering
         m_capacityWidth = 0u;
         m_capacityHeight = 0u;
         m_freshness.reset();
+        m_previewSeedFrame.reset();
+        m_previewSeedCandidate.reset();
         m_presentCount = 0u;
         m_lastLoggedViewGeneration = 0u;
         m_lastLoggedWidth = 0u;

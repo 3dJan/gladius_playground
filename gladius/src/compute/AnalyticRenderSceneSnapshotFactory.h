@@ -1,8 +1,10 @@
 #pragma once
 
 #include "compute/RenderSceneSnapshot.h"
+#include "nodes/nodesfwd.h"
 
 #include <cstdint>
+#include <map>
 
 namespace gladius::nodes
 {
@@ -48,13 +50,25 @@ namespace gladius::compute
                                                                std::uint64_t sceneGeneration,
                                                                ResourceManager const * resourceManager = nullptr);
 
+                /// Build runtime numerical storage from an assembly already lowered and flattened by Document.
+                [[nodiscard]] static RenderSceneSnapshot createRuntimeFromFlat(
+                    nodes::Assembly const & flattenedAssembly,
+                    std::uint64_t sceneGeneration,
+                    ResourceManager const * resourceManager = nullptr);
+
             private:
-                [[nodiscard]] static RenderSceneSnapshot createModel(nodes::Model & model,
-                                                                                                                         std::uint64_t sceneGeneration,
-                                                                                                                         bool bufferNumericLiterals);
-                [[nodiscard]] static RenderSceneSnapshot createModel(nodes::Model & model,
-                                                                                                                         std::uint64_t sceneGeneration,
-                                                                                                                         ResourceManager const & resourceManager,
-                                                                                                                         bool bufferNumericLiterals);
+                using ParameterLookupIndices = std::map<nodes::ParameterId, int>;
+
+                [[nodiscard]] static RenderSceneSnapshot createModel(
+                    nodes::Model & model,
+                    std::uint64_t sceneGeneration,
+                    bool bufferNumericLiterals,
+                    ParameterLookupIndices const * lookupIndices = nullptr);
+                [[nodiscard]] static RenderSceneSnapshot createModel(
+                    nodes::Model & model,
+                    std::uint64_t sceneGeneration,
+                    ResourceManager const & resourceManager,
+                    bool bufferNumericLiterals,
+                    ParameterLookupIndices const * lookupIndices = nullptr);
     };
 }

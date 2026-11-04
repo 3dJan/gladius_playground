@@ -24,10 +24,15 @@ namespace gladius::nodes
     class ToWgslVisitor final : public Visitor
     {
       public:
+        using ParameterLookupIndices = std::map<ParameterId, int>;
+
         void setModel(Model * model) override;
         void write(std::ostream & out) const;
         [[nodiscard]] std::size_t getRequiredParameterCount() const noexcept;
         [[nodiscard]] bool usesParameter(ParameterId parameterId) const noexcept;
+
+        /// Use externally assigned indices without mutating parameters in the visited model.
+        void setParameterLookupIndices(ParameterLookupIndices const * indices) noexcept;
 
         /// Buffer numeric literals too, without changing persisted/OpenCL modifiability.
         void setBufferNumericLiterals(bool enabled);
@@ -116,6 +121,7 @@ namespace gladius::nodes
         mutable std::map<std::pair<NodeId, std::string>, std::string> m_inlineExpressions;
         mutable std::size_t m_requiredParameterCount{};
         mutable std::set<ParameterId> m_requiredParameterIds;
+        ParameterLookupIndices const * m_parameterLookupIndices{};
         bool m_functionClosed{};
         bool m_bufferNumericLiterals{};
     };

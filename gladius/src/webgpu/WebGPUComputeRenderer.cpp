@@ -359,15 +359,15 @@ namespace gladius::webgpu
             throw std::invalid_argument("WebGPU scene has no valid runtime parameter snapshot");
         }
 
-                auto frameSubmission = m_backend->submitFrame(
-                    createFrameRequest(analyticScene->getSnapshot(),
-                                                         *parameterSnapshot,
-                                                         analyticScene->getComposedShader(),
-                                                         request));
+        auto frameRequest = createFrameRequest(analyticScene->getSnapshot(),
+                                               *parameterSnapshot,
+                                               analyticScene->getComposedShader(),
+                                               request);
+        auto frameSubmission = m_backend->submitFrame(std::move(frameRequest));
         return std::make_unique<WebGPUFrameRenderSubmission>(std::move(frameSubmission),
-                                                                                                                        std::move(request),
-                                                                                                                        analyticScene->getSharedSnapshot(),
-                                                                                                                        parameterSnapshot);
+                                                             std::move(request),
+                                                             analyticScene->getSharedSnapshot(),
+                                                             parameterSnapshot);
     }
 
     std::unique_ptr<compute::IRenderSubmission> WebGPUComputeRenderer::submitFrame(compute::RenderRequest)

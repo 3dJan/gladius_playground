@@ -3,6 +3,7 @@
 #include "../types.h"
 #include "GLView.h"
 #include "OrbitalCamera.h"
+#include "UiFpsBenchmark.h"
 #include "compute/ApplicationComputeRuntime.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "compute/ComputeCore.h"
@@ -15,6 +16,7 @@
 #include "render/RealtimeRaymarchController.h"
 #include "RenderTranslucencyControls.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -127,6 +129,17 @@ namespace gladius::ui
         void renderWindow();
         void updateCamera();
         bool isRenderingInProgress() const;
+        [[nodiscard]] bool hasPresentedFrame() const noexcept;
+        void setUiFpsBenchmarkStageTimingEnabled(bool enabled) noexcept
+        {
+          m_uiFpsBenchmarkStageTimingEnabled = enabled;
+        }
+        [[nodiscard]] UiFpsBenchmarkStageTimings const & uiFpsBenchmarkStageTimings() const noexcept
+        {
+          return m_uiFpsBenchmarkStageTimings;
+        }
+        [[nodiscard]] std::array<std::uint32_t, 2> previewViewportDimensions() const noexcept;
+        [[nodiscard]] bool isSettledForUiBenchmark() const noexcept;
 
         /// @brief Return the latest authoritative bounds produced by the active neutral backend.
         [[nodiscard]] std::optional<compute::RenderBounds> getCurrentModelBounds() const;
@@ -611,6 +624,8 @@ namespace gladius::ui
         std::unique_ptr<compute::RenderBackendSession> m_renderBackendSession;
         compute::RenderBackendSession * m_runtimeRenderBackendSession{nullptr};
         std::unique_ptr<async_rendering::FramePresenter> m_neutralFramePresenter;
+        bool m_uiFpsBenchmarkStageTimingEnabled{false};
+        UiFpsBenchmarkStageTimings m_uiFpsBenchmarkStageTimings{};
         std::unique_ptr<compute::IBoundsSubmission> m_neutralBoundsSubmission;
         std::optional<compute::RenderBounds> m_neutralModelBounds;
         compute::RenderFreshnessStamp m_neutralBoundsFreshness{};

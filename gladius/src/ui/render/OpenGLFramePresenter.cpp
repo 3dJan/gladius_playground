@@ -1,6 +1,10 @@
 #include "ui/render/OpenGLFramePresenter.h"
 
+#include "ui/render/ProgressivePreviewSeed.h"
+
+#include <algorithm>
 #include <glad/glad.h>
+#include <limits>
 
 namespace gladius::ui::async_rendering
 {
@@ -14,7 +18,8 @@ namespace gladius::ui::async_rendering
         return frame.isValid();
     }
 
-    bool OpenGLFramePresenter::present(compute::RenderFrame const & frame)
+    bool OpenGLFramePresenter::present(compute::RenderFrame const & frame,
+                                       FramePresentationCandidate const & candidate)
     {
         if (!canPresent(frame))
         {
@@ -27,7 +32,8 @@ namespace gladius::ui::async_rendering
         }
 
         glBindTexture(GL_TEXTURE_2D, m_textureId);
-        if (m_width != frame.width || m_height != frame.height)
+        bool const dimensionsChanged = m_width != frame.width || m_height != frame.height;
+        if (dimensionsChanged)
         {
             allocateTexture(frame.width, frame.height);
         }
@@ -35,6 +41,41 @@ namespace gladius::ui::async_rendering
         GLint previousUnpackAlignment{};
         glGetIntegerv(GL_UNPACK_ALIGNMENT, &previousUnpackAlignment);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        bool const startsProgressiveFrame = frame.firstRow == 0u && frame.endRow < frame.height;
+        if (startsProgressiveFrame)
+        {
+            if (frame.width > std::numeric_limits<std::size_t>::max() / frame.height)
+            {
+                glPixelStorei(GL_UNPACK_ALIGNMENT, previousUnpackAlignment);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                return false;
+            }
+            auto const pixelCount = static_cast<std::size_t>(frame.width) * frame.height;
+            m_stagingPixels.resize(pixelCount);
+            bool const seeded = m_previewSeedFrame && m_previewSeedCandidate &&
+                                canSeedProgressiveFrame(*m_previewSeedFrame,
+                                                        *m_previewSeedCandidate,
+                                                        frame,
+                                                        candidate) &&
+                                resampleCompleteFrameToBuffer(*m_previewSeedFrame,
+                                                              frame.width,
+                                                              frame.height,
+                                                              m_stagingPixels.data(),
+                                                              frame.width);
+            if (!seeded)
+            {
+                std::fill(m_stagingPixels.begin(), m_stagingPixels.end(), 0u);
+            }
+            glTexSubImage2D(GL_TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            static_cast<GLsizei>(frame.width),
+                            static_cast<GLsizei>(frame.height),
+                            GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            m_stagingPixels.data());
+        }
         glTexSubImage2D(GL_TEXTURE_2D,
                         0,
                         0,
@@ -44,10 +85,23 @@ namespace gladius::ui::async_rendering
                         GL_RGBA,
                         GL_UNSIGNED_BYTE,
                         frame.pixels.data());
-                glPixelStorei(GL_UNPACK_ALIGNMENT, previousUnpackAlignment);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, previousUnpackAlignment);
         glBindTexture(GL_TEXTURE_2D, 0);
 
         m_freshness = frame.freshness;
+        if (isCompletePreviewSeedFrame(frame, candidate))
+        {
+            m_previewSeedFrame = frame;
+            m_previewSeedCandidate = candidate;
+        }
+        else if (isPreviewFrameSource(candidate.source) ||
+                 (m_previewSeedCandidate &&
+                  !matchesProgressivePreviewSeedStamp(m_previewSeedCandidate->stamp,
+                                                       candidate.stamp)))
+        {
+            m_previewSeedFrame.reset();
+            m_previewSeedCandidate.reset();
+        }
         return true;
     }
 
@@ -61,6 +115,9 @@ namespace gladius::ui::async_rendering
         m_width = 0u;
         m_height = 0u;
         m_freshness.reset();
+        m_previewSeedFrame.reset();
+        m_previewSeedCandidate.reset();
+        m_stagingPixels.clear();
     }
 
     std::uintptr_t OpenGLFramePresenter::getTextureId() const noexcept

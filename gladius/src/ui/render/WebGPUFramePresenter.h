@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,7 +34,8 @@ namespace gladius::ui::async_rendering
         WebGPUFramePresenter(WebGPUFramePresenter const &) = delete;
         WebGPUFramePresenter & operator=(WebGPUFramePresenter const &) = delete;
 
-        [[nodiscard]] bool present(compute::RenderFrame const & frame) override;
+        [[nodiscard]] bool present(compute::RenderFrame const & frame,
+                 FramePresentationCandidate const & candidate) override;
         void release() noexcept override;
         [[nodiscard]] std::uintptr_t getTextureId() const noexcept override;
         [[nodiscard]] std::uint32_t getWidth() const noexcept override;
@@ -52,8 +54,10 @@ namespace gladius::ui::async_rendering
         std::uint32_t m_capacityWidth{};
         std::uint32_t m_capacityHeight{};
         std::optional<compute::RenderFreshnessStamp> m_freshness;
+        std::optional<compute::RenderFrame> m_previewSeedFrame;
+        std::optional<FramePresentationCandidate> m_previewSeedCandidate;
         std::vector<unsigned char> m_uploadData;
-        std::vector<unsigned char> m_clearData;
+        std::vector<std::uint32_t> m_clearData;
         std::uint64_t m_presentCount{};
         std::uint64_t m_lastLoggedViewGeneration{};
         std::uint32_t m_lastLoggedWidth{};

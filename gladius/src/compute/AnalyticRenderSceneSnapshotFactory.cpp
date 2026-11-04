@@ -20,6 +20,7 @@
 #include "nodes/ToWgslVisitor.h"
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -54,10 +55,52 @@ namespace gladius::compute
             }
         }
 
+        std::map<nodes::ParameterId, int> createParameterLookupIndices(
+          nodes::Model & model, bool const bufferNumericLiterals)
+        {
+            std::map<nodes::ParameterId, int> indices;
+            int nextIndex = 0;
+            for (auto const & [parameterId, parameter] : model.getParameterRegistry())
+            {
+                if (parameter == nullptr || parameter->getId() != parameterId ||
+                    (!parameter->isModifiable() && !bufferNumericLiterals) ||
+                    parameter->getConstSource().has_value())
+                {
+                    continue;
+                }
+
+                auto const type = parameter->getTypeIndex();
+                if (bufferNumericLiterals && type != nodes::ParameterTypeIndex::Float &&
+                    type != nodes::ParameterTypeIndex::Float3 &&
+                    type != nodes::ParameterTypeIndex::Matrix4)
+                {
+                    continue;
+                }
+
+                indices.emplace(parameterId, nextIndex);
+                nextIndex += parameter->getSize();
+            }
+            return indices;
+        }
+
+        int getParameterLookupIndex(
+          nodes::IParameter const & parameter,
+          std::map<nodes::ParameterId, int> const * const lookupIndices)
+        {
+            if (lookupIndices == nullptr)
+            {
+                return const_cast<nodes::IParameter &>(parameter).getLookUpIndex();
+            }
+
+            auto const index = lookupIndices->find(parameter.getId());
+            return index == lookupIndices->end() ? -1 : index->second;
+        }
+
         void writeParameterValues(nodes::IParameter const & parameter,
                                   std::vector<float> & parameterValues,
                                   std::vector<bool> & assignedValues,
-                                  bool const bufferNumericLiterals)
+                                  bool const bufferNumericLiterals,
+                                  std::map<nodes::ParameterId, int> const * const lookupIndices)
         {
             if ((!parameter.isModifiable() && !bufferNumericLiterals) || parameter.getConstSource().has_value())
             {
@@ -70,7 +113,7 @@ namespace gladius::compute
                 throw std::runtime_error("Analytic render scene contains an unsupported parameter type");
             }
 
-            auto const lookupIndex = const_cast<nodes::IParameter &>(parameter).getLookUpIndex();
+            auto const lookupIndex = getParameterLookupIndex(parameter, lookupIndices);
             if (lookupIndex < 0)
             {
                 throw std::runtime_error("Analytic render scene contains an invalid parameter lookup index");
@@ -137,7 +180,10 @@ namespace gladius::compute
 
         /// @brief Emit `fn evaluateTranslucency` for models exposing a scalar translucency channel.
         /// An empty result means the model is opaque and the renderer keeps first-hit shading.
-        TranslucencyEvaluator createTranslucencyEvaluator(nodes::Model & model, bool const bufferNumericLiterals)
+        TranslucencyEvaluator createTranslucencyEvaluator(
+          nodes::Model & model,
+          bool const bufferNumericLiterals,
+          std::map<nodes::ParameterId, int> const * const lookupIndices)
         {
             TranslucencyEvaluator result;
             if (!nodes::isQualifiedForTranslucency(model))
@@ -149,6 +195,7 @@ namespace gladius::compute
             {
                 nodes::ToWgslVisitor visitor;
                 visitor.setBufferNumericLiterals(bufferNumericLiterals);
+                visitor.setParameterLookupIndices(lookupIndices);
                 visitor.setEvaluatorChannel(nodes::EvaluatorChannel::Translucency);
                 model.visitNodes(visitor);
 
@@ -179,29 +226,35 @@ namespace gladius::compute
         }
     }
 
-    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(nodes::Model & model,
-                                                                    std::uint64_t const sceneGeneration)
+    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(
+      nodes::Model & model, std::uint64_t const sceneGeneration)
     {
         return createModel(model, sceneGeneration, false);
     }
 
-    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::createModel(nodes::Model & model,
-                                                                       std::uint64_t const sceneGeneration,
-                                                                       bool const bufferNumericLiterals)
+    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::createModel(
+      nodes::Model & model,
+      std::uint64_t const sceneGeneration,
+      bool const bufferNumericLiterals,
+      ParameterLookupIndices const * const lookupIndices)
     {
-        assignParameterLookupIndices(model, bufferNumericLiterals);
+        if (lookupIndices == nullptr)
+        {
+            assignParameterLookupIndices(model, bufferNumericLiterals);
+        }
 
         nodes::ToWgslVisitor visitor;
         visitor.setBufferNumericLiterals(bufferNumericLiterals);
+        visitor.setParameterLookupIndices(lookupIndices);
         model.visitNodes(visitor);
 
         std::ostringstream evaluator;
         visitor.write(evaluator);
 
-        auto const translucencyEvaluator = createTranslucencyEvaluator(model, bufferNumericLiterals);
-
+        auto const translucencyEvaluator =
+          createTranslucencyEvaluator(model, bufferNumericLiterals, lookupIndices);
         auto const requiredCount =
-            std::max(visitor.getRequiredParameterCount(), translucencyEvaluator.parameterCount);
+          std::max(visitor.getRequiredParameterCount(), translucencyEvaluator.parameterCount);
         std::vector<float> parameterValues(requiredCount, 0.0f);
         std::vector<bool> assignedValues(parameterValues.size(), false);
         auto layout = bufferNumericLiterals ? std::make_shared<ParameterLayout>(sceneGeneration) : nullptr;
@@ -214,11 +267,14 @@ namespace gladius::compute
             {
                 continue;
             }
-            writeParameterValues(*parameter, parameterValues, assignedValues, bufferNumericLiterals);
+            writeParameterValues(
+              *parameter, parameterValues, assignedValues, bufferNumericLiterals, lookupIndices);
             if (layout && parameter->getOrigin().has_value() && !parameter->getConstSource().has_value())
             {
-                layout->add(*parameter->getOrigin(), static_cast<std::size_t>(parameter->getLookUpIndex()),
-                            parameter->getTypeIndex());
+                layout->add(
+                  *parameter->getOrigin(),
+                  static_cast<std::size_t>(getParameterLookupIndex(*parameter, lookupIndices)),
+                  parameter->getTypeIndex());
             }
         }
 
@@ -236,14 +292,17 @@ namespace gladius::compute
     RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(
       nodes::Model & model, std::uint64_t const sceneGeneration, ResourceManager const & resourceManager)
     {
-                return createModel(model, sceneGeneration, resourceManager, false);
-        }
+        return createModel(model, sceneGeneration, resourceManager, false);
+    }
 
-        RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::createModel(
-            nodes::Model & model, std::uint64_t const sceneGeneration, ResourceManager const & resourceManager,
-            bool const bufferNumericLiterals)
-        {
-                auto snapshot = createModel(model, sceneGeneration, bufferNumericLiterals);
+    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::createModel(
+      nodes::Model & model,
+      std::uint64_t const sceneGeneration,
+      ResourceManager const & resourceManager,
+      bool const bufferNumericLiterals,
+      ParameterLookupIndices const * const lookupIndices)
+    {
+        auto snapshot = createModel(model, sceneGeneration, bufferNumericLiterals, lookupIndices);
 
         // Collect mesh resource ids referenced by the lowered model. The visitor emits
         // gladiusSignedDistanceToMesh(pos, id) calls; the ids must match payload entries.
@@ -294,7 +353,7 @@ namespace gladius::compute
             catch (std::exception const &)
             {
                 throw std::runtime_error(
-                                    "Analytic render scene contains a resource node without a valid resource");
+                  "Analytic render scene contains a resource node without a valid resource");
             }
         }
 
@@ -331,11 +390,11 @@ namespace gladius::compute
             snapshot.meshResources[index] = std::move(payload);
         }
 
-            if (!referencedMeshIds.empty())
-            {
-                snapshot.requiredCapabilities =
-                  snapshot.requiredCapabilities | RendererCapability::MeshSdf;
-            }
+        if (!referencedMeshIds.empty())
+        {
+            snapshot.requiredCapabilities =
+              snapshot.requiredCapabilities | RendererCapability::MeshSdf;
+        }
 
         for (auto const resourceId : referencedBeamLatticeIds)
         {
@@ -468,5 +527,23 @@ namespace gladius::compute
         }
         return resourceManager ? createModel(*model, sceneGeneration, *resourceManager, true)
                                : createModel(*model, sceneGeneration, true);
+    }
+
+    RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::createRuntimeFromFlat(
+      nodes::Assembly const & flattenedAssembly,
+      std::uint64_t const sceneGeneration,
+      ResourceManager const * resourceManager)
+    {
+        auto const & functions = flattenedAssembly.getFunctions();
+        auto const model = functions.find(flattenedAssembly.getAssemblyModelId());
+        if (model == functions.end() || !model->second)
+        {
+            throw std::runtime_error("Flattened runtime render scene has no assembly model");
+        }
+
+        auto const lookupIndices = createParameterLookupIndices(*model->second, true);
+        return resourceManager
+             ? createModel(*model->second, sceneGeneration, *resourceManager, true, &lookupIndices)
+             : createModel(*model->second, sceneGeneration, true, &lookupIndices);
     }
 }

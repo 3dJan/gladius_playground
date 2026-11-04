@@ -1,10 +1,12 @@
 #include "Application.h"
 #include "compute/ComputeBackend.h"
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
@@ -23,6 +25,8 @@ void printUsage()
 #endif
     std::cout << "  --headless          Run without starting the UI (headless mode)\n";
     std::cout << "  --compute-backend=<opencl|webgpu>  Prefer backend; try alternate on init failure\n";
+    std::cout << "  --ui-fps-benchmark=<seconds>       Measure settled UI frame cadence and exit\n";
+    std::cout << "  --ui-fps-benchmark-output=<path>   Write benchmark JSON (default: ui-fps-benchmark.json)\n";
     std::cout
       << "  --debug-opencl      Enable OpenCL debug output (kernel validation, buffer checks)\n";
     std::cout << "  --help              Show this help message\n";
@@ -46,6 +50,8 @@ int runApplication(int argc, char ** argv)
     bool headless = false;
     std::optional<std::filesystem::path> filename;
     std::optional<gladius::compute::ComputeBackendKind> backendOverride;
+    std::optional<std::chrono::seconds> uiFpsBenchmarkDuration;
+    std::optional<std::filesystem::path> uiFpsBenchmarkOutput;
 
     // Graceful termination flag for headless MCP mode
     static std::atomic<bool> terminateRequested{false};
@@ -116,6 +122,36 @@ int runApplication(int argc, char ** argv)
             }
             backendOverride = parsed;
         }
+        else if (arg.starts_with("--ui-fps-benchmark="))
+        {
+            auto const value = arg.substr(std::string{"--ui-fps-benchmark="}.size());
+            try
+            {
+                std::size_t parsedLength = 0u;
+                auto const duration = std::stoul(value, &parsedLength);
+                if (parsedLength != value.size() || duration == 0u || duration > 3600u)
+                {
+                    std::cerr << "UI FPS benchmark duration must be between 1 and 3600 seconds.\n";
+                    return 1;
+                }
+                uiFpsBenchmarkDuration = std::chrono::seconds{duration};
+            }
+            catch (std::exception const &)
+            {
+                std::cerr << "Invalid UI FPS benchmark duration: " << value << '\n';
+                return 1;
+            }
+        }
+        else if (arg.starts_with("--ui-fps-benchmark-output="))
+        {
+            auto const value = arg.substr(std::string{"--ui-fps-benchmark-output="}.size());
+            if (value.empty())
+            {
+                std::cerr << "UI FPS benchmark output path cannot be empty.\n";
+                return 1;
+            }
+            uiFpsBenchmarkOutput = std::filesystem::path{value};
+        }
         else if (arg == "--debug-opencl")
         {
             // handled after app construction via MainWindow propagation
@@ -142,6 +178,41 @@ int runApplication(int argc, char ** argv)
     if (filename && filename->is_relative())
     {
         *filename = std::filesystem::absolute(*filename);
+    }
+    if (uiFpsBenchmarkDuration.has_value())
+    {
+#ifdef __EMSCRIPTEN__
+        std::cerr << "UI FPS benchmarking currently requires a native build.\n";
+        return 1;
+#endif
+        if (!filename.has_value())
+        {
+            std::cerr << "UI FPS benchmarking requires a startup 3MF file.\n";
+            return 1;
+        }
+        if (!std::filesystem::exists(*filename))
+        {
+            std::cerr << "UI FPS benchmark file does not exist: " << filename->string() << '\n';
+            return 1;
+        }
+        if (headless || enableMCP)
+        {
+            std::cerr << "UI FPS benchmarking cannot be combined with headless or MCP mode.\n";
+            return 1;
+        }
+        if (!uiFpsBenchmarkOutput.has_value())
+        {
+            uiFpsBenchmarkOutput = std::filesystem::current_path() / "ui-fps-benchmark.json";
+        }
+    }
+    else if (uiFpsBenchmarkOutput.has_value())
+    {
+        std::cerr << "--ui-fps-benchmark-output requires --ui-fps-benchmark=<seconds>.\n";
+        return 1;
+    }
+    if (uiFpsBenchmarkOutput.has_value() && uiFpsBenchmarkOutput->is_relative())
+    {
+        *uiFpsBenchmarkOutput = std::filesystem::absolute(*uiFpsBenchmarkOutput);
     }
 
     // Set working directory to the executable's directory (robust to wrappers)
@@ -200,6 +271,11 @@ int runApplication(int argc, char ** argv)
     if (mcpStdio)
     {
         app->setLoggerOutputMode(gladius::events::OutputMode::Silent);
+    }
+    if (uiFpsBenchmarkDuration.has_value() && uiFpsBenchmarkOutput.has_value())
+    {
+        app->getMainWindow().startUiFpsBenchmark(*uiFpsBenchmarkOutput,
+                                                 *uiFpsBenchmarkDuration);
     }
     // Propagate OpenCL debug flag to UI/MainWindow before setup
     for (int i = 1; i < argc; ++i)

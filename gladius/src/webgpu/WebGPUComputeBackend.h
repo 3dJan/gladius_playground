@@ -7,6 +7,8 @@
 
 namespace gladius::webgpu
 {
+  class WebGPUFramePipelineCache;
+
     /**
      * @brief Native Dawn implementation of the API-independent slice backend.
      */
@@ -30,5 +32,6 @@ namespace gladius::webgpu
         class FrameBufferPool;
         std::shared_ptr<WebGPUComputeContext> m_context;
         std::shared_ptr<FrameBufferPool> m_frameBufferPool;
+        std::shared_ptr<WebGPUFramePipelineCache> m_framePipelineCache;
     };
 }

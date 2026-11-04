@@ -1,6 +1,7 @@
 #include "RenderWindow.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <coroutine>
 #include <cstddef>
@@ -50,6 +51,37 @@ namespace gladius::ui
 
     namespace
     {
+        class UiFpsBenchmarkStageTimer
+        {
+          public:
+            explicit UiFpsBenchmarkStageTimer(double * durationMs) noexcept
+                : m_durationMs{durationMs}
+            {
+                if (m_durationMs != nullptr)
+                {
+                    m_start = Clock::now();
+                }
+            }
+
+            ~UiFpsBenchmarkStageTimer()
+            {
+                if (m_durationMs != nullptr)
+                {
+                    *m_durationMs +=
+                      std::chrono::duration<double, std::milli>(Clock::now() - m_start).count();
+                }
+            }
+
+            UiFpsBenchmarkStageTimer(UiFpsBenchmarkStageTimer const &) = delete;
+            UiFpsBenchmarkStageTimer & operator=(UiFpsBenchmarkStageTimer const &) = delete;
+
+          private:
+            using Clock = std::chrono::steady_clock;
+
+            double * m_durationMs{};
+            Clock::time_point m_start{};
+        };
+
         class ClEventAwaiter
         {
           public:
@@ -447,6 +479,9 @@ namespace gladius::ui
 
     bool RenderWindow::tryRenderWithNeutralBackend(RenderWindowState & state)
     {
+        UiFpsBenchmarkStageTimer neutralBackendTimer{
+          m_uiFpsBenchmarkStageTimingEnabled ? &m_uiFpsBenchmarkStageTimings.neutralBackendMs
+                             : nullptr};
         updateNeutralParameterInteraction();
         if (!m_neutralBackendActive || !m_document)
         {
@@ -476,13 +511,45 @@ namespace gladius::ui
         if (!renderBackendSession->hasMaterializedScene() ||
             renderBackendSession->getSceneGeneration() != sceneGeneration)
         {
+                        UiFpsBenchmarkStageTimer sceneSynchronizationTimer{
+                            m_uiFpsBenchmarkStageTimingEnabled
+                                ? &m_uiFpsBenchmarkStageTimings.sceneSynchronizationMs
+                                : nullptr};
             auto const assembly = m_document->getAssembly();
             if (assembly && assembly->assemblyModel())
             {
-                auto const snapshot = compute::ComputeRendererFactory::materializeRuntimeScene(
-                  *assembly, sceneGeneration, &m_document->getResourceManager());
-                if (!renderBackendSession->replaceScene(
-                      snapshot, m_renderUpdateCoordinator.latestStamp().parameterEpoch))
+                auto const flattenedAssembly = m_document->getFlatAssembly();
+                bool const hasFlattenedAssembly =
+                  flattenedAssembly && flattenedAssembly->assemblyModel();
+                auto snapshot = hasFlattenedAssembly
+                                  ? compute::ComputeRendererFactory::materializeRuntimeFlatScene(
+                                      *flattenedAssembly,
+                                      sceneGeneration,
+                                      &m_document->getResourceManager())
+                                  : compute::ComputeRendererFactory::materializeRuntimeScene(
+                                      *assembly,
+                                      sceneGeneration,
+                                      &m_document->getResourceManager());
+                if (!snapshot.isValid() && hasFlattenedAssembly)
+                {
+                    snapshot = compute::ComputeRendererFactory::materializeRuntimeScene(
+                      *assembly, sceneGeneration, &m_document->getResourceManager());
+                }
+                if (!snapshot.isValid())
+                {
+                    return false;
+                }
+
+                bool replaced = false;
+                {
+                    UiFpsBenchmarkStageTimer sceneReplacementTimer{
+                      m_uiFpsBenchmarkStageTimingEnabled
+                        ? &m_uiFpsBenchmarkStageTimings.backendSceneReplacementMs
+                        : nullptr};
+                    replaced = renderBackendSession->replaceScene(
+                      std::move(snapshot), m_renderUpdateCoordinator.latestStamp().parameterEpoch);
+                }
+                if (!replaced)
                 {
                     return false;
                 }
@@ -494,7 +561,13 @@ namespace gladius::ui
             return false;
         }
 
-        bool const modelBoundsReady = updateNeutralModelBounds(*renderBackendSession);
+            bool modelBoundsReady = false;
+            {
+                UiFpsBenchmarkStageTimer boundsUpdateTimer{
+                  m_uiFpsBenchmarkStageTimingEnabled ? &m_uiFpsBenchmarkStageTimings.boundsUpdateMs
+                                 : nullptr};
+                modelBoundsReady = updateNeutralModelBounds(*renderBackendSession);
+            }
         if (!modelBoundsReady && m_view != nullptr && m_neutralBoundsSubmission)
         {
             m_view->startAnimationMode();
@@ -523,12 +596,35 @@ namespace gladius::ui
             queueRenderDecision(m_neutralRenderScheduler.workflow().configureViewport(width, height));
         }
 
-        auto pollResult = m_neutralRenderScheduler.poll(true);
+        auto pollResult = [&]()
+        {
+            UiFpsBenchmarkStageTimer schedulerPollTimer{
+              m_uiFpsBenchmarkStageTimingEnabled ? &m_uiFpsBenchmarkStageTimings.schedulerPollMs
+                                                 : nullptr};
+            return m_neutralRenderScheduler.poll(true);
+        }();
+        if (m_uiFpsBenchmarkStageTimingEnabled)
+        {
+            for (auto const & completion : pollResult.completions)
+            {
+                m_uiFpsBenchmarkStageTimings.completedTaskLatencyMs +=
+                  static_cast<double>(completion.taskResult.durationNs) / 1'000'000.0;
+            }
+        }
         for (auto & accepted : pollResult.acceptedFrames)
         {
             if (accepted.frame.isValid())
             {
-                if (m_neutralFramePresenter->present(accepted.frame))
+                bool framePresented = false;
+                {
+                    UiFpsBenchmarkStageTimer framePresentationTimer{
+                      m_uiFpsBenchmarkStageTimingEnabled
+                        ? &m_uiFpsBenchmarkStageTimings.framePresentationMs
+                        : nullptr};
+                    framePresented = m_neutralFramePresenter->present(accepted.frame,
+                                                                      accepted.candidate);
+                }
+                if (framePresented)
                 {
                     (void) m_neutralRenderScheduler.workflow().presentCandidate(
                       accepted.candidate,
@@ -590,7 +686,24 @@ namespace gladius::ui
                     return true;
                 }
 
-                if (m_neutralRenderScheduler.submit(command.task, *renderBackendSession))
+                bool submitted = false;
+                async_rendering::NeutralRenderSubmissionTimings submissionTimings{};
+                {
+                    UiFpsBenchmarkStageTimer taskSubmissionTimer{
+                      m_uiFpsBenchmarkStageTimingEnabled
+                        ? &m_uiFpsBenchmarkStageTimings.taskSubmissionMs
+                        : nullptr};
+                    submitted = m_neutralRenderScheduler.submit(
+                      command.task,
+                      *renderBackendSession,
+                      m_uiFpsBenchmarkStageTimingEnabled ? &submissionTimings : nullptr);
+                }
+                if (m_uiFpsBenchmarkStageTimingEnabled)
+                {
+                    m_uiFpsBenchmarkStageTimings.requestFactoryMs += submissionTimings.requestFactoryMs;
+                    m_uiFpsBenchmarkStageTimings.backendSubmitMs += submissionTimings.backendSubmitMs;
+                }
+                if (submitted)
                 {
                     retainPendingCommands(commandIndex + 1u);
                     return true;
@@ -1175,6 +1288,7 @@ namespace gladius::ui
 
     void RenderWindow::renderWindow()
     {
+        m_uiFpsBenchmarkStageTimings = {};
         ProfileFunction;
         updateNeutralParameterInteraction();
         if (!m_isVisible)
@@ -1792,6 +1906,78 @@ namespace gladius::ui
     bool RenderWindow::isRenderingInProgress() const
     {
         return m_renderWindowState.isRendering;
+    }
+
+    bool RenderWindow::hasPresentedFrame() const noexcept
+    {
+        if (m_neutralBackendActive)
+        {
+            return m_neutralFramePresenter != nullptr &&
+                   m_neutralFramePresenter->getTextureId() != 0u &&
+                   m_neutralFramePresenter->getWidth() > 0u &&
+                   m_neutralFramePresenter->getHeight() > 0u;
+        }
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        if (m_core == nullptr)
+        {
+            return false;
+        }
+        auto const image = m_core->getResultImage();
+        return image != nullptr && image->getWidth() > 0u && image->getHeight() > 0u;
+#else
+        return false;
+#endif
+    }
+
+    std::array<std::uint32_t, 2> RenderWindow::previewViewportDimensions() const noexcept
+    {
+        if (m_neutralBackendActive)
+        {
+            return {m_neutralViewportWidth, m_neutralViewportHeight};
+        }
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        if (m_core != nullptr)
+        {
+            auto const image = m_core->getResultImage();
+            if (image != nullptr)
+            {
+                return {static_cast<std::uint32_t>(image->getWidth()),
+                        static_cast<std::uint32_t>(image->getHeight())};
+            }
+        }
+#endif
+        return {0u, 0u};
+    }
+
+    bool RenderWindow::isSettledForUiBenchmark() const noexcept
+    {
+        if (m_neutralBackendActive)
+        {
+            return hasPresentedFrame() && !m_deferredResizePending &&
+                   !m_renderWindowState.isMoving &&
+                   m_renderUpdateCoordinator.interactionState() ==
+                     async_rendering::RenderInteractionState::Static &&
+                   m_renderUpdateCoordinator.isHighQualityFrameCurrent() &&
+                   m_neutralFramePresenter->getWidth() == m_neutralViewportWidth &&
+                   m_neutralFramePresenter->getHeight() == m_neutralViewportHeight &&
+                   !m_neutralRenderScheduler.hasInFlightSubmissions() &&
+                   m_pendingRenderCommands.empty() && m_neutralBoundsSubmission == nullptr &&
+                   !m_neutralParameterInteractionPolicy.hasPendingSettlement();
+        }
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+        return hasPresentedFrame() && m_core != nullptr && m_core->isRendererReady() &&
+               !m_renderWindowState.isRendering && !m_renderWindowState.isMoving &&
+               !m_asyncJobInFlight.load(std::memory_order_acquire) &&
+               !m_asyncPreviewJobInFlight.load(std::memory_order_acquire) &&
+               !m_streamingJobInFlight.load(std::memory_order_acquire) &&
+               !m_asyncBboxJobInFlight.load(std::memory_order_acquire) &&
+               !m_asyncSdfJobInFlight.load(std::memory_order_acquire);
+#else
+        return false;
+#endif
     }
 
     RenderWindow::HqProgressiveRenderProgress RenderWindow::hqProgressiveRenderProgress() const
@@ -2501,6 +2687,23 @@ namespace gladius::ui
                 ++m_cameraIdleFrames;
                 state.isMoving = m_cameraIdleFrames < 10;
             }
+
+            if (!state.isMoving &&
+                m_renderUpdateCoordinator.interactionState() ==
+                  async_rendering::RenderInteractionState::CameraInteracting)
+            {
+                auto const now = std::chrono::system_clock::now();
+                if (m_lastCameraIdleTime == TimeStamp{})
+                {
+                    m_lastCameraIdleTime = now;
+                }
+                else if (now - m_lastCameraIdleTime >= std::chrono::seconds(1))
+                {
+                    queueRenderDecision(m_renderUpdateCoordinator.notifyCameraInteractionEnded());
+                    m_lastCameraIdleTime = TimeStamp{};
+                }
+            }
+
             m_dirty = m_dirty || state.isMoving;
             if (m_core)
             {

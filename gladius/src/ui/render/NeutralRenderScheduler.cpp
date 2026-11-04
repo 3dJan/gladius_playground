@@ -1,5 +1,7 @@
 #include "ui/render/NeutralRenderScheduler.h"
 
+#include <algorithm>
+#include <chrono>
 #include <iterator>
 #include <stdexcept>
 #include <utility>
@@ -23,7 +25,8 @@ namespace gladius::ui::async_rendering
             return false;
         }
 
-        auto request = m_requestFactory(task);
+        auto const submissionTask = prepareTaskForSubmission(task);
+        auto request = m_requestFactory(submissionTask);
         if (!request.has_value() || !request->isValid())
         {
             return false;
@@ -31,7 +34,7 @@ namespace gladius::ui::async_rendering
 
         try
         {
-            return m_submissions.track(task, renderer.submitFrame(std::move(*request)));
+            return m_submissions.track(submissionTask, renderer.submitFrame(std::move(*request)));
         }
         catch (...)
         {
@@ -50,7 +53,8 @@ namespace gladius::ui::async_rendering
             return false;
         }
 
-        auto request = m_requestFactory(task);
+        auto const submissionTask = prepareTaskForSubmission(task);
+        auto request = m_requestFactory(submissionTask);
         if (!request.has_value() || !request->isValid())
         {
             return false;
@@ -58,7 +62,7 @@ namespace gladius::ui::async_rendering
 
         try
         {
-            return m_submissions.track(task, renderer.submitFrame(scene, std::move(*request)));
+            return m_submissions.track(submissionTask, renderer.submitFrame(scene, std::move(*request)));
         }
         catch (...)
         {
@@ -67,8 +71,13 @@ namespace gladius::ui::async_rendering
     }
 
     bool NeutralRenderScheduler::submit(RenderTaskRequest const & task,
-                                        compute::RenderBackendSession & session)
+                                        compute::RenderBackendSession & session,
+                                        NeutralRenderSubmissionTimings * timings)
     {
+        if (timings != nullptr)
+        {
+            *timings = {};
+        }
         if (!isSupportedDisplayTask(task.type) || !session.isAvailable() ||
             !session.hasMaterializedScene() ||
             !matches(task.stamp, m_workflow.latestStamp(), RenderStampMask::displayFrame()) ||
@@ -77,7 +86,15 @@ namespace gladius::ui::async_rendering
             return false;
         }
 
-        auto request = m_requestFactory(task);
+        auto const submissionTask = prepareTaskForSubmission(task);
+        auto const requestFactoryStart = std::chrono::steady_clock::now();
+        auto request = m_requestFactory(submissionTask);
+        if (timings != nullptr)
+        {
+            timings->requestFactoryMs = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - requestFactoryStart)
+                                          .count();
+        }
         if (!request.has_value() || !request->isValid())
         {
             return false;
@@ -85,7 +102,15 @@ namespace gladius::ui::async_rendering
 
         try
         {
-            return m_submissions.track(task, session.submitFrame(std::move(*request)));
+            auto const backendSubmitStart = std::chrono::steady_clock::now();
+            auto submission = session.submitFrame(std::move(*request));
+            if (timings != nullptr)
+            {
+                timings->backendSubmitMs = std::chrono::duration<double, std::milli>(
+                                             std::chrono::steady_clock::now() - backendSubmitStart)
+                                             .count();
+            }
+            return m_submissions.track(submissionTask, std::move(submission));
         }
         catch (...)
         {
@@ -108,6 +133,35 @@ namespace gladius::ui::async_rendering
         NeutralRenderPollResult result;
         for (auto & completion : m_submissions.poll())
         {
+            if (completion.frame.has_value() &&
+                completion.taskResult.type == RenderTaskType::ProgressiveHighQualityChunk &&
+                completion.taskResult.succeeded() && m_progressiveSequenceActive &&
+                matches(completion.taskResult.stamp,
+                        m_workflow.latestStamp(),
+                        RenderStampMask::displayFrame()))
+            {
+                auto const & frame = *completion.frame;
+                bool const continuesSequence =
+                  m_progressiveStamp.has_value() &&
+                  matches(*m_progressiveStamp,
+                          completion.taskResult.stamp,
+                          RenderStampMask::displayFrame()) &&
+                  frame.width == m_progressiveWidth && frame.height == m_progressiveHeight &&
+                  frame.firstRow == m_progressiveNextRow && frame.endRow <= frame.height;
+                if (continuesSequence)
+                {
+                    completion.taskResult.completedFrame = frame.endRow == frame.height;
+                }
+                else
+                {
+                    completion.taskResult.status = RenderTaskStatus::Failed;
+                    completion.taskResult.producedDisplayFrame = false;
+                    completion.taskResult.completedFrame = false;
+                    completion.frame.reset();
+                    resetProgressiveSequence();
+                }
+            }
+
             auto decision = m_workflow.completeTaskForPresentation(completion.taskResult, scheduleFollowUp);
             result.commands.insert(result.commands.end(),
                                    std::make_move_iterator(decision.commands.begin()),
@@ -118,6 +172,15 @@ namespace gladius::ui::async_rendering
                 auto candidate = findCandidate(decision, completion.taskResult.requestId);
                 if (candidate.has_value())
                 {
+                    if (m_progressiveSequenceActive &&
+                        completion.taskResult.type == RenderTaskType::ProgressiveHighQualityChunk)
+                    {
+                        m_progressiveNextRow = completion.frame->endRow;
+                        if (completion.taskResult.completedFrame)
+                        {
+                            resetProgressiveSequence();
+                        }
+                    }
                     result.acceptedFrames.push_back(
                       AcceptedNeutralFrame{.frame = std::move(*completion.frame), .candidate = *candidate});
                 }
@@ -150,6 +213,52 @@ namespace gladius::ui::async_rendering
         }
         m_workflow = RenderWorkflowController{};
         m_workflow.configureRealtime(config);
+        resetProgressiveSequence();
+    }
+
+    RenderTaskRequest NeutralRenderScheduler::prepareTaskForSubmission(RenderTaskRequest const & task)
+    {
+        auto submissionTask = task;
+        if (task.type != RenderTaskType::ProgressiveHighQualityChunk || task.width == 0u ||
+            task.height == 0u || task.startLine != 0u || task.lineCount < task.height)
+        {
+            return submissionTask;
+        }
+
+        bool const sameSequence =
+          m_progressiveSequenceActive && m_progressiveStamp.has_value() &&
+          matches(*m_progressiveStamp, task.stamp, RenderStampMask::displayFrame()) &&
+          m_progressiveWidth == task.width && m_progressiveHeight == task.height;
+        if (!sameSequence)
+        {
+            m_progressiveStamp = task.stamp;
+            m_progressiveWidth = task.width;
+            m_progressiveHeight = task.height;
+            m_progressiveNextRow = 0u;
+            m_progressiveSequenceActive = true;
+        }
+
+        if (m_progressiveNextRow >= task.height)
+        {
+            m_progressiveNextRow = 0u;
+        }
+
+        auto const remainingRows = task.height - m_progressiveNextRow;
+        auto const rowsPerChunk = std::max<std::size_t>(
+          1u,
+          MAX_PROGRESSIVE_CHUNK_PIXELS / static_cast<std::size_t>(task.width));
+        submissionTask.startLine = m_progressiveNextRow;
+        submissionTask.lineCount = std::min<std::size_t>(remainingRows, rowsPerChunk);
+        return submissionTask;
+    }
+
+    void NeutralRenderScheduler::resetProgressiveSequence() noexcept
+    {
+        m_progressiveStamp.reset();
+        m_progressiveWidth = 0u;
+        m_progressiveHeight = 0u;
+        m_progressiveNextRow = 0u;
+        m_progressiveSequenceActive = false;
     }
 
     RenderWorkflowController & NeutralRenderScheduler::workflow() noexcept

@@ -14,6 +14,7 @@
 #include <fmt/format.h>
 #include <iostream>
 #include <sstream>
+#include <utility>
 
 #ifdef _WIN32
 #include <shellapi.h>
@@ -2723,6 +2724,28 @@ namespace gladius::ui
         }
 
         m_startupFile = std::move(filename);
+    }
+
+    void MainWindow::startUiFpsBenchmark(std::filesystem::path outputPath,
+                                         std::chrono::seconds measurementDuration)
+    {
+        m_renderWindow.setUiFpsBenchmarkStageTimingEnabled(true);
+        m_mainView.startUiFpsBenchmark(
+          std::move(outputPath),
+          measurementDuration,
+          [this]()
+          {
+              UiFpsBenchmarkState state;
+              state.documentLoaded = m_doc != nullptr && !m_doc->isLoadingInProgress() &&
+                                     m_asyncLoadState == AsyncLoadState::Idle;
+              state.previewPresented = m_renderWindow.hasPresentedFrame();
+              state.previewViewportPx = m_renderWindow.previewViewportDimensions();
+              state.renderSettled = m_renderWindow.isSettledForUiBenchmark();
+              state.backend = m_renderWindow.isNeutralBackendActive() ? "webgpu" : "opencl";
+              state.uiScale = m_uiScale;
+              state.stageTimings = m_renderWindow.uiFpsBenchmarkStageTimings();
+              return state;
+          });
     }
 
     void MainWindow::loadFileDeferred(const std::filesystem::path & filename)
