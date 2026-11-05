@@ -35,10 +35,16 @@ namespace gladius::io
             return temporaryPath;
         }
 
+        /// @brief Digits after the decimal point for vertex coordinates. lib3mf defaults to six,
+        /// which merges float-distinct vertices into identical text; the reader then hands back
+        /// bit-identical positions and turns thin triangles into degenerate ones.
+        constexpr Lib3MF_uint32 kVertexDecimalPrecision = 9U;
+
         void writeModelToFile(Lib3MF::PModel const & model,
                               std::filesystem::path const & filePath)
         {
             auto const writer = model->QueryWriter("3mf");
+            writer->SetDecimalPrecision(kVertexDecimalPrecision);
             writer->WriteToFile(filePath.string());
             verifyFileWritten(filePath);
         }
@@ -115,9 +121,7 @@ namespace gladius::io
                 (void) attachThumbnail(model, thumbnailPng);
             }
 
-            auto const writer = model->QueryWriter("3mf");
-            writer->WriteToFile(temporaryPath.string());
-            verifyFileWritten(temporaryPath);
+            writeModelToFile(model, temporaryPath);
 
             std::error_code error;
             std::filesystem::rename(temporaryPath, filePath, error);

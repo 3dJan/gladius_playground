@@ -122,21 +122,53 @@ namespace gladius::io
             break;
         }
         auto const before = computeIndexedTriangleMeshDiagnostics(mesh);
+        std::vector<Eigen::Vector3f> positionsBefore = mesh.positions;
+        std::vector<std::uint32_t> indicesBefore = mesh.indices;
+        std::vector<Eigen::Vector3f> normalsBefore = mesh.normals;
+        std::vector<std::uint32_t> labelsBefore = palette.sourceToPaletteMap;
+        auto restoreLastValidMesh = [&]()
+        {
+            mesh.positions = std::move(positionsBefore);
+            mesh.indices = std::move(indicesBefore);
+            mesh.normals = std::move(normalsBefore);
+            palette.sourceToPaletteMap = std::move(labelsBefore);
+        };
         compute::fastQemSimplify(mesh.positions, mesh.indices, palette.sourceToPaletteMap,
                                  config, throwOnCancel, progressFn);
         mesh.normals.clear();
+        auto const defect = [&]() -> std::optional<std::string>
+        {
+            if (palette.sourceToPaletteMap.size() != mesh.indices.size() / 3U)
+            {
+                return "face labels no longer match the simplified faces";
+            }
+            if (auto const error = mesh.validationError())
+            {
+                return *error;
+            }
+            auto const after = computeIndexedTriangleMeshDiagnostics(mesh);
+            if (after.degenerateTriangleCount > before.degenerateTriangleCount)
+            {
+                return "additional degenerate triangles";
+            }
+            if (after.boundaryEdgeCount > before.boundaryEdgeCount ||
+                after.nonManifoldEdgeCount > before.nonManifoldEdgeCount ||
+                after.inconsistentWindingEdgeCount > before.inconsistentWindingEdgeCount)
+            {
+                return "topology defect";
+            }
+            return std::nullopt;
+        }();
+        if (defect.has_value())
+        {
+            // A simplified mesh that OrcaSlicer would reject is worse than an unsimplified one:
+            // keep the last valid mesh and tell the user why the reduction was skipped.
+            restoreLastValidMesh();
+            return fmt::format("Color-aware simplification was rolled back ({}); the mesh was exported "
+                               "unsimplified to preserve a valid topology", *defect);
+        }
         validateDiscretePalette(palette, mesh.indices.size() / 3U);
-        if (auto const error = mesh.validationError())
-        {
-            throw std::runtime_error("Color-aware simplification produced an invalid mesh: " + *error);
-        }
         auto const after = computeIndexedTriangleMeshDiagnostics(mesh);
-        if (after.boundaryEdgeCount > before.boundaryEdgeCount ||
-            after.nonManifoldEdgeCount > before.nonManifoldEdgeCount ||
-            after.inconsistentWindingEdgeCount > before.inconsistentWindingEdgeCount)
-        {
-            throw std::runtime_error("Color-aware simplification introduced a mesh topology defect");
-        }
         if (options.simplificationTerminationMode != SimplificationTerminationMode::ErrorBounded)
         {
             auto const target = options.simplificationTerminationMode == SimplificationTerminationMode::TargetTriangleCount

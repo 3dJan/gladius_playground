@@ -27,6 +27,34 @@ namespace gladius::compute
             std::size_t heapIdx{std::numeric_limits<std::size_t>::max()};
         };
 
+        /// Matches IndexedTriangleMesh's relative-area degeneracy rule.
+        bool isGeometricallyDegenerateTriangle(Eigen::Vector3f const & a,
+                                               Eigen::Vector3f const & b,
+                                               Eigen::Vector3f const & c)
+        {
+            double const abx = static_cast<double>(b.x()) - a.x();
+            double const aby = static_cast<double>(b.y()) - a.y();
+            double const abz = static_cast<double>(b.z()) - a.z();
+            double const acx = static_cast<double>(c.x()) - a.x();
+            double const acy = static_cast<double>(c.y()) - a.y();
+            double const acz = static_cast<double>(c.z()) - a.z();
+            double const bcx = static_cast<double>(c.x()) - b.x();
+            double const bcy = static_cast<double>(c.y()) - b.y();
+            double const bcz = static_cast<double>(c.z()) - b.z();
+            double const abSquared = abx * abx + aby * aby + abz * abz;
+            double const acSquared = acx * acx + acy * acy + acz * acz;
+            double const bcSquared = bcx * bcx + bcy * bcy + bcz * bcz;
+            double const maxEdgeSquared = std::max({abSquared, acSquared, bcSquared});
+            double const crossX = aby * acz - abz * acy;
+            double const crossY = abz * acx - abx * acz;
+            double const crossZ = abx * acy - aby * acx;
+            double const crossSquared = crossX * crossX + crossY * crossY + crossZ * crossZ;
+            double const floatEpsilon = std::numeric_limits<float>::epsilon();
+            double const relativeAreaTolerance = floatEpsilon * floatEpsilon;
+            return maxEdgeSquared == 0.0 ||
+                   crossSquared <= maxEdgeSquared * maxEdgeSquared * relativeAreaTolerance;
+        }
+
         Eigen::Vector3f calcNormal(Eigen::Vector3f const & v0,
                                    Eigen::Vector3f const & v1,
                                    Eigen::Vector3f const & v2)
@@ -166,6 +194,10 @@ namespace gladius::compute
                 else if (ti1 == id0) p[1] = newPos;
                 else if (ti2 == id0) p[2] = newPos;
 
+                if (isGeometricallyDegenerateTriangle(p[0], p[1], p[2]))
+                {
+                    return true;
+                }
                 Eigen::Vector3f const newN = calcNormal(p[0], p[1], p[2]);
                 if (newN.squaredNorm() < 1e-10F)
                 {
@@ -604,6 +636,11 @@ namespace gladius::compute
             auto const i0 = indices[t * 3U + 0U];
             auto const i1 = indices[t * 3U + 1U];
             auto const i2 = indices[t * 3U + 2U];
+            if (isGeometricallyDegenerateTriangle(positions[i0], positions[i1], positions[i2]))
+            {
+                tris[t].deleted = true;
+                continue;
+            }
             Eigen::Vector3f const n = calcNormal(positions[i0], positions[i1], positions[i2]);
             tris[t].normal = n;
             if (n.squaredNorm() < 1e-10F)

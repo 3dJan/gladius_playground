@@ -53,6 +53,25 @@ namespace gladius::compute
             bool const inside1 = (v1 < 0.0F);
             return inside0 != inside1;
         }
+
+        [[nodiscard]] bool isGeometricallyDegenerateTriangle(Eigen::Vector3f const& a,
+                                                              Eigen::Vector3f const& b,
+                                                              Eigen::Vector3f const& c)
+        {
+            Eigen::Vector3d const aDouble = a.cast<double>();
+            Eigen::Vector3d const bDouble = b.cast<double>();
+            Eigen::Vector3d const cDouble = c.cast<double>();
+            Eigen::Vector3d const ab = bDouble - aDouble;
+            Eigen::Vector3d const ac = cDouble - aDouble;
+            Eigen::Vector3d const bc = cDouble - bDouble;
+            double const maxEdgeSquared = std::max(
+                {ab.squaredNorm(), ac.squaredNorm(), bc.squaredNorm()});
+            double const crossSquared = ab.cross(ac).squaredNorm();
+            double const floatEpsilon = std::numeric_limits<float>::epsilon();
+            double const relativeAreaTolerance = floatEpsilon * floatEpsilon;
+            return maxEdgeSquared == 0.0 ||
+                   crossSquared <= maxEdgeSquared * maxEdgeSquared * relativeAreaTolerance;
+        }
     }
 
     BoundingBox GlobalOctreeNode::computeBounds(Eigen::Vector3f const& globalBboxMin,
@@ -2216,11 +2235,9 @@ namespace gladius::compute
         generateQuads(indices);
         logPhaseTime("generateQuads");
 
-        // Remove strictly degenerate triangles.
-        //
-        // NOTE: Be conservative here. Position/area-based filtering can remove very small but
-        // topologically necessary triangles at high depth and open cracks (boundary edges).
-        // We only drop triangles that are degenerate by index.
+        // Remove triangles that fail the same relative-area test used by indexed-mesh validation.
+        // Any resulting boundary is repaired below; forwarding geometric degenerates prevents
+        // color sampling and 3MF writers from receiving unusable faces.
         {
             std::vector<std::uint32_t> filtered;
             filtered.reserve(indices.size());
@@ -2233,6 +2250,12 @@ namespace gladius::compute
                 std::uint32_t const c = indices[i + 2U];
 
                 if (a == b || b == c || a == c)
+                {
+                    ++removed;
+                    continue;
+                }
+
+                if (isGeometricallyDegenerateTriangle(positions[a], positions[b], positions[c]))
                 {
                     ++removed;
                     continue;
@@ -2256,9 +2279,8 @@ namespace gladius::compute
         splitNonManifoldEdges(positions, normals, indices);
         logPhaseTime("splitNonManifoldEdges");
 
-        // Note: Boundary hole filling is intentionally disabled here.
-        // The current naive loop triangulation can introduce significant non-manifold
-        // topology. Holes must be fixed by correct quad generation / neighbor completion.
+        // Small, non-branching boundary loops are filled below only after edge-use analysis;
+        // larger or ambiguous holes remain unfilled so the exporter can reject the mesh.
 
         // Fixing triangle orientation and post-fix edge-direction analysis can be very expensive
         // (it requires building large adjacency/edge maps). For very large meshes (depth=9),
@@ -2600,6 +2622,12 @@ namespace gladius::compute
 
                         if (loop.size() == 3U)
                         {
+                            if (isGeometricallyDegenerateTriangle(
+                                  positions[loop[0]], positions[loop[1]], positions[loop[2]]))
+                            {
+                                canFill = false;
+                                break;
+                            }
                             filledIndices.push_back(loop[0]);
                             filledIndices.push_back(loop[1]);
                             filledIndices.push_back(loop[2]);
@@ -2614,6 +2642,12 @@ namespace gladius::compute
 
                             auto canAddTri = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c) -> bool
                             {
+                                if (isGeometricallyDegenerateTriangle(
+                                      positions[a], positions[b], positions[c]))
+                                {
+                                    return false;
+                                }
+
                                 std::array<std::uint64_t, 3> const triEdges = {
                                   makeUndirectedEdgeKey(a, b),
                                   makeUndirectedEdgeKey(b, c),
@@ -2714,7 +2748,7 @@ namespace gladius::compute
                                 {
                                     addTri(poly[0], poly[1], poly[2]);
                                 }
-                                else if (poly.size() != 3U)
+                                else
                                 {
                                     triangulated = false;
                                 }
@@ -2735,7 +2769,35 @@ namespace gladius::compute
                                     centroidNormal += normals[vi];
                                 }
                                 centroid /= static_cast<float>(loop.size());
-                                centroidNormal.normalize();
+
+                                bool fanIsValid = true;
+                                for (std::size_t li = 0U; li < loop.size(); ++li)
+                                {
+                                    std::uint32_t const a = loop[li];
+                                    std::uint32_t const b = loop[(li + 1U) % loop.size()];
+                                    if (isGeometricallyDegenerateTriangle(positions[a], positions[b], centroid))
+                                    {
+                                        fanIsValid = false;
+                                        break;
+                                    }
+                                }
+                                if (!fanIsValid)
+                                {
+                                    std::cout << "  Boundary centroid fan rejected: loop contains a geometrically degenerate triangle"
+                                              << std::endl;
+                                    canFill = false;
+                                    break;
+                                }
+
+                                float const centroidNormalLength = centroidNormal.norm();
+                                if (std::isfinite(centroidNormalLength) && centroidNormalLength > 1.0e-10F)
+                                {
+                                    centroidNormal /= centroidNormalLength;
+                                }
+                                else
+                                {
+                                    centroidNormal = Eigen::Vector3f::Zero();
+                                }
 
                                 auto const centroidIdx = static_cast<std::uint32_t>(positions.size());
                                 positions.push_back(centroid);
@@ -2758,18 +2820,22 @@ namespace gladius::compute
 
                     if (!canFill)
                     {
-                        // Ear-clipping failed; mesh may still be usable.
+                        std::cout << "  Small-boundary fill aborted; retaining the unfilled mesh" << std::endl;
                     }
                     else
                     {
                         // Revalidate filled mesh. Reuse the same counting strategy.
                         std::vector<std::uint64_t> edges2;
                         edges2.reserve(filledIndices.size());
+                        bool hasGeometricDegenerateTriangles = false;
                         for (std::size_t i = 0U; i + 2U < filledIndices.size(); i += 3U)
                         {
                             std::uint32_t const v0 = filledIndices[i + 0U];
                             std::uint32_t const v1 = filledIndices[i + 1U];
                             std::uint32_t const v2 = filledIndices[i + 2U];
+                            hasGeometricDegenerateTriangles =
+                                hasGeometricDegenerateTriangles ||
+                                isGeometricallyDegenerateTriangle(positions[v0], positions[v1], positions[v2]);
                             edges2.push_back(makeUndirectedEdgeKey(v0, v1));
                             edges2.push_back(makeUndirectedEdgeKey(v1, v2));
                             edges2.push_back(makeUndirectedEdgeKey(v2, v0));
@@ -2797,7 +2863,7 @@ namespace gladius::compute
                             i = j;
                         }
 
-                        if (boundary2 == 0U && nonManifold2 == 0U)
+                        if (boundary2 == 0U && nonManifold2 == 0U && !hasGeometricDegenerateTriangles)
                         {
                             indices.swap(filledIndices);
                             m_stats.triangleCount = indices.size() / 3U;
@@ -2807,7 +2873,10 @@ namespace gladius::compute
                         }
                         else
                         {
-                            // Fill revalidation found residual issues — keep original mesh.
+                            std::cout << "  Small-boundary fill rejected: boundaryEdges=" << boundary2
+                                      << ", nonManifoldEdges=" << nonManifold2
+                                      << ", geometricDegenerates=" << hasGeometricDegenerateTriangles
+                                      << std::endl;
                         }
                     }
                 }
@@ -3523,6 +3592,15 @@ namespace gladius::compute
         // Second pass: choose diagonals.
         float constexpr MIN_AREA = 1e-10F;
         std::size_t zeroDiagonalKeys = 0U;
+        std::size_t untriangulableQuadsSkipped = 0U;
+
+        auto isValidTriangulation = [&positions](std::array<std::uint32_t, 6> const& triangles)
+        {
+            return !isGeometricallyDegenerateTriangle(
+                       positions[triangles[0]], positions[triangles[1]], positions[triangles[2]]) &&
+                   !isGeometricallyDegenerateTriangle(
+                       positions[triangles[3]], positions[triangles[4]], positions[triangles[5]]);
+        };
 
         // Reserve once; the final triangle count is large for depth=9.
         indices.reserve(indices.size() + candidates.size() * 6U);
@@ -3530,6 +3608,14 @@ namespace gladius::compute
         for (std::size_t candidateIndex = 0U; candidateIndex < candidates.size(); ++candidateIndex)
         {
             auto const& c = candidates[candidateIndex];
+            bool const diag12Valid = isValidTriangulation(c.diag12Tris);
+            bool const diag03Valid = isValidTriangulation(c.diag03Tris);
+            if (!diag12Valid && !diag03Valid)
+            {
+                ++untriangulableQuadsSkipped;
+                continue;
+            }
+
             if (c.diag12Key == 0U || c.diag03Key == 0U)
             {
                 ++zeroDiagonalKeys;
@@ -3547,21 +3633,27 @@ namespace gladius::compute
                 useDiag12 = c.diag12Key < c.diag03Key;
             }
 
-            // Hard rule: never pick a diagonal that equals any perimeter edge in the full quad set.
+            // A diagonal already used as a perimeter edge cannot be emitted as an interior edge.
             bool const diag12IsPerimeter = perimeterEdgeCount.find(c.diag12Key) != perimeterEdgeCount.end();
             bool const diag03IsPerimeter = perimeterEdgeCount.find(c.diag03Key) != perimeterEdgeCount.end();
-            if (diag12IsPerimeter != diag03IsPerimeter)
+            bool const diag12Allowed = diag12Valid && !diag12IsPerimeter;
+            bool const diag03Allowed = diag03Valid && !diag03IsPerimeter;
+            if (!diag12Allowed && !diag03Allowed)
             {
-                useDiag12 = !diag12IsPerimeter;
+                ++untriangulableQuadsSkipped;
+                continue;
+            }
+            if (diag12Allowed != diag03Allowed)
+            {
+                useDiag12 = diag12Allowed;
             }
 
             auto const& chosen = useDiag12 ? c.diag12Tris : c.diag03Tris;
             float const chosenAreaA = useDiag12 ? c.area12a : c.area03a;
             float const chosenAreaB = useDiag12 ? c.area12b : c.area03b;
 
-            // Track near-degenerate quads for diagnostics, but never drop triangles here.
-            // Even very small triangles can be topologically required to keep the surface
-            // closed (dropping them creates boundary edges).
+            // Track very small but validator-valid quads for diagnostics. Strictly
+            // degenerate triangulations were rejected above and are repaired as boundaries.
             if (chosenAreaA < MIN_AREA || chosenAreaB < MIN_AREA)
             {
                 ++halfDegenerateQuads;
@@ -3579,7 +3671,7 @@ namespace gladius::compute
         m_stats.zeroDiagonalKeys = zeroDiagonalKeys;
 
         if (boundaryEdges > 0U || missingVertexQuads > 0U || halfDegenerateQuads > 0U || duplicateOwnedEdgesSkipped > 0U ||
-            perimeterEdgesOverused > 0U || zeroDiagonalKeys > 0U)
+            perimeterEdgesOverused > 0U || zeroDiagonalKeys > 0U || untriangulableQuadsSkipped > 0U)
         {
             std::cout << "  Quad generation (hierarchical): intersectingLeaves=" << intersectingLeafCount
                       << ", emittedQuads=" << emittedQuads
@@ -3587,6 +3679,7 @@ namespace gladius::compute
                       << ", missingVertexQuads=" << missingVertexQuads
                       << ", halfDegenerateQuads=" << halfDegenerateQuads
                       << ", duplicateOwnedEdgesSkipped=" << duplicateOwnedEdgesSkipped
+                      << ", untriangulableQuadsSkipped=" << untriangulableQuadsSkipped
                       << ", perimeterEdgesOverused=" << perimeterEdgesOverused
                       << ", maxPerimeterEdgeUse=" << maxPerimeterEdgeUse
                       << ", zeroDiagonalKeys=" << zeroDiagonalKeys
