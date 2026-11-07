@@ -125,9 +125,20 @@ namespace gladius_integration_tests
             }
             catch (std::exception & e)
             {
+                m_loadError = e.what();
                 std::cout << e.what() << std::endl;
             }
             std::filesystem::current_path(originalWorkingDirectory);
+
+            // A wrapper that failed to load must never be dereferenced: doing so
+            // used to crash every API test with an unattributable SEGFAULT.
+            if (!m_wrapper)
+            {
+                GTEST_SKIP() << "Could not load the Gladius shared library: "
+                             << (m_loadError.empty() ? "unknown error" : m_loadError)
+                             << ". On glibc this is usually 'cannot allocate memory in static "
+                                "TLS block'; see docs/testing.md.";
+            }
         }
 
         [[nodiscard]] GladiusLib::PWrapper getWrapper() const
@@ -175,6 +186,7 @@ namespace gladius_integration_tests
 
       private:
         GladiusLib::PWrapper m_wrapper;
+        std::string m_loadError;
     };
 
     TEST_F(GladiusLib_test, GladiusWrapper_CreateGladius_InstanceCreated)
