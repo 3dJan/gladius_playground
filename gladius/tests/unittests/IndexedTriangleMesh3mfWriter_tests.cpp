@@ -70,6 +70,63 @@ namespace gladius::io::tests
             EXPECT_EQ(height, 2u);
             EXPECT_EQ(decoded.size(), 16u);
         }
+
+        /// @brief Octahedron whose apex edge is split by a vertex that is float-distinct from the
+        /// apex yet identical once serialized with few decimals. Reproduces the lampbase export
+        /// failure, where a valid in-memory mesh turns into a zero-area triangle on read-back.
+        IndexedTriangleMesh makePrecisionSliverOctahedron()
+        {
+            constexpr float sliverOffset = 4.0e-7F;
+            IndexedTriangleMesh mesh;
+            mesh.positions = {
+              Eigen::Vector3f{1.0F, 0.0F, 0.0F},
+              Eigen::Vector3f{-1.0F, 0.0F, 0.0F},
+              Eigen::Vector3f{0.0F, 1.0F, 0.0F},
+              Eigen::Vector3f{0.0F, -1.0F, 0.0F},
+              Eigen::Vector3f{0.0F, 0.0F, 1.0F},
+              Eigen::Vector3f{0.0F, 0.0F, -1.0F},
+              Eigen::Vector3f{1.0F, sliverOffset, 0.0F}};
+            mesh.indices = {0, 2, 6, 6, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0,
+                            4, 3, 6, 6, 3, 0, 1, 3, 4, 5, 3, 1, 0, 3, 5};
+            return mesh;
+        }
+
+        /// @brief Reloads the single mesh object of an exported 3MF as an indexed mesh.
+        [[nodiscard]] IndexedTriangleMesh readBackMesh(std::filesystem::path const & filePath)
+        {
+            auto const wrapper = loadLib3mfScoped();
+            auto const model = wrapper->CreateModel();
+            auto const reader = model->QueryReader("3mf");
+            reader->SetStrictModeActive(false);
+            reader->ReadFromFile(filePath.string());
+
+            auto const meshObjects = model->GetMeshObjects();
+            if (!meshObjects->MoveNext())
+            {
+                throw std::runtime_error("Exported 3MF contains no mesh object");
+            }
+            auto const exported = meshObjects->GetCurrentMeshObject();
+
+            IndexedTriangleMesh mesh;
+            mesh.positions.reserve(exported->GetVertexCount());
+            mesh.indices.reserve(static_cast<std::size_t>(exported->GetTriangleCount()) * 3U);
+            for (Lib3MF_uint32 index = 0U; index < exported->GetVertexCount(); ++index)
+            {
+                auto const vertex = exported->GetVertex(index);
+                mesh.positions.emplace_back(vertex.m_Coordinates[0],
+                                            vertex.m_Coordinates[1],
+                                            vertex.m_Coordinates[2]);
+            }
+            for (Lib3MF_uint32 index = 0U; index < exported->GetTriangleCount(); ++index)
+            {
+                auto const triangle = exported->GetTriangle(index);
+                mesh.indices.insert(mesh.indices.end(),
+                                    {triangle.m_Indices[0],
+                                     triangle.m_Indices[1],
+                                     triangle.m_Indices[2]});
+            }
+            return mesh;
+        }
     } // namespace
 
     TEST(IndexedTriangleMesh3mfWriter, RoundTrip_ClosedTetrahedron_PreservesMeshGeometry)
@@ -232,6 +289,56 @@ namespace gladius::io::tests
         auto const model = wrapper->CreateModel();
         ASSERT_NO_THROW(model->QueryReader("3mf")->ReadFromFile(filePath.string()));
         EXPECT_FALSE(model->HasPackageThumbnailAttachment());
+
+        std::error_code cleanupError;
+        std::filesystem::remove(filePath, cleanupError);
+    }
+
+    TEST(IndexedTriangleMesh3mfWriter, RoundTrip_PrecisionSliver_KeepsMeshStrictlyValid)
+    {
+        auto const mesh = makePrecisionSliverOctahedron();
+        auto const filePath = makeTemporaryPath();
+        IndexedTriangleMesh3mfWriter writer;
+
+        ASSERT_FALSE(mesh.closedOrientedTopologyError().has_value());
+        ASSERT_NO_THROW(writer.exportMesh(filePath, mesh, "Precision sliver"));
+        ASSERT_TRUE(std::filesystem::exists(filePath));
+
+        auto const reloaded = readBackMesh(filePath);
+        EXPECT_EQ(reloaded.positions.size(), mesh.positions.size());
+        EXPECT_EQ(reloaded.indices.size(), mesh.indices.size());
+        if (auto const error = reloaded.validationError())
+        {
+            FAIL() << "Exported 3MF is no longer strictly valid: " << *error;
+        }
+        EXPECT_FALSE(reloaded.closedOrientedTopologyError().has_value());
+
+        std::error_code cleanupError;
+        std::filesystem::remove(filePath, cleanupError);
+    }
+
+    TEST(IndexedTriangleMesh3mfWriter, ExportWithMmuSegmentation_PrecisionSliver_KeepsMeshStrictlyValid)
+    {
+        auto const mesh = makePrecisionSliverOctahedron();
+        auto const filePath = makeTemporaryPath();
+        FaceColors colors(mesh.indices.size() / 3U);
+        for (std::size_t triangle = 0U; triangle < colors.size(); ++triangle)
+        {
+            colors[triangle] = (triangle % 2U == 0U) ? Color8{255u, 0u, 0u} : Color8{0u, 0u, 255u};
+        }
+        auto const palette = ColorQuantizer::quantize(colors, 2U);
+        IndexedTriangleMesh3mfWriter writer;
+
+        ASSERT_NO_THROW(writer.exportMeshWithMmuSegmentation(
+            filePath, mesh, "Precision sliver MMU", palette));
+        ASSERT_TRUE(std::filesystem::exists(filePath));
+
+        auto const reloaded = readBackMesh(filePath);
+        if (auto const error = reloaded.validationError())
+        {
+            FAIL() << "Exported MMU 3MF is no longer strictly valid: " << *error;
+        }
+        EXPECT_EQ(reloaded.indices.size() / 3U, palette.sourceToPaletteMap.size());
 
         std::error_code cleanupError;
         std::filesystem::remove(filePath, cleanupError);

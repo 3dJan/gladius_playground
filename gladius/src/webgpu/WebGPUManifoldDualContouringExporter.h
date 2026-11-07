@@ -1,5 +1,6 @@
 #pragma once
 
+#include "EventLogger.h"
 #include "compute/BoundingBoxContracts.h"
 #include "compute/RenderSceneSnapshot.h"
 #include "io/IndexedTriangleMesh.h"
@@ -20,7 +21,8 @@ namespace gladius::webgpu
             compute::RenderSceneSnapshot const& snapshot,
             compute::BoundsResult const& bounds,
             io::ManifoldDualContouringOptions const& options,
-            WebGPUSdfEvaluator::CancellationPredicate shouldCancel = {});
+            WebGPUSdfEvaluator::CancellationPredicate shouldCancel = {},
+            events::SharedLogger logger = {});
 
         static void exportStl(
             std::filesystem::path const& filePath,
@@ -28,7 +30,8 @@ namespace gladius::webgpu
             compute::RenderSceneSnapshot const& snapshot,
             compute::BoundsResult const& bounds,
             io::ManifoldDualContouringOptions const& options,
-            WebGPUSdfEvaluator::CancellationPredicate shouldCancel = {});
+            WebGPUSdfEvaluator::CancellationPredicate shouldCancel = {},
+            events::SharedLogger logger = {});
 
         static void export3mf(
             std::filesystem::path const& filePath,
@@ -36,6 +39,7 @@ namespace gladius::webgpu
             compute::RenderSceneSnapshot const& snapshot,
             compute::BoundsResult const& bounds,
             io::ManifoldDualContouringOptions const& options,
-            WebGPUSdfEvaluator::CancellationPredicate shouldCancel = {});
+            WebGPUSdfEvaluator::CancellationPredicate shouldCancel = {},
+            events::SharedLogger logger = {});
     };
 } // namespace gladius::webgpu

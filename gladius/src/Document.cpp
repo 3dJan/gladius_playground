@@ -1579,7 +1579,8 @@ namespace gladius
                   *exportSnapshot,
                   *bounds,
                   manifoldOptions,
-                  shouldCancel);
+                  shouldCancel,
+                  m_logger);
                 break;
 #endif
             case io::SurfaceExtractionMethod::LayeredMarchingCubes:

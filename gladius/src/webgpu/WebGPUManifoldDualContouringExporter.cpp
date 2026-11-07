@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -32,6 +33,7 @@ namespace gladius::webgpu
     namespace
     {
         constexpr std::size_t kMaximumManifoldDepth = 12U;
+        constexpr std::size_t kMaximumAutomaticRetryDepth = 9U;
         constexpr io::IndexedTriangleMeshValidationPolicy kWebGpuOutputValidationPolicy =
             io::IndexedTriangleMeshValidationPolicy::AllowGeometricDegenerates;
         constexpr std::size_t kSurfaceAdoptionIterations = 100U;
@@ -196,7 +198,8 @@ namespace gladius::webgpu
         compute::RenderSceneSnapshot const& snapshot,
         compute::BoundsResult const& bounds,
         io::ManifoldDualContouringOptions const& options,
-        WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
+        WebGPUSdfEvaluator::CancellationPredicate shouldCancel,
+        events::SharedLogger logger)
     {
         if (!context || !context->isValid())
         {
@@ -266,37 +269,65 @@ namespace gladius::webgpu
         throwIfCancelled(shouldCancel);
         auto sdfRequest = makeSdfEvaluationRequest(snapshot, options.isoValue);
         WebGPUManifoldSdfSampler sampler{std::move(context), std::move(sdfRequest)};
-        compute::GlobalMortonOctree octree{sampler};
-        if (shouldCancel)
-        {
-            octree.setCancellationCheckCallback(shouldCancel);
-        }
-
-        compute::GlobalMortonOctreeConfig config;
-        config.initialDepth = options.initialDepth;
-        config.maxDepth = effectiveMaxDepth;
-        config.isoValue = options.isoValue;
-        config.minFeatureSize = options.minFeatureSize;
-        config.enableAdaptiveRefinement = false;
-        setPaddedBounds(config, bounds, effectiveMaxDepth);
-        octree.build(config);
-        throwIfCancelled(shouldCancel);
-        if (octree.hasSamplingError())
-        {
-            throw std::runtime_error("WebGPU manifold octree construction failed during SDF sampling");
-        }
-
         io::IndexedTriangleMesh mesh;
-        octree.extractMesh(mesh.positions, mesh.normals, mesh.indices);
-        throwIfCancelled(shouldCancel);
-        if (octree.hasSamplingError())
+        // A coarse grid can merge separate thin-wall sheets into overused dual edges.
+        // Retry once with half-sized cells, without escalating automatically to depth 12.
+        auto const maximumDepth = std::max(effectiveMaxDepth,
+            std::min(effectiveMaxDepth + 1U, kMaximumAutomaticRetryDepth));
+        for (;; ++effectiveMaxDepth)
         {
-            throw std::runtime_error("WebGPU manifold mesh extraction failed during SDF sampling");
-        }
-        auto const& extractionStats = octree.getStats();
-        if (extractionStats.boundaryEdges != 0U || extractionStats.nonManifoldEdges != 0U)
-        {
-            throw std::runtime_error("WebGPU manifold raw extraction is not closed and manifold");
+            throwIfCancelled(shouldCancel);
+            compute::GlobalMortonOctree octree{sampler};
+            octree.setCancellationCheckCallback(shouldCancel);
+            compute::GlobalMortonOctreeConfig config;
+            config.initialDepth = options.initialDepth;
+            config.maxDepth = effectiveMaxDepth;
+            config.isoValue = options.isoValue;
+            config.minFeatureSize = options.minFeatureSize;
+            config.enableAdaptiveRefinement = false;
+            setPaddedBounds(config, bounds, effectiveMaxDepth);
+            octree.build(config);
+            if (octree.wasCancelled())
+            {
+                throw io::MeshExportCancelled{};
+            }
+            throwIfCancelled(shouldCancel);
+            if (octree.hasSamplingError())
+            {
+                throw std::runtime_error("WebGPU manifold octree construction failed during SDF sampling");
+            }
+
+            octree.extractMesh(mesh.positions, mesh.normals, mesh.indices);
+            if (octree.wasCancelled())
+            {
+                throw io::MeshExportCancelled{};
+            }
+            throwIfCancelled(shouldCancel);
+            if (octree.hasSamplingError())
+            {
+                throw std::runtime_error("WebGPU manifold mesh extraction failed during SDF sampling");
+            }
+            auto const& stats = octree.getStats();
+            if (!mesh.indices.empty() && stats.boundaryEdges == 0U && stats.nonManifoldEdges == 0U)
+            {
+                break;
+            }
+            auto const diagnostics = "depth=" + std::to_string(effectiveMaxDepth) +
+                ", boundaryEdges=" + std::to_string(stats.boundaryEdges) +
+                ", nonManifoldEdges=" + std::to_string(stats.nonManifoldEdges) +
+                ", perimeterEdgesOverused=" + std::to_string(stats.perimeterEdgesOverused);
+            if (effectiveMaxDepth == maximumDepth)
+            {
+                throw std::runtime_error("WebGPU manifold raw extraction is not closed and manifold after bounded refinement: " +
+                                         diagnostics);
+            }
+            if (logger)
+            {
+                logger->addEvent({"Retrying WebGPU manifold extraction at depth " +
+                    std::to_string(effectiveMaxDepth + 1U) + " (" + diagnostics + ")",
+                    events::Severity::Warning});
+            }
+            mesh = {};
         }
         if (useFastQem || options.enableSimplification)
         {
@@ -419,9 +450,10 @@ namespace gladius::webgpu
         compute::RenderSceneSnapshot const& snapshot,
         compute::BoundsResult const& bounds,
         io::ManifoldDualContouringOptions const& options,
-        WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
+        WebGPUSdfEvaluator::CancellationPredicate shouldCancel,
+        events::SharedLogger logger)
     {
-        auto mesh = generateMesh(std::move(context), snapshot, bounds, options, shouldCancel);
+        auto mesh = generateMesh(std::move(context), snapshot, bounds, options, shouldCancel, std::move(logger));
         if (shouldCancel && shouldCancel())
         {
             throw io::MeshExportCancelled{};
@@ -435,9 +467,10 @@ namespace gladius::webgpu
         compute::RenderSceneSnapshot const& snapshot,
         compute::BoundsResult const& bounds,
         io::ManifoldDualContouringOptions const& options,
-        WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
+        WebGPUSdfEvaluator::CancellationPredicate shouldCancel,
+        events::SharedLogger logger)
     {
-        auto mesh = generateMesh(context, snapshot, bounds, options, shouldCancel);
+        auto mesh = generateMesh(context, snapshot, bounds, options, shouldCancel, std::move(logger));
         if (shouldCancel && shouldCancel())
         {
             throw io::MeshExportCancelled{};

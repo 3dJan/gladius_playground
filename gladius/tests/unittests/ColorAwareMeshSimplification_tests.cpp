@@ -152,6 +152,22 @@ namespace gladius::compute::tests
         EXPECT_EQ(labels, (std::vector<std::uint32_t>{11U}));
     }
 
+    TEST(ColorAwareMeshSimplification, Simplify_NearDegenerateFace_CompactsLabelsInFaceOrder)
+    {
+        std::vector<Eigen::Vector3f> positions{{0.F, 0.F, 0.F},
+                                               {100000.F, 0.F, 0.F},
+                                               {100000.F, 0.001F, 0.F}};
+        std::vector<std::uint32_t> indices{0U, 1U, 2U};
+        std::vector<std::uint32_t> labels{7U};
+        FastQemConfig config;
+        config.targetReductionPercent = 100.0F;
+
+        fastQemSimplify(positions, indices, labels, config);
+
+        EXPECT_TRUE(indices.empty());
+        EXPECT_TRUE(labels.empty());
+    }
+
     TEST(ColorAwareMeshSimplification, Simplify_InvalidInputs_ThrowsBeforeMutation)
     {
         auto mesh = makeSphere();
@@ -263,5 +279,30 @@ namespace gladius::compute::tests
         EXPECT_EQ(labeled.indices, repeated.indices);
         EXPECT_EQ(labeled.positions, repeated.positions);
         EXPECT_TRUE(std::all_of(labeled.labels.begin(), labeled.labels.end(), [](auto label) { return label == 42U; }));
+    }
+
+    TEST(ColorAwareMeshSimplification, Simplify_NearCoincidentVertices_RemovesSliversAndStaysWatertight)
+    {
+        auto mesh = makeSphere();
+        ASSERT_FALSE(mesh.closedOrientedTopologyError().has_value());
+
+        // Pull one vertex almost onto its neighbour, mimicking the duplicated sheets the
+        // octree mesher emits when two float-distinct positions collapse to the same text.
+        auto const target = mesh.indices[0];
+        auto const sliver = mesh.indices[1];
+        mesh.positions[sliver] = mesh.positions[target] + Eigen::Vector3f{1.0e-5F, 0.0F, 0.0F};
+
+        FastQemConfig config;
+        config.targetReductionPercent = 50.0F;
+        fastQemSimplify(mesh.positions, mesh.indices, mesh.labels, config);
+
+        EXPECT_EQ(mesh.labels.size(), mesh.indices.size() / 3U);
+        if (auto const error = mesh.validationError())
+        {
+            FAIL() << "Simplified colored mesh is invalid: " << *error;
+        }
+        EXPECT_FALSE(mesh.closedOrientedTopologyError().has_value());
+        auto const diagnostics = io::computeIndexedTriangleMeshDiagnostics(mesh);
+        EXPECT_EQ(diagnostics.degenerateTriangleCount, 0U);
     }
 }

@@ -695,10 +695,13 @@ namespace gladius::compute
         
         std::size_t totalNeighborsCreated = 0U;
         std::size_t passes = 0U;
-        constexpr std::size_t MAX_BALANCE_PASSES = 10U;
         
+        // Thin connected features can extend beyond ten waves of discovered cells.
+        // Stop only when every crossing has its neighbors. The Morton lookup makes
+        // allocation monotonic and finite within the bounded grid; cancellation is
+        // checked between waves and by the batched sampler.
         bool changed = true;
-        while (changed && passes < MAX_BALANCE_PASSES)
+        while (changed)
         {
             if (isCancelled())
             {
@@ -731,14 +734,16 @@ namespace gladius::compute
 
             for (std::size_t nodeIdx : intersectingLeaves)
             {
-                auto const& node = m_nodes[nodeIdx];
+                // Neighbor allocation can reallocate m_nodes; retain only value copies.
+                auto const depth = m_nodes[nodeIdx].depth;
+                auto const edgeMask = m_nodes[nodeIdx].edgeMask;
                 
                 std::uint32_t cx = 0U;
                 std::uint32_t cy = 0U;
                 std::uint32_t cz = 0U;
-                decodePathMorton(node.mortonCode, node.depth, cx, cy, cz);
+                decodePathMorton(m_nodes[nodeIdx].mortonCode, depth, cx, cy, cz);
                 
-                auto const maxCoord = (1U << node.depth) - 1U;
+                auto const maxCoord = (1U << depth) - 1U;
                 
                 // Lambda to allocate a neighbor stub if it doesn't exist yet
                 auto ensureStubAt = [&](std::int32_t x, std::int32_t y, std::int32_t z)
@@ -754,15 +759,15 @@ namespace gladius::compute
                         static_cast<std::uint32_t>(x),
                         static_cast<std::uint32_t>(y),
                         static_cast<std::uint32_t>(z),
-                        node.depth);
+                        depth);
 
-                    if (m_mortonToIndex.find(MortonNodeKey{morton, node.depth}) == m_mortonToIndex.end())
+                    if (m_mortonToIndex.find(MortonNodeKey{morton, depth}) == m_mortonToIndex.end())
                     {
                         std::size_t const idx = allocateNodeAtCoordinates(
                             static_cast<std::uint32_t>(x),
                             static_cast<std::uint32_t>(y),
                             static_cast<std::uint32_t>(z),
-                            node.depth);
+                            depth);
                         newNodeIndices.push_back(idx);
                     }
                 };
@@ -776,19 +781,19 @@ namespace gladius::compute
                 ensureStubAt(static_cast<std::int32_t>(cx), static_cast<std::int32_t>(cy), static_cast<std::int32_t>(cz) - 1);
 
                 // Owned-edge neighbor completion (edges 3, 7, 11)
-                if ((node.edgeMask & (1U << 3U)) != 0U)
+                if ((edgeMask & (1U << 3U)) != 0U)
                 {
                     ensureStubAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 1, static_cast<std::int32_t>(cz) + 0);
                     ensureStubAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 1);
                     ensureStubAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 1, static_cast<std::int32_t>(cz) + 1);
                 }
-                if ((node.edgeMask & (1U << 7U)) != 0U)
+                if ((edgeMask & (1U << 7U)) != 0U)
                 {
                     ensureStubAt(static_cast<std::int32_t>(cx) + 1, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 0);
                     ensureStubAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 1);
                     ensureStubAt(static_cast<std::int32_t>(cx) + 1, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 1);
                 }
-                if ((node.edgeMask & (1U << 11U)) != 0U)
+                if ((edgeMask & (1U << 11U)) != 0U)
                 {
                     ensureStubAt(static_cast<std::int32_t>(cx) + 1, static_cast<std::int32_t>(cy) + 0, static_cast<std::int32_t>(cz) + 0);
                     ensureStubAt(static_cast<std::int32_t>(cx) + 0, static_cast<std::int32_t>(cy) + 1, static_cast<std::int32_t>(cz) + 0);
@@ -806,6 +811,10 @@ namespace gladius::compute
 
             // --- Phase 2: Batch-evaluate corners + classify all new nodes ---
             evaluateAndClassifyNodes(newNodeIndices);
+            if (m_samplingFailed || isCancelled())
+            {
+                return;
+            }
 
             if (debugProgress)
             {
@@ -1148,11 +1157,11 @@ namespace gladius::compute
         // Set of (nodeIndex) for neighbors that need a vertex (may include existing nodes).
         std::vector<std::size_t> neighborsNeedingVertex;
 
-        auto ensureNeighborStub = [&](GlobalOctreeNode const& baseNode,
+        auto ensureNeighborStub = [&](std::uint8_t const depth,
                                       std::uint32_t cx, std::uint32_t cy, std::uint32_t cz,
                                       std::int32_t dx, std::int32_t dy, std::int32_t dz)
         {
-            auto const maxCoord = (1U << baseNode.depth) - 1U;
+            auto const maxCoord = (1U << depth) - 1U;
             auto const nx = static_cast<std::int32_t>(cx) + dx;
             auto const ny = static_cast<std::int32_t>(cy) + dy;
             auto const nz = static_cast<std::int32_t>(cz) + dz;
@@ -1168,13 +1177,13 @@ namespace gladius::compute
             auto const uny = static_cast<std::uint32_t>(ny);
             auto const unz = static_cast<std::uint32_t>(nz);
 
-            std::uint64_t const morton = encodePathMorton(unx, uny, unz, baseNode.depth);
-            auto it = m_mortonToIndex.find(MortonNodeKey{morton, baseNode.depth});
+            std::uint64_t const morton = encodePathMorton(unx, uny, unz, depth);
+            auto it = m_mortonToIndex.find(MortonNodeKey{morton, depth});
 
             std::size_t neighborIdx;
             if (it == m_mortonToIndex.end())
             {
-                neighborIdx = allocateNodeAtCoordinates(unx, uny, unz, baseNode.depth);
+                neighborIdx = allocateNodeAtCoordinates(unx, uny, unz, depth);
                 if (neighborIdx == std::numeric_limits<std::size_t>::max())
                 {
                     return;
@@ -1191,32 +1200,33 @@ namespace gladius::compute
 
         for (std::size_t nodeIdx : intersectingLeaves)
         {
-            auto const& node = m_nodes[nodeIdx];
-            if (node.depth == 0U)
+            auto const depth = m_nodes[nodeIdx].depth;
+            auto const edgeMask = m_nodes[nodeIdx].edgeMask;
+            if (depth == 0U)
             {
                 continue;
             }
 
             std::uint32_t cx = 0U, cy = 0U, cz = 0U;
-            decodePathMorton(node.mortonCode, node.depth, cx, cy, cz);
+            decodePathMorton(m_nodes[nodeIdx].mortonCode, depth, cx, cy, cz);
 
-            if ((node.edgeMask & (1U << 3U)) != 0U)
+            if ((edgeMask & (1U << 3U)) != 0U)
             {
-                ensureNeighborStub(node, cx, cy, cz, 0, +1, 0);
-                ensureNeighborStub(node, cx, cy, cz, 0, 0, +1);
-                ensureNeighborStub(node, cx, cy, cz, 0, +1, +1);
+                ensureNeighborStub(depth, cx, cy, cz, 0, +1, 0);
+                ensureNeighborStub(depth, cx, cy, cz, 0, 0, +1);
+                ensureNeighborStub(depth, cx, cy, cz, 0, +1, +1);
             }
-            if ((node.edgeMask & (1U << 7U)) != 0U)
+            if ((edgeMask & (1U << 7U)) != 0U)
             {
-                ensureNeighborStub(node, cx, cy, cz, +1, 0, 0);
-                ensureNeighborStub(node, cx, cy, cz, 0, 0, +1);
-                ensureNeighborStub(node, cx, cy, cz, +1, 0, +1);
+                ensureNeighborStub(depth, cx, cy, cz, +1, 0, 0);
+                ensureNeighborStub(depth, cx, cy, cz, 0, 0, +1);
+                ensureNeighborStub(depth, cx, cy, cz, +1, 0, +1);
             }
-            if ((node.edgeMask & (1U << 11U)) != 0U)
+            if ((edgeMask & (1U << 11U)) != 0U)
             {
-                ensureNeighborStub(node, cx, cy, cz, +1, 0, 0);
-                ensureNeighborStub(node, cx, cy, cz, 0, +1, 0);
-                ensureNeighborStub(node, cx, cy, cz, +1, +1, 0);
+                ensureNeighborStub(depth, cx, cy, cz, +1, 0, 0);
+                ensureNeighborStub(depth, cx, cy, cz, 0, +1, 0);
+                ensureNeighborStub(depth, cx, cy, cz, +1, +1, 0);
             }
         }
 
@@ -1242,12 +1252,15 @@ namespace gladius::compute
 
             if (!newIntersecting.empty())
             {
-                // Reuse the batch Hermite path — temporarily append to gatherHermiteSamplesBatchGpu
-                // by running only for these nodes. For simplicity, use per-node CPU fallback
-                // since new intersecting halo nodes are rare.
+                // Halo completion can discover thousands of intersecting cells. Use the
+                // same batched sampler as vertex generation, not per-edge GPU dispatches.
+                gatherHermiteSamplesBatchGpu(newIntersecting);
+                if (m_samplingFailed || isCancelled())
+                {
+                    return;
+                }
                 for (std::size_t idx : newIntersecting)
                 {
-                    gatherHermiteSamples(m_nodes[idx]);
                     solveQefForNode(m_nodes[idx]);
                     for (auto const& cv : m_nodes[idx].computedVertices)
                     {
@@ -1291,18 +1304,18 @@ namespace gladius::compute
     {
         // This is a wrapper that ensures face-adjacent neighbors exist for a single node.
         // The actual implementation is in balanceOctree which does it for all nodes.
-        auto const& node = m_nodes[nodeIndex];
-        if (!node.isLeaf)
+        if (!m_nodes[nodeIndex].isLeaf)
         {
             return;
         }
+        auto const depth = m_nodes[nodeIndex].depth;
         
         std::uint32_t cx = 0U;
         std::uint32_t cy = 0U;
         std::uint32_t cz = 0U;
-        decodePathMorton(node.mortonCode, node.depth, cx, cy, cz);
+        decodePathMorton(m_nodes[nodeIndex].mortonCode, depth, cx, cy, cz);
         
-        auto const maxCoord = (1U << node.depth) - 1U;
+        auto const maxCoord = (1U << depth) - 1U;
         
         // 6 face-adjacent neighbors
         std::array<std::tuple<int, int, int>, 6> const offsets = {{
@@ -1328,7 +1341,7 @@ namespace gladius::compute
                 static_cast<std::uint32_t>(nx),
                 static_cast<std::uint32_t>(ny),
                 static_cast<std::uint32_t>(nz),
-                node.depth);
+                depth);
         }
     }
 
@@ -1565,22 +1578,22 @@ namespace gladius::compute
 
         bool const debugProgress = isEnvVarSet("GLADIUS_DEBUG_MDC_CONFIG");
         std::size_t const totalNodes = m_nodes.size();
-        std::size_t intersectingLeaves = 0U;
-        for (auto const& n : m_nodes)
+        std::vector<std::size_t> intersectingLeaves;
+        for (std::size_t idx = 0U; idx < m_nodes.size(); ++idx)
         {
-            if (n.isLeaf && n.isIntersecting)
+            if (m_nodes[idx].isLeaf && m_nodes[idx].isIntersecting)
             {
-                ++intersectingLeaves;
+                intersectingLeaves.push_back(idx);
             }
         }
         if (debugProgress)
         {
-            std::cout << "  Generating vertices for " << intersectingLeaves << " intersecting leaves (totalNodes=" << totalNodes << ")..." << std::endl;
+            std::cout << "  Generating vertices for " << intersectingLeaves.size() << " intersecting leaves (totalNodes=" << totalNodes << ")..." << std::endl;
         }
 
         // Phase 1: Gather Hermite samples for all intersecting leaves using GPU
         // analytical SDF evaluation (batched bisection + gradient).
-        gatherHermiteSamplesBatchGpu();
+        gatherHermiteSamplesBatchGpu(intersectingLeaves);
 
         // Phase 1b: Solve QEF for each intersecting leaf (CPU, parallelizable)
         auto const nodeCount = static_cast<std::ptrdiff_t>(m_nodes.size());
@@ -1713,7 +1726,7 @@ namespace gladius::compute
         outPosition = (lo + hi) * 0.5F;
     }
 
-    void GlobalMortonOctree::gatherHermiteSamplesBatchGpu()
+    void GlobalMortonOctree::gatherHermiteSamplesBatchGpu(std::vector<std::size_t> const& nodeIndices)
     {
         if (m_samplingFailed || isCancelled())
         {
@@ -1733,7 +1746,7 @@ namespace gladius::compute
         };
 
         std::vector<EdgeWork> edges;
-        for (std::size_t i = 0U; i < m_nodes.size(); ++i)
+        for (std::size_t i : nodeIndices)
         {
             auto const& node = m_nodes[i];
             if (!node.isLeaf || !node.isIntersecting)

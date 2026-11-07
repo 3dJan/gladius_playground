@@ -15,6 +15,38 @@ namespace gladius::compute::tests
 {
     namespace
     {
+        /// Drop faces whose three corners are (nearly) collinear or coincident.
+        /// The open UV fixture contains such faces at the poles; QEM legitimately removes
+        /// them because they would fail strict mesh validation downstream.
+        std::vector<std::uint32_t> withoutDegenerateFaces(std::vector<Eigen::Vector3f> const & positions,
+                                                         std::vector<std::uint32_t> const & idx)
+        {
+            auto const isDegenerate = [&positions](std::uint32_t a, std::uint32_t b, std::uint32_t c)
+            {
+                Eigen::Vector3f const ab = positions[b] - positions[a];
+                Eigen::Vector3f const ac = positions[c] - positions[a];
+                Eigen::Vector3f const bc = positions[c] - positions[b];
+                double const maxEdgeSquared = std::max({static_cast<double>(ab.squaredNorm()),
+                                                        static_cast<double>(ac.squaredNorm()),
+                                                        static_cast<double>(bc.squaredNorm())});
+                double const crossSquared = static_cast<double>(ab.cross(ac).squaredNorm());
+                double const tol = static_cast<double>(std::numeric_limits<float>::epsilon());
+                return maxEdgeSquared == 0.0 ||
+                       crossSquared <= maxEdgeSquared * maxEdgeSquared * tol * tol;
+            };
+
+            std::vector<std::uint32_t> kept;
+            kept.reserve(idx.size());
+            for (std::size_t t = 0U; t + 2U < idx.size(); t += 3U)
+            {
+                if (isDegenerate(idx[t], idx[t + 1U], idx[t + 2U])) continue;
+                kept.push_back(idx[t]);
+                kept.push_back(idx[t + 1U]);
+                kept.push_back(idx[t + 2U]);
+            }
+            return kept;
+        }
+
         /// Count boundary edges (shared by 1 tri) and non-manifold edges (shared by >2 tris)
         std::pair<std::size_t, std::size_t> countEdgeDefects(std::vector<std::uint32_t> const & idx)
         {
@@ -569,7 +601,10 @@ namespace gladius::compute::tests
     {
         auto sphere = generateSphere(1.0F, 16, 32);
 
-        auto [inputBoundary, inputNonManifold] = countEdgeDefects(sphere.indices);
+        // The open UV fixture has zero-area faces at the poles; QEM drops those before
+        // simplifying, so the comparable baseline is the mesh it actually starts from.
+        auto const inputKept = withoutDegenerateFaces(sphere.positions, sphere.indices);
+        auto const [inputBoundary, inputNonManifold] = countEdgeDefects(inputKept);
 
         FastQemConfig config;
         config.terminationMode = SimplificationTerminationMode::TargetReductionPercent;
@@ -577,7 +612,7 @@ namespace gladius::compute::tests
 
         fastQemSimplify(sphere.positions, sphere.indices, config);
 
-        auto [outputBoundary, outputNonManifold] = countEdgeDefects(sphere.indices);
+        auto const [outputBoundary, outputNonManifold] = countEdgeDefects(sphere.indices);
 
         // Simplification must never create non-manifold edges (>2 tris sharing an edge)
         EXPECT_EQ(outputNonManifold, 0U)

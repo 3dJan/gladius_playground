@@ -388,8 +388,8 @@ namespace gladius::compute
         /// Batch-evaluate analytical SDF at all corner positions for a set of nodes.
         void evaluateCornersGpuBatch(std::vector<std::size_t> const& nodeIndices);
 
-        /// Batch gather Hermite samples for all intersecting leaves using GPU SDF.
-        void gatherHermiteSamplesBatchGpu();
+        /// Batch gather Hermite samples for the supplied intersecting leaves using GPU SDF.
+        void gatherHermiteSamplesBatchGpu(std::vector<std::size_t> const& nodeIndices);
 
 
         // Thickness field support
