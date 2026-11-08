@@ -2749,7 +2749,7 @@ namespace gladius
         findParameterOrThrow(modelId, nodeName, parameterName).setValue(value);
     }
 
-    PolyLines Document::generateContour(float z, nodes::SliceParameter const & sliceParameter) const
+    PolyLines Document::generateContour(float z, nodes::SliceParameter const & sliceParameter)
     {
 #if !defined(GLADIUS_ENABLE_OPENCL)
         return generateContourWebGpu(z, sliceParameter);
@@ -2778,7 +2778,7 @@ namespace gladius
         PolyLines Document::generateContourWebGpu(
             float z,
             nodes::SliceParameter const & sliceParameter,
-            std::optional<compute::RenderBounds> modelBounds) const
+            std::optional<compute::RenderBounds> modelBounds)
     {
 #if !defined(GLADIUS_ENABLE_WEBGPU)
         (void) z;
@@ -2848,8 +2848,105 @@ namespace gladius
 #endif
     }
 
-    BoundingBox Document::computeBoundingBox() const
+    std::optional<compute::BoundsResult> Document::computeModelBoundsBlocking()
     {
+#if !defined(GLADIUS_ENABLE_WEBGPU)
+        return std::nullopt;
+#else
+        if (m_backendRuntime == nullptr ||
+            m_backendRuntime->getBackendKind() != compute::ComputeBackendKind::WebGPU ||
+            !m_backendRuntime->isAvailable())
+        {
+            return std::nullopt;
+        }
+
+        auto * const renderSession = m_backendRuntime->getRenderBackendSession();
+        auto * const boundsService = m_backendRuntime->getBoundsService();
+        auto const context = m_backendRuntime->getWebGPUContext();
+        if (renderSession == nullptr || boundsService == nullptr || !context ||
+            !boundsService->isAvailable())
+        {
+            return std::nullopt;
+        }
+
+        auto assemblyToken = waitForAssemblyToken();
+        updateFlatAssembly();
+        auto const flatAssembly = getFlatAssembly();
+        if (!flatAssembly || flatAssembly->assemblyModel() == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        auto const generation = std::max<std::uint64_t>(structuralEditEpoch(), 1u);
+        compute::RenderFreshnessStamp const freshness{.sceneGeneration = generation,
+                                                      .viewGeneration = 0u,
+                                                      .parameterGeneration = generation,
+                                                      .resourceGeneration = generation,
+                                                      .evaluationGeneration = generation};
+        if (auto const cached = boundsService->getCachedResult(freshness);
+            cached.has_value() && cached->isUsable())
+        {
+            return cached;
+        }
+
+        auto snapshot = compute::AnalyticRenderSceneSnapshotFactory::create(
+          *flatAssembly->assemblyModel(), generation, getResourceManager());
+        if (!snapshot.isValid())
+        {
+            return std::nullopt;
+        }
+        auto const boundsSnapshot =
+          std::make_shared<const compute::RenderSceneSnapshot>(std::move(snapshot));
+
+        auto const previousSnapshot = renderSession->getSceneSnapshot();
+        boundsService->setSceneSnapshot(boundsSnapshot);
+        struct SnapshotRestorer
+        {
+            compute::IBoundsService * service;
+            std::shared_ptr<const compute::RenderSceneSnapshot> previous;
+
+            ~SnapshotRestorer()
+            {
+                service->setSceneSnapshot(previous);
+            }
+        } const restorer{boundsService, previousSnapshot};
+
+        compute::BoundsRequest boundsRequest;
+        boundsRequest.freshness = freshness;
+        boundsRequest.probeSettings.resolution = {256u, 256u, 256u};
+        boundsRequest.probeSettings.tileSize = {64u, 64u, 64u};
+        boundsRequest.probeSettings.allowMetadataFallback = false;
+
+        auto submission = boundsService->submit(std::move(boundsRequest));
+        if (!submission)
+        {
+            return std::nullopt;
+        }
+        while (submission->getStatus() == compute::BoundsSubmissionStatus::Pending)
+        {
+            submission->progress();
+            context->processEvents();
+        }
+        submission->wait();
+        auto result = submission->takeResult();
+        if (result.has_value() && result->isUsable())
+        {
+            return result;
+        }
+        return std::nullopt;
+#endif
+    }
+
+    BoundingBox Document::computeBoundingBox()
+    {
+        if (auto const bounds = computeModelBoundsBlocking();
+            bounds.has_value() && bounds->isUsable())
+        {
+            auto const & modelBounds = *bounds->modelBounds;
+            return BoundingBox{{modelBounds.min[0], modelBounds.min[1], modelBounds.min[2], 0.0f},
+                               {modelBounds.max[0], modelBounds.max[1], modelBounds.max[2], 0.0f}};
+        }
+
     #if !defined(GLADIUS_ENABLE_OPENCL)
         return BoundingBox{{0.0f, 0.0f, 0.0f, 0.0f}, {400.0f, 400.0f, 400.0f, 0.0f}};
     #else

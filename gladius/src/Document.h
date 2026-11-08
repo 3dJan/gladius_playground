@@ -5,6 +5,7 @@
 #include "Mesh.h"
 #include "MeshSdfMethod.h"
 #include "compute/AsyncTask.h"
+#include "compute/BoundingBoxContracts.h"
 #include "compute/ComputeBackend.h"
 #include "compute/RenderContracts.h"
 #include "compute/types.h"
@@ -317,7 +318,7 @@ namespace gladius
                                   nodes::float3 const & value);
 
         [[nodiscard]] PolyLines generateContour(float z,
-                                                nodes::SliceParameter const & sliceParameter) const;
+                                                nodes::SliceParameter const & sliceParameter);
 
         /// WebGPU contour path used when no OpenCL core is available. Evaluates the
         /// flattened model analytically on a grid via WebGPU and extracts contours on
@@ -325,9 +326,14 @@ namespace gladius
         [[nodiscard]] PolyLines generateContourWebGpu(float z,
                                                                                                             nodes::SliceParameter const & sliceParameter,
                                                                                                             std::optional<compute::RenderBounds> modelBounds =
-                                                                                                                std::nullopt) const;
+                                                                                                                std::nullopt);
 
-        [[nodiscard]] BoundingBox computeBoundingBox() const;
+        /// Runs a blocking analytic bounds probe on the WebGPU backend for the current
+        /// flattened assembly. Returns std::nullopt when no WebGPU bounds service is
+        /// available or the probe did not complete.
+        [[nodiscard]] std::optional<compute::BoundsResult> computeModelBoundsBlocking();
+
+        [[nodiscard]] BoundingBox computeBoundingBox();
 
         [[nodiscard]] Mesh generateMesh() const;
 
