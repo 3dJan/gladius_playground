@@ -126,6 +126,7 @@ namespace gladius::ui::async_rendering
         uint64_t frameId{0};         ///< Matches PreviewRenderJob::frameId
         uint64_t epoch{0};           ///< Matches PreviewRenderJob::epoch
         uint64_t viewEpoch{0};       ///< Camera/view generation captured when the preview was queued
+        uint64_t paramGeneration{0}; ///< GPU parameter-buffer generation used by the preview.
         uint64_t latencyNs{0};       ///< Time from job enqueue to completion (nanoseconds)
         bool cancelled{false};       ///< True if job was cancelled due to epoch change
         bool sdfWasValid{false};     ///< True if SDF was available during rendering

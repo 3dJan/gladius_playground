@@ -26,6 +26,8 @@ namespace gladius::ui::async_rendering
     {
         DisplayFrameBufferState frontBuffer{};
         DisplayFrameBufferState progressiveBuffer{};
+        bool progressiveBufferSeeded{false}; ///< Unrendered rows contain a valid preview seed.
+        bool preferLowResolutionPreview{false};
         uint64_t currentEpoch{0};
         uint64_t currentViewEpoch{0};
         bool exactRealtimeInteraction{false};
@@ -57,6 +59,20 @@ namespace gladius::ui::async_rendering
     [[nodiscard]] constexpr DisplayFrameSource selectDisplayFrameSource(
       DisplayFrameSelectionInput const & input) noexcept
     {
+        bool const progressiveBufferCurrent =
+          input.progressiveBuffer.hasImage &&
+          input.progressiveBuffer.epoch == input.currentEpoch &&
+          input.progressiveBuffer.viewEpoch == input.currentViewEpoch;
+        bool const canDisplayProgressive =
+          progressiveBufferCurrent && input.progressiveBufferSeeded && !input.isMoving &&
+          !input.fullFrameRenderJobInFlight && !input.suppressHqDisplay;
+
+        if (input.preferLowResolutionPreview && input.resultImageAvailable)
+        {
+            return canDisplayProgressive ? DisplayFrameSource::ProgressiveBuffer
+                                         : DisplayFrameSource::ResultImage;
+        }
+
         bool const frontEpochMatches = input.frontBuffer.hasImage &&
                                        input.frontBuffer.epoch == input.currentEpoch;
         bool const frontViewMatches = input.frontBuffer.hasImage &&
@@ -76,19 +92,13 @@ namespace gladius::ui::async_rendering
             return DisplayFrameSource::FrontBuffer;
         }
 
-        bool const progressiveBufferCurrent =
-          input.progressiveBuffer.hasImage &&
-          input.progressiveBuffer.epoch == input.currentEpoch &&
-          input.progressiveBuffer.viewEpoch == input.currentViewEpoch;
-
         if (frontBufferIsPresentedFrame && !input.suppressHqDisplay &&
             input.presentedFrame->quality == FramePresentationQuality::FullQuality)
         {
             return DisplayFrameSource::FrontBuffer;
         }
 
-        if (progressiveBufferCurrent && !input.isMoving && !input.fullFrameRenderJobInFlight &&
-            !input.suppressHqDisplay)
+        if (canDisplayProgressive)
         {
             return DisplayFrameSource::ProgressiveBuffer;
         }

@@ -43,22 +43,52 @@ namespace gladius::ui::async_rendering
     }
 
     /**
-     * @brief Allows a preview to seed a different viewport with otherwise matching render state.
+     * @brief Requires a fresh preview for every render-state or viewport change.
      *
-     * The preview is resampled into the new render target, so only a viewport-epoch mismatch is
-     * permitted; scene, parameter, camera, and quality changes still invalidate the seed.
+     * The preview may have a lower resolution than the HQ target, but must have been rendered
+     * for the same scene, parameters, camera, viewport, and rendering settings.
      */
     [[nodiscard]] inline constexpr bool matchesProgressivePreviewSeedStamp(
       RenderStamp const & previewStamp,
       RenderStamp const & progressiveStamp) noexcept
     {
-        return matches(previewStamp,
-                       progressiveStamp,
-                       RenderStampMask{.scene = true,
-                                       .parameters = true,
-                                       .view = true,
-                                       .viewport = false,
-                                       .quality = true});
+        return matches(previewStamp, progressiveStamp, RenderStampMask::displayFrame());
+    }
+
+    /// Metadata for the result image currently available as a low-resolution preview seed.
+    struct ProgressivePreviewSeedState
+    {
+        bool hasPreview{false};
+        std::uint64_t epoch{0};
+        std::uint64_t viewEpoch{0};
+        std::uint64_t paramGeneration{0};
+        std::uint32_t width{0};
+        std::uint32_t height{0};
+        RenderStamp stamp{};
+    };
+
+    /// Metadata for the progressive HQ buffer that would be seeded from the result image.
+    struct ProgressivePreviewSeedTarget
+    {
+        std::uint64_t epoch{0};
+        std::uint64_t viewEpoch{0};
+        std::uint64_t paramGeneration{0};
+        std::uint32_t width{0};
+        std::uint32_t height{0};
+        RenderStamp stamp{};
+    };
+
+    /// Rejects stale, incompatible, resized, or missing result-image seeds.
+    [[nodiscard]] constexpr bool isCompatibleProgressivePreviewSeed(
+      ProgressivePreviewSeedState const & preview,
+      ProgressivePreviewSeedTarget const & progressive) noexcept
+    {
+        return preview.hasPreview && preview.epoch == progressive.epoch &&
+               preview.viewEpoch == progressive.viewEpoch &&
+               preview.paramGeneration == progressive.paramGeneration &&
+               preview.width > 0u && preview.height > 0u &&
+               preview.width == progressive.width && preview.height == progressive.height &&
+               matchesProgressivePreviewSeedStamp(preview.stamp, progressive.stamp);
     }
 
     [[nodiscard]] [[nodiscard]] inline bool canSeedProgressiveFrame(

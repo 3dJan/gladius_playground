@@ -25,4 +25,20 @@ namespace gladius::ui::async_rendering::tests
 
         EXPECT_FALSE(OpenGLFramePresenter::canPresent(frame));
     }
+
+    TEST(OpenGLFramePresenter, Present_WithoutPreviewSeed_DoesNotAllocateOrExposePartialTexture)
+    {
+        OpenGLFramePresenter presenter;
+        compute::RenderFrame const frame{.width = 4u,
+                                         .height = 4u,
+                                         .firstRow = 0u,
+                                         .endRow = 1u,
+                                         .pixels = std::vector<std::uint32_t>(4u, 0xFFFFFFFFu)};
+        FramePresentationCandidate const candidate{
+          .quality = FramePresentationQuality::ProgressivePartial,
+          .source = FramePresentationSource::ProgressiveHighQuality};
+
+        EXPECT_FALSE(presenter.present(frame, candidate));
+        EXPECT_EQ(presenter.getTextureId(), 0u);
+    }
 }

@@ -328,6 +328,10 @@ namespace gladius::ui
           async_rendering::RenderJob const & job,
           async_rendering::AsyncRenderController::CancelCheck const & cancelCheck);
         void processAsyncPreviewResults();
+        void recordLowResPreview(async_rendering::RenderStamp const & stamp,
+                                 uint64_t epoch,
+                                 uint64_t viewEpoch,
+                                 uint64_t paramGeneration);
 
         // Streaming preview loop (tight render loop during parameter drag)
         bool scheduleStreamingPreviewJob(
@@ -664,12 +668,20 @@ namespace gladius::ui
         /// stale-view preview, which would produce torn (mixed-view) progressive frames during
         /// rapid window resizing.
         std::atomic<uint64_t> m_lastLowResPreviewViewEpoch{0};
+        async_rendering::RenderStamp m_lastLowResPreviewStamp{};
+        uint64_t m_lastLowResPreviewParamGeneration{0};
+        uint32_t m_lastLowResPreviewWidth{0};
+        uint32_t m_lastLowResPreviewHeight{0};
+        bool m_hasLowResPreview{false};
         bool m_asyncInitialized{false};
         bool m_compilationInvalidated{false};
         bool m_cameraInputInvalidatedThisFrame{false};
 
         // Progressive rendering: reuse same buffer for all chunks in a frame
         async_rendering::FrameBuffer * m_asyncProgressiveBuffer{nullptr};
+        std::atomic<bool> m_asyncProgressiveBufferSeeded{false};
+        /// Preserve the result image when a progressive buffer has no compatible preview seed.
+        std::atomic<bool> m_asyncProgressiveSeedUnavailable{false};
         std::atomic<uint64_t> m_asyncProgressiveEpoch{0};
         std::atomic<uint64_t> m_asyncProgressiveViewEpoch{0};
         /// GPU parameter-buffer generation the progressive buffer's HQ lines were rendered with.

@@ -556,6 +556,8 @@ namespace gladius::ui
             }
             if (!framePresented)
             {
+                queueRenderDecision(workflow.notifyRenderSettingsChanged());
+                m_neutralRenderScheduler.requestCancellationForStale();
                 continue;
             }
 
@@ -795,13 +797,6 @@ namespace gladius::ui
         updateNeutralParameterInteraction();
         if (m_neutralBackendActive)
         {
-            // Keep the previously presented texture visible while the viewport dimensions
-            // settle. The next frame submits with the stable size and replaces it safely.
-            if (m_deferredResizePending)
-            {
-                return;
-            }
-
             (void) updateCameraCentering();
             auto const cameraActuallyMoving = m_camera.update(ImGui::GetIO().DeltaTime * 1000.0f);
             bool const cameraDragActive = m_cameraDragButton >= 0;

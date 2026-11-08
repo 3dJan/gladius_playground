@@ -62,25 +62,16 @@ namespace gladius::ui::async_rendering
                         m_uploadData.data() + static_cast<std::size_t>(row) * alignedBytesPerRow);
         }
 
-        webgpu::WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
-        if (!m_texture || frame.width > m_capacityWidth || frame.height > m_capacityHeight)
-        {
-            auto const capacityWidth = std::max(m_capacityWidth, frame.width);
-            auto const capacityHeight = std::max(m_capacityHeight, frame.height);
-            if (!allocateTexture(capacityWidth, capacityHeight))
-            {
-                return false;
-            }
-        }
-        if (!m_texture || !m_textureView)
-        {
-            return false;
-        }
-
         bool const activeDimensionsChanged = m_width != frame.width || m_height != frame.height;
         bool const freshnessChanged = !m_freshness.has_value() || *m_freshness != frame.freshness;
         bool const startsProgressiveFrame = frame.firstRow == 0u && frame.endRow < frame.height;
-        if (activeDimensionsChanged || freshnessChanged || startsProgressiveFrame)
+        if (frame.firstRow > 0u && (activeDimensionsChanged || freshnessChanged))
+        {
+            std::cerr << "[WebGPUFramePresenter] Cannot continue an uninitialized progressive frame\n";
+            return false;
+        }
+        bool const initializeFrame = activeDimensionsChanged || freshnessChanged || startsProgressiveFrame;
+        if (initializeFrame)
         {
             if (static_cast<std::size_t>(frame.height) >
                 std::numeric_limits<std::size_t>::max() / alignedBytesPerRow)
@@ -97,16 +88,37 @@ namespace gladius::ui::async_rendering
                                       *m_previewSeedCandidate,
                                       frame,
                                       candidate);
-            if (hasCompatibleSeed &&
-                !resampleCompleteFrameToBuffer(*m_previewSeedFrame,
-                                               frame.width,
-                                               frame.height,
-                                               m_clearData.data(),
-                                               alignedBytesPerRow / sizeof(std::uint32_t)))
+            if (startsProgressiveFrame &&
+                (!hasCompatibleSeed ||
+                 !resampleCompleteFrameToBuffer(*m_previewSeedFrame,
+                                                frame.width,
+                                                frame.height,
+                                                m_clearData.data(),
+                                                alignedBytesPerRow / sizeof(std::uint32_t))))
             {
-                std::fill(m_clearData.begin(), m_clearData.end(), 0u);
+                std::cerr << "[WebGPUFramePresenter] Progressive frame requires a current low-resolution preview\n";
+                return false;
             }
+        }
 
+        webgpu::WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
+        if (!m_texture || frame.width > m_capacityWidth || frame.height > m_capacityHeight)
+        {
+            auto const capacityWidth = std::max(m_capacityWidth, frame.width);
+            auto const capacityHeight = std::max(m_capacityHeight, frame.height);
+            if (!allocateTexture(capacityWidth, capacityHeight))
+            {
+                return false;
+            }
+        }
+        if (!m_texture || !m_textureView)
+        {
+            return false;
+        }
+
+        if (initializeFrame)
+        {
+            auto const clearSizeBytes = alignedBytesPerRow * static_cast<std::size_t>(frame.height);
             wgpu::TexelCopyTextureInfo clearDestination;
             clearDestination.texture = m_texture;
             clearDestination.origin = {.x = 0u, .y = 0u, .z = 0u};

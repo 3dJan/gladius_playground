@@ -123,10 +123,60 @@ namespace gladius::ui::async_rendering::tests
         auto const selected = selectDisplayFrameSource(
           DisplayFrameSelectionInput{.frontBuffer = buffer(2, 7),
                                      .progressiveBuffer = buffer(3, 7),
+                                     .progressiveBufferSeeded = true,
                                      .currentEpoch = 3,
                                      .currentViewEpoch = 7});
 
         EXPECT_EQ(selected, DisplayFrameSource::ProgressiveBuffer);
+    }
+
+    TEST(DisplayFrameSelector, WithUnseededCurrentProgressive_FallsBackToResultImage)
+    {
+        auto const selected = selectDisplayFrameSource(
+          DisplayFrameSelectionInput{.progressiveBuffer = buffer(3, 7),
+                                     .currentEpoch = 3,
+                                     .currentViewEpoch = 7,
+                                     .resultImageAvailable = true});
+
+        EXPECT_EQ(selected, DisplayFrameSource::ResultImage);
+    }
+
+    TEST(DisplayFrameSelector, WithFreshPreviewAndHeldHighQuality_PresentsPreviewImmediately)
+    {
+        DisplayFrameSelectionInput const input{
+          .frontBuffer = buffer(3, 7),
+          .preferLowResolutionPreview = true,
+          .currentEpoch = 3,
+          .currentViewEpoch = 7,
+          .presentedFrame = PresentedFrame{.quality = FramePresentationQuality::FullQuality,
+                                           .source = FramePresentationSource::ProgressiveHighQuality,
+                                           .completedFrame = true}};
+
+        EXPECT_EQ(selectDisplayFrameSource(input), DisplayFrameSource::ResultImage);
+    }
+
+    TEST(DisplayFrameSelector, WithFreshPreviewDuringRefinement_DisplaysSeededProgressiveOverPreview)
+    {
+        DisplayFrameSelectionInput input{.frontBuffer = buffer(2, 6),
+                                         .progressiveBuffer = buffer(3, 7),
+                                         .progressiveBufferSeeded = true,
+                                         .preferLowResolutionPreview = true,
+                                         .currentEpoch = 3,
+                                         .currentViewEpoch = 7,
+                                         .isRendering = true,
+                                         .presentedFrame = PresentedFrame{
+                                           .quality = FramePresentationQuality::FullQuality,
+                                           .source = FramePresentationSource::ProgressiveHighQuality,
+                                           .completedFrame = true}};
+
+        EXPECT_EQ(selectDisplayFrameSource(input), DisplayFrameSource::ProgressiveBuffer);
+
+        input.progressiveBufferSeeded = false;
+        EXPECT_EQ(selectDisplayFrameSource(input), DisplayFrameSource::ResultImage);
+
+        input.progressiveBufferSeeded = true;
+        input.fullFrameRenderJobInFlight = true;
+        EXPECT_EQ(selectDisplayFrameSource(input), DisplayFrameSource::ResultImage);
     }
 
     TEST(DisplayFrameSelector, WithPresentedFullFrameAndCurrentProgressive_HoldsFrontBuffer)

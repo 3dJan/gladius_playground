@@ -191,6 +191,13 @@ namespace gladius::ui::async_rendering
                    matches(*m_highQualityFrameStamp, m_latestStamp, RenderStampMask::displayFrame());
         }
 
+        [[nodiscard]] bool isPreviewRequired() const noexcept
+        {
+            return !isHighQualityFrameCurrent() &&
+                   (!m_previewFrameStamp.has_value() ||
+                    !matches(*m_previewFrameStamp, m_latestStamp, RenderStampMask::displayFrame()));
+        }
+
         [[nodiscard]] RenderUpdateDecision configureViewport(uint32_t width, uint32_t height)
         {
             RenderUpdateDecision decision{};
@@ -203,6 +210,7 @@ namespace gladius::ui::async_rendering
             m_height = height;
             ++m_latestStamp.viewportEpoch;
             m_realtime.resetForResolution(m_width, m_height);
+            releaseStaleInteractiveInFlight();
             scheduleStaticCatchUp(decision);
             return decision;
         }
@@ -426,6 +434,12 @@ namespace gladius::ui::async_rendering
                 if (result.producedDisplayFrame)
                 {
                     if (current && result.completedFrame &&
+                        (result.type == RenderTaskType::LowResolutionPreview ||
+                         result.type == RenderTaskType::StreamingPreview))
+                    {
+                        m_previewFrameStamp = result.stamp;
+                    }
+                    if (current && result.completedFrame &&
                         (result.type == RenderTaskType::ProgressiveHighQualityChunk ||
                          result.type == RenderTaskType::RealtimeFullFrame ||
                          result.type == RenderTaskType::StaticFullFrameProbe))
@@ -486,9 +500,9 @@ namespace gladius::ui::async_rendering
 
         [[nodiscard]] bool hasInteractiveFrameInFlight() const noexcept
         {
-            return hasEquivalentInFlight(RenderTaskType::RealtimeFullFrame, m_latestStamp) ||
-                   hasEquivalentInFlight(RenderTaskType::LowResolutionPreview, m_latestStamp) ||
-                   hasEquivalentInFlight(RenderTaskType::StreamingPreview, m_latestStamp);
+            return hasAnyInFlight(RenderTaskType::RealtimeFullFrame) ||
+                   hasAnyInFlight(RenderTaskType::LowResolutionPreview) ||
+                   hasAnyInFlight(RenderTaskType::StreamingPreview);
         }
 
         void releaseStaleInteractiveInFlight()
@@ -686,10 +700,11 @@ namespace gladius::ui::async_rendering
                 exactRealtimeAllowed = m_realtime.guardsAllowAttempt(m_realtimeGuards);
             }
 
-            auto const path = chooseInteractiveRenderPath(
+            bool const frameInFlight = hasInteractiveFrameInFlight();
+            auto path = chooseInteractiveRenderPath(
               InteractiveRenderPathInput{.mode = mode,
                                          .interactionState = m_interactionState,
-                                         .interactiveFrameAlreadyInFlight = hasInteractiveFrameInFlight(),
+                                         .interactiveFrameAlreadyInFlight = frameInFlight,
                                          .autoParameterExactRealtimeActive = m_realtime.isRealtimeActive(),
                                          .autoInteractiveExactRealtimeAdmitted = autoModeAdmitsRealtime(),
                                          .preferSimplerPreview = m_autoGestureLockedSimpler,
@@ -700,6 +715,11 @@ namespace gladius::ui::async_rendering
                 path == InteractiveRenderPath::LowResolutionPreview)
             {
                 m_autoGestureLockedSimpler = true;
+            }
+
+            if (isPreviewRequired() && !frameInFlight && !m_realtimeGuards.resizePending)
+            {
+                path = InteractiveRenderPath::LowResolutionPreview;
             }
 
             switch (path)
@@ -727,6 +747,11 @@ namespace gladius::ui::async_rendering
             if (!areParametersUploaded())
             {
                 startTask(decision, RenderTaskType::ParameterUpload, m_latestStamp);
+                return;
+            }
+            if (isPreviewRequired())
+            {
+                startTask(decision, RenderTaskType::LowResolutionPreview, m_latestStamp);
                 return;
             }
             if (!isBoundingBoxCurrent())
@@ -781,6 +806,7 @@ namespace gladius::ui::async_rendering
         std::optional<RenderStamp> m_parameterUploadStamp{m_latestStamp};
         std::optional<RenderStamp> m_boundingBoxStamp{};
         std::optional<RenderStamp> m_sdfStamp{};
+        std::optional<RenderStamp> m_previewFrameStamp{};
         std::optional<RenderStamp> m_highQualityFrameStamp{};
         std::vector<InFlightTask> m_inFlight;
         RealtimeRaymarchController m_realtime;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <glad/glad.h>
+#include <iostream>
 #include <limits>
 
 namespace gladius::ui::async_rendering
@@ -26,28 +27,18 @@ namespace gladius::ui::async_rendering
             return false;
         }
 
-        if (m_textureId == 0u)
-        {
-            glGenTextures(1, &m_textureId);
-        }
-
-        glBindTexture(GL_TEXTURE_2D, m_textureId);
         bool const dimensionsChanged = m_width != frame.width || m_height != frame.height;
-        if (dimensionsChanged)
-        {
-            allocateTexture(frame.width, frame.height);
-        }
-
-        GLint previousUnpackAlignment{};
-        glGetIntegerv(GL_UNPACK_ALIGNMENT, &previousUnpackAlignment);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         bool const startsProgressiveFrame = frame.firstRow == 0u && frame.endRow < frame.height;
+        if (frame.firstRow > 0u &&
+            (dimensionsChanged || !m_freshness.has_value() || *m_freshness != frame.freshness))
+        {
+            std::cerr << "[OpenGLFramePresenter] Cannot continue an uninitialized progressive frame\n";
+            return false;
+        }
         if (startsProgressiveFrame)
         {
             if (frame.width > std::numeric_limits<std::size_t>::max() / frame.height)
             {
-                glPixelStorei(GL_UNPACK_ALIGNMENT, previousUnpackAlignment);
-                glBindTexture(GL_TEXTURE_2D, 0);
                 return false;
             }
             auto const pixelCount = static_cast<std::size_t>(frame.width) * frame.height;
@@ -64,8 +55,27 @@ namespace gladius::ui::async_rendering
                                                               frame.width);
             if (!seeded)
             {
-                std::fill(m_stagingPixels.begin(), m_stagingPixels.end(), 0u);
+                std::cerr << "[OpenGLFramePresenter] Progressive frame requires a current low-resolution preview\n";
+                return false;
             }
+        }
+
+        if (m_textureId == 0u)
+        {
+            glGenTextures(1, &m_textureId);
+        }
+
+        glBindTexture(GL_TEXTURE_2D, m_textureId);
+        if (dimensionsChanged)
+        {
+            allocateTexture(frame.width, frame.height);
+        }
+
+        GLint previousUnpackAlignment{};
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &previousUnpackAlignment);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        if (startsProgressiveFrame)
+        {
             glTexSubImage2D(GL_TEXTURE_2D,
                             0,
                             0,

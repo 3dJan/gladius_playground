@@ -121,6 +121,7 @@ namespace gladius::ui::async_rendering::tests
             EXPECT_EQ(workflow.interactionState(), RenderInteractionState::Static);
             EXPECT_TRUE(matches(workflow.latestStamp(), latestStamp, RenderStampMask::displayFrame()));
             bool reachedHighQuality = false;
+            bool presentedPreview = false;
             for (int step = 0; step < 8; ++step)
             {
                 auto const task = std::find_if(
@@ -130,19 +131,28 @@ namespace gladius::ui::async_rendering::tests
                 ASSERT_NE(task, decision.commands.end());
                 auto const request = task->task;
                 EXPECT_NE(request.type, RenderTaskType::ParameterUpload);
-                EXPECT_NE(request.type, RenderTaskType::LowResolutionPreview);
                 EXPECT_NE(request.type, RenderTaskType::StreamingPreview);
                 EXPECT_TRUE(matches(request.stamp, latestStamp, RenderStampMask::displayFrame()));
                 bool const isHighQuality =
                   request.type == RenderTaskType::StaticFullFrameProbe ||
                   request.type == RenderTaskType::ProgressiveHighQualityChunk;
+                bool const isPreview = request.type == RenderTaskType::LowResolutionPreview;
+                if (isPreview)
+                {
+                    EXPECT_FALSE(reachedHighQuality);
+                    presentedPreview = true;
+                }
+                if (isHighQuality)
+                {
+                    EXPECT_TRUE(presentedPreview);
+                }
                 decision = workflow.completeTask(RenderTaskResult{
                   .requestId = request.requestId,
                   .type = request.type,
                   .stamp = request.stamp,
                   .status = RenderTaskStatus::Completed,
-                  .producedDisplayFrame = isHighQuality,
-                  .completedFrame = isHighQuality});
+                  .producedDisplayFrame = isHighQuality || isPreview,
+                  .completedFrame = isHighQuality || isPreview});
                 if (isHighQuality)
                 {
                     reachedHighQuality = true;

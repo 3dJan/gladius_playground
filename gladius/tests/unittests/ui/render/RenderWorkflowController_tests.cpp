@@ -99,7 +99,7 @@ namespace gladius::ui::async_rendering::tests
     }
 
     TEST(RenderWorkflowController,
-         ForceParameterDrag_WithExactAvailable_PresentsRealtimeAndNeverPreview)
+         ForceParameterDrag_WithExactAvailable_PresentsPreviewBeforeRealtime)
     {
         RenderWorkflowController workflow;
         workflow.configureRealtime(modeConfig(RealtimeRaymarchMode::Force));
@@ -109,10 +109,25 @@ namespace gladius::ui::async_rendering::tests
         auto decision = workflow.notifyParameterChanged(true);
 
         EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ParameterUpload));
+        auto preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(preview.has_value());
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::StreamingPreview));
+
+        decision = workflow.completeTask(completed(*preview, true, true));
+
+        ASSERT_EQ(decision.acceptedFrames.size(), 1u);
+        ASSERT_TRUE(workflow.presentedFrame().has_value());
+        EXPECT_EQ(workflow.presentedFrame()->source, FramePresentationSource::LowResolutionPreview);
+        EXPECT_EQ(workflow.presentedFrame()->quality, FramePresentationQuality::Preview);
+
+        decision = workflow.tick();
+
         auto realtime = findStartedTask(decision, RenderTaskType::RealtimeFullFrame);
         ASSERT_TRUE(realtime.has_value());
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::StreamingPreview));
+        EXPECT_EQ(workflow.presentedFrame()->source, FramePresentationSource::LowResolutionPreview);
 
         decision = workflow.completeTask(completed(*realtime, true, true));
 
@@ -126,7 +141,7 @@ namespace gladius::ui::async_rendering::tests
     }
 
     TEST(RenderWorkflowController,
-         ForceParameterDrag_WithRealtimeBlocked_HoldsCurrentFrameWithoutPreview)
+         ForceParameterDrag_WithRealtimeBlocked_PresentsFreshPreview)
     {
         RenderWorkflowController workflow;
         workflow.configureRealtime(modeConfig(RealtimeRaymarchMode::Force));
@@ -138,16 +153,29 @@ namespace gladius::ui::async_rendering::tests
         guards.hardBlocker = true;
         workflow.setRealtimeGuards(guards);
 
-        auto const decision = workflow.notifyParameterChanged(true);
+        auto decision = workflow.notifyParameterChanged(true);
 
         EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::ParameterUpload));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
-        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+        auto preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(preview.has_value());
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::StreamingPreview));
-        EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
         ASSERT_TRUE(workflow.presentedFrame().has_value());
         EXPECT_EQ(workflow.presentedFrame()->frameId, initialFrame.frameId);
         EXPECT_EQ(workflow.presentedFrame()->quality, FramePresentationQuality::FullQuality);
+
+        decision = workflow.completeTask(completed(*preview, true, true));
+
+        ASSERT_EQ(decision.acceptedFrames.size(), 1u);
+        EXPECT_EQ(workflow.presentedFrame()->source, FramePresentationSource::LowResolutionPreview);
+        EXPECT_EQ(workflow.presentedFrame()->quality, FramePresentationQuality::Preview);
+
+        decision = workflow.tick();
+
+        EXPECT_TRUE(hasCommand(decision, RenderCommandType::KeepCurrentFrame));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::RealtimeFullFrame));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::LowResolutionPreview));
+        EXPECT_EQ(workflow.presentedFrame()->source, FramePresentationSource::LowResolutionPreview);
     }
 
         TEST(RenderWorkflowController,
@@ -231,6 +259,29 @@ namespace gladius::ui::async_rendering::tests
                             RenderStampMask::displayFrame()));
     }
 
+    TEST(RenderWorkflowController, RenderSettingsChanged_WithOldHighQuality_PresentsNewPreviewBeforeRefinement)
+    {
+        RenderWorkflowController workflow;
+        workflow.configureRealtime(modeConfig(RealtimeRaymarchMode::Off));
+        (void) workflow.configureViewport(640u, 480u);
+        auto const oldFrame = heldFullQualityFrame(workflow.latestStamp());
+        workflow.seedPresentedFrame(oldFrame);
+
+        auto decision = workflow.notifyRenderSettingsChanged();
+        auto const preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(preview.has_value());
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::ProgressiveHighQualityChunk));
+        EXPECT_EQ(workflow.presentedFrame()->frameId, oldFrame.frameId);
+
+        decision = workflow.completeTask(completed(*preview, true, true));
+        ASSERT_EQ(decision.acceptedFrames.size(), 1u);
+        ASSERT_TRUE(workflow.presentedFrame().has_value());
+        EXPECT_EQ(workflow.presentedFrame()->source, FramePresentationSource::LowResolutionPreview);
+        EXPECT_EQ(workflow.presentedFrame()->quality, FramePresentationQuality::Preview);
+        EXPECT_EQ(workflow.presentedFrame()->stamp.qualityEpoch, workflow.latestStamp().qualityEpoch);
+        EXPECT_TRUE(hasStartedTask(decision, RenderTaskType::BoundingBoxUpdate));
+    }
+
     TEST(RenderWorkflowController,
          ParameterInteractionEnded_SequencesUploadBboxSdfThenHighQualityCatchUp)
     {
@@ -240,8 +291,12 @@ namespace gladius::ui::async_rendering::tests
         auto decision = workflow.notifyParameterChanged(true);
         auto upload = findStartedTask(decision, RenderTaskType::ParameterUpload);
         ASSERT_TRUE(upload.has_value());
+        auto const preview = findStartedTask(decision, RenderTaskType::LowResolutionPreview);
+        ASSERT_TRUE(preview.has_value());
 
         decision = workflow.completeTask(completed(*upload));
+        EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::BoundingBoxUpdate));
+        decision = workflow.completeTask(completed(*preview, true, true));
         EXPECT_FALSE(hasStartedTask(decision, RenderTaskType::BoundingBoxUpdate));
 
         decision = workflow.notifyParameterInteractionEnded();

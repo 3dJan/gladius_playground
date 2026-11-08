@@ -33,6 +33,7 @@
 #include "render/DisplayFrameSelector.h"
 #include "render/OpenGLFramePresenter.h"
 #include "render/ProgressiveBufferPolicy.h"
+#include "render/ProgressivePreviewSeed.h"
 #include "render/RenderModeUpdatePolicy.h"
 #include "render/PreviewBackendPolicy.h"
 #include "render/PreviewResultAcceptancePolicy.h"
@@ -631,6 +632,11 @@ namespace gladius::ui
                       m_neutralRenderScheduler.workflow().latestStamp(),
                       accepted.candidate.presentationMask);
                 }
+                else
+                {
+                    queueRenderDecision(m_neutralRenderScheduler.workflow().notifyRenderSettingsChanged());
+                    m_neutralRenderScheduler.requestCancellationForStale();
+                }
             }
         }
                 queueRenderDecision(async_rendering::RenderWorkflowDecision{
@@ -907,6 +913,7 @@ namespace gladius::ui
                                                      async_rendering::FrameState::Writing,
                                                      async_rendering::FrameState::Idle);
             m_asyncProgressiveBuffer = nullptr;
+            m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
             m_asyncProgressiveEpoch.store(0, std::memory_order_release);
             m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
         }
@@ -1067,14 +1074,16 @@ namespace gladius::ui
 
         case async_rendering::RenderTaskType::RealtimeFullFrame:
         {
-                        auto const executionPath = async_rendering::chooseRealtimeFrameExecutionPath(
-                            async_rendering::RealtimeInteractionActivityInput{
-                                .mode = m_renderUpdateCoordinator.realtimeConfig().mode,
-                                .interactionState = m_renderUpdateCoordinator.interactionState(),
-                                .autoRealtimeActive = m_renderUpdateCoordinator.isRealtimeActive(),
-                                .autoPreviewFallbackActive = m_renderUpdateCoordinator.isAutoPreviewFallbackActive(),
-                                .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire)});
-                        if (executionPath == async_rendering::RealtimeFrameExecutionPath::SynchronousUiThread)
+            auto const executionPath = async_rendering::chooseRealtimeFrameExecutionPath(
+              async_rendering::RealtimeInteractionActivityInput{
+                .mode = m_renderUpdateCoordinator.realtimeConfig().mode,
+                .interactionState = m_renderUpdateCoordinator.interactionState(),
+                .autoRealtimeActive = m_renderUpdateCoordinator.isRealtimeActive(),
+                .autoPreviewFallbackActive = m_renderUpdateCoordinator.isAutoPreviewFallbackActive(),
+                .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire),
+                .previewRequired = m_renderUpdateCoordinator.isPreviewRequired(),
+                .preservePreview = !m_renderUpdateCoordinator.isHighQualityFrameCurrent()});
+            if (executionPath == async_rendering::RealtimeFrameExecutionPath::SynchronousUiThread)
             {
                 bool const rendered = tryRenderRealtimeFrameSync(task);
                                 queueRenderDecision(m_renderUpdateCoordinator.completeTask(
@@ -1160,13 +1169,14 @@ namespace gladius::ui
 
     bool RenderWindow::isRealtimeRaymarchInteractionActive() const noexcept
     {
-                return async_rendering::isExactRealtimeInteractionActive(
-                    async_rendering::RealtimeInteractionActivityInput{
-                        .mode = m_renderUpdateCoordinator.realtimeConfig().mode,
-                        .interactionState = m_renderUpdateCoordinator.interactionState(),
-                        .autoRealtimeActive = m_renderUpdateCoordinator.isRealtimeActive(),
-                        .autoPreviewFallbackActive = m_renderUpdateCoordinator.isAutoPreviewFallbackActive(),
-                        .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire)});
+        return async_rendering::isExactRealtimeInteractionActive(
+          async_rendering::RealtimeInteractionActivityInput{
+            .mode = m_renderUpdateCoordinator.realtimeConfig().mode,
+            .interactionState = m_renderUpdateCoordinator.interactionState(),
+            .autoRealtimeActive = m_renderUpdateCoordinator.isRealtimeActive(),
+            .autoPreviewFallbackActive = m_renderUpdateCoordinator.isAutoPreviewFallbackActive(),
+            .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire),
+            .previewRequired = m_renderUpdateCoordinator.isPreviewRequired()});
     }
 
     bool RenderWindow::isForceRealtimeMode() const noexcept
@@ -1211,7 +1221,8 @@ namespace gladius::ui
           async_rendering::RenderTaskResult{.requestId = request.requestId,
                                             .type = request.type,
                                             .stamp = request.stamp,
-                                            .status = status}));
+                                            .status = status},
+          status == async_rendering::RenderTaskStatus::Completed));
     }
 
     void RenderWindow::completeCoordinatorTask(async_rendering::FrameResultMeta const & result,
@@ -1406,6 +1417,15 @@ namespace gladius::ui
                             async_rendering::DisplayFrameSelectionInput{
                                 .frontBuffer = frontState,
                                 .progressiveBuffer = progressiveState,
+                                .progressiveBufferSeeded =
+                                  m_asyncProgressiveBufferSeeded.load(std::memory_order_acquire),
+                                .preferLowResolutionPreview =
+                                  m_hasLowResPreview &&
+                                  m_lastLowResPreviewEpoch.load(std::memory_order_acquire) == currentEpoch &&
+                                  m_lastLowResPreviewViewEpoch.load(std::memory_order_acquire) == currentViewEpoch &&
+                                  async_rendering::matches(m_lastLowResPreviewStamp,
+                                                           m_renderUpdateCoordinator.latestStamp()) &&
+                                  !m_renderUpdateCoordinator.isHighQualityFrameCurrent(),
                                 .currentEpoch = currentEpoch,
                                 .currentViewEpoch = currentViewEpoch,
                                 .exactRealtimeInteraction = exactRealtimeInteraction,
@@ -1413,7 +1433,9 @@ namespace gladius::ui
                                 .isRendering = m_renderWindowState.isRendering,
                                 .isMoving = m_renderWindowState.isMoving,
                                 .fullFrameRenderJobInFlight = fullFrameRenderJobInFlight,
-                                .suppressHqDisplay = m_suppressHQDisplay.load(std::memory_order_acquire),
+                                .suppressHqDisplay =
+                                  m_suppressHQDisplay.load(std::memory_order_acquire) ||
+                                  m_asyncProgressiveSeedUnavailable.load(std::memory_order_acquire),
                                 .resultImageAvailable = resultImage != nullptr,
                                 .presentedFrame = m_renderUpdateCoordinator.presentedFrame()});
 
@@ -2025,7 +2047,8 @@ namespace gladius::ui
         m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
         m_suppressHQDisplay.store(false, std::memory_order_release);
-        
+        queueRenderDecision(m_renderUpdateCoordinator.notifyRenderSettingsChanged());
+
         // Skip epoch increment if preserving content during resize
         // This keeps the old frame visible while scheduling new preview
         if (!m_preserveContentDuringResize)
@@ -2190,8 +2213,10 @@ namespace gladius::ui
             {
                 m_lowResFeedbackPending.store(false, std::memory_order_release);
                 // Track that low-res preview is now up-to-date with the current epoch
-                m_lastLowResPreviewEpoch.store(m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                                               std::memory_order_release);
+                recordLowResPreview(m_renderUpdateCoordinator.latestStamp(),
+                                    m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                                    m_asyncViewEpoch.load(std::memory_order_acquire),
+                                    m_core->getParameterGeneration());
                 m_lastLowResRenderTime = std::chrono::system_clock::now();
             }
             return;
@@ -2626,29 +2651,10 @@ namespace gladius::ui
         updateNeutralParameterInteraction();
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
-        // During an active resize the GPU image buffers may be reallocated at
-        // any moment.  Consuming async preview results that reference the old
-        // (now-freed) CL images would crash in resample().  Skip all render
-        // work while a deferred resize is pending — the stretched old
-        // framebuffer is displayed in the meantime.
-        if (m_deferredResizePending)
+        if (m_deferredResizePending && !m_neutralBackendActive)
         {
-            // Discard any pending async preview so the streaming worker doesn't
-            // stall waiting for m_streamingFrameConsumed.
-            if (m_asyncController)
-            {
-                if (auto preview = m_asyncController->tryConsumePreviewResult())
-                {
-                    // The result references old-size CL images and cannot be presented, but the
-                    // coordinator still has this preview marked in-flight. Release it (cancelled)
-                    // so its interactive task slot does not leak — otherwise preview scheduling
-                    // stays blocked until the next camera move reclaims it.
-                    preview->cancelled = true;
-                    completeCoordinatorPreviewTask(*preview);
-                    m_streamingFrameConsumed.store(true, std::memory_order_release);
-                }
-            }
-            return;
+            /// Let the current preview finish before resizing its shared OpenCL images.
+            m_streamingPreviewActive.store(false, std::memory_order_release);
         }
 
         // Always consume async preview results, even during compilation.
@@ -3112,7 +3118,8 @@ namespace gladius::ui
                         .stateIsMoving = state.isMoving,
                         .forceLowResRender = forceLowResRender,
                         .lowResFeedbackPending = lowResPending,
-                        .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire)});
+                        .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire),
+                        .previewRequired = m_renderUpdateCoordinator.isPreviewRequired()});
 
                 if (shouldUseLowResPreview)
         {
@@ -3169,9 +3176,10 @@ namespace gladius::ui
                     {
                         m_lowResFeedbackPending.store(false, std::memory_order_release);
                         m_lastLowResRenderTime = std::chrono::system_clock::now();
-                        m_lastLowResPreviewEpoch.store(
-                          m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                          std::memory_order_release);
+                        recordLowResPreview(m_renderUpdateCoordinator.latestStamp(),
+                                            m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                                            m_asyncViewEpoch.load(std::memory_order_acquire),
+                                            m_core->getParameterGeneration());
                     }
                 }
             }
@@ -3186,9 +3194,10 @@ namespace gladius::ui
                     {
                         m_lowResFeedbackPending.store(false, std::memory_order_release);
                         m_lastLowResRenderTime = std::chrono::system_clock::now();
-                        m_lastLowResPreviewEpoch.store(
-                          m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                          std::memory_order_release);
+                        recordLowResPreview(m_renderUpdateCoordinator.latestStamp(),
+                                            m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                                            m_asyncViewEpoch.load(std::memory_order_acquire),
+                                            m_core->getParameterGeneration());
                     }
                 }
                 else
@@ -3422,6 +3431,7 @@ namespace gladius::ui
                                                              async_rendering::FrameState::Writing,
                                                              async_rendering::FrameState::Idle);
                     m_asyncProgressiveBuffer = nullptr;
+                    m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
                     m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                     m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
                 }
@@ -3518,12 +3528,10 @@ namespace gladius::ui
                     // DON'T force state.isMoving = false - let camera update control this
                     // If camera is still animating, it will set isMoving=true on next frame
                     state.currentLine = 0; // Reset for next frame
-                    // A complete HQ frame for the current view+size is now ready. If partial HQ
-                    // display was suppressed because this frame was seeded from a stale-view
-                    // preview (see scheduleAsyncRenderJob), re-enable HQ display so the finished,
-                    // view-consistent frame swaps in cleanly instead of staying on the low-res
-                    // preview.
+                    // A complete HQ frame for the current view+size is now ready, so remove any
+                    // seed-related display suppression and allow the finished frame to swap in.
                     m_suppressHQDisplay.store(false, std::memory_order_release);
+                    m_asyncProgressiveSeedUnavailable.store(false, std::memory_order_release);
                     if (isExactRealtimeJob)
                     {
                         m_lowResFeedbackPending.store(false, std::memory_order_release);
@@ -3549,6 +3557,7 @@ namespace gladius::ui
                                                              async_rendering::FrameState::Writing,
                                                              async_rendering::FrameState::Idle);
                     m_asyncProgressiveBuffer = nullptr;
+                    m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
                     m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                     m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
                     state.isRendering = false;
@@ -3566,6 +3575,7 @@ namespace gladius::ui
                                                              async_rendering::FrameState::Writing,
                                                              async_rendering::FrameState::Idle);
                     m_asyncProgressiveBuffer = nullptr;
+                    m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
                     m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                     m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
                 }
@@ -3637,7 +3647,10 @@ namespace gladius::ui
         ZoneScoped;
         ZoneName("scheduleAsyncRenderJob", strlen("scheduleAsyncRenderJob"));
 
-        if (!m_asyncController || !m_asyncController->isRunning() || !m_core)
+        if (!m_asyncController || !m_asyncController->isRunning() || !m_core ||
+            m_asyncJobInFlight.load(std::memory_order_acquire) ||
+            m_asyncPreviewJobInFlight.load(std::memory_order_acquire) ||
+            m_streamingJobInFlight.load(std::memory_order_acquire))
         {
             return false;
         }
@@ -3707,8 +3720,8 @@ namespace gladius::ui
           .width = job.width,
           .height = job.height};
         bool const hasSeededProgressiveContinuation =
-          async_rendering::isProgressiveBufferContinuable(progressiveBufferState,
-                                                          progressiveJobTarget);
+          m_asyncProgressiveBufferSeeded.load(std::memory_order_acquire) &&
+          async_rendering::isProgressiveBufferContinuable(progressiveBufferState, progressiveJobTarget);
         if (state.currentLine > 0 && !hasSeededProgressiveContinuation)
         {
             state.currentLine = 0;
@@ -3733,27 +3746,37 @@ namespace gladius::ui
 
         if (job.startLine == 0 && !hasSeededProgressiveContinuation)
         {
-            // The progressive HQ buffer is seeded by resampling the result image (the low-res
-            // preview) so lines not yet rendered at high quality still show content. If the
-            // result image still holds a *previous* view — which happens during rapid window
-            // resizing, where the view epoch advances faster than the low-res preview can
-            // refresh — the stale-view seed (unrendered region) would mix with the freshly
-            // rendered current-view top band, producing torn frames that show different states
-            // of the view. Detect that here and suppress partial HQ display for this job so the
-            // clean low-res result image is shown until the full HQ frame completes and swaps in.
-            bool const seedViewIsStale =
-              m_lastLowResPreviewViewEpoch.load(std::memory_order_acquire) != job.viewEpoch;
-            if (seedViewIsStale)
+            async_rendering::ProgressivePreviewSeedState const previewSeed{
+              .hasPreview = m_hasLowResPreview,
+              .epoch = m_lastLowResPreviewEpoch.load(std::memory_order_acquire),
+              .viewEpoch = m_lastLowResPreviewViewEpoch.load(std::memory_order_acquire),
+              .paramGeneration = m_lastLowResPreviewParamGeneration,
+              .width = m_lastLowResPreviewWidth,
+              .height = m_lastLowResPreviewHeight,
+              .stamp = m_lastLowResPreviewStamp};
+            async_rendering::ProgressivePreviewSeedTarget const previewSeedTarget{
+              .epoch = job.epoch,
+              .viewEpoch = job.viewEpoch,
+              .paramGeneration = job.paramGeneration,
+              .width = job.width,
+              .height = job.height,
+              .stamp = job.coordinatorStamp};
+            bool const previewSeedIsCompatible =
+              async_rendering::isCompatibleProgressivePreviewSeed(previewSeed,
+                                                                  previewSeedTarget);
+            if (!previewSeedIsCompatible)
             {
-                m_suppressHQDisplay.store(true, std::memory_order_release);
+                m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+                m_lowResFeedbackPending.store(true, std::memory_order_release);
+                return false;
             }
-
             auto * seedBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
             auto renderProgram = m_core->tryGetBestRenderProgram().value_or(SharedRenderProgram{});
             bool const seedSourceFits = image->getWidth() >= width && image->getHeight() >= height;
             bool const seedTargetFits = seedBuffer && seedBuffer->image &&
                                         seedBuffer->image->getWidth() >= width &&
                                         seedBuffer->image->getHeight() >= height;
+            m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
             if (seedBuffer && seedBuffer->image && renderProgram &&
                 seedSourceFits && seedTargetFits)
             {
@@ -3764,13 +3787,21 @@ namespace gladius::ui
                 m_asyncProgressiveViewEpoch.store(job.viewEpoch, std::memory_order_release);
                 m_asyncProgressiveParamGeneration.store(job.paramGeneration,
                                                         std::memory_order_release);
+                m_asyncProgressiveBufferSeeded.store(true, std::memory_order_release);
+                m_asyncProgressiveSeedUnavailable.store(false, std::memory_order_release);
             }
-            else if (seedBuffer)
+            else
             {
-                [[maybe_unused]] bool const released =
-                  m_asyncController->tryTransitionBuffer(seedBuffer,
-                                                         async_rendering::FrameState::Writing,
-                                                         async_rendering::FrameState::Idle);
+                if (seedBuffer)
+                {
+                    [[maybe_unused]] bool const released =
+                      m_asyncController->tryTransitionBuffer(seedBuffer,
+                                                             async_rendering::FrameState::Writing,
+                                                             async_rendering::FrameState::Idle);
+                }
+
+                m_asyncProgressiveSeedUnavailable.store(true, std::memory_order_release);
+                return false;
             }
         }
 
@@ -3935,6 +3966,7 @@ namespace gladius::ui
 
         m_dirty = false;
         m_suppressHQDisplay.store(false, std::memory_order_release);
+        m_asyncProgressiveSeedUnavailable.store(false, std::memory_order_release);
         m_lowResFeedbackPending.store(false, std::memory_order_release);
         m_lastLowResPreviewEpoch.store(epoch, std::memory_order_release);
         m_view->stopAnimationMode();
@@ -3977,6 +4009,7 @@ namespace gladius::ui
                                                      async_rendering::FrameState::Writing,
                                                      async_rendering::FrameState::Idle);
             m_asyncProgressiveBuffer = nullptr;
+            m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
             m_asyncProgressiveEpoch.store(0, std::memory_order_release);
             m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
             m_asyncProgressiveParamGeneration.store(0, std::memory_order_release);
@@ -4090,6 +4123,7 @@ namespace gladius::ui
             if (writeBuffer == m_asyncProgressiveBuffer)
             {
                 m_asyncProgressiveBuffer = nullptr;
+                m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
                 m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                 m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
                 m_asyncProgressiveParamGeneration.store(0, std::memory_order_release);
@@ -4123,7 +4157,8 @@ namespace gladius::ui
                 }
             }
         }
-        else if (!async_rendering::isProgressiveBufferContinuable(
+        else if (!m_asyncProgressiveBufferSeeded.load(std::memory_order_acquire) ||
+                 !async_rendering::isProgressiveBufferContinuable(
                    async_rendering::ProgressiveBufferState{
                      .hasImage = m_asyncProgressiveBuffer != nullptr &&
                                  m_asyncProgressiveBuffer->image != nullptr,
@@ -4144,29 +4179,8 @@ namespace gladius::ui
                                                          .width = job.width,
                                                          .height = job.height}))
         {
-            writeBuffer = m_asyncController->acquireWriteBuffer(job.epoch);
-            if (!writeBuffer)
-            {
-                result.cancelled = true;
-                co_return result;
-            }
-
-            if (writeBuffer->image)
-            {
-                if (writeBuffer->image->getWidth() < job.width ||
-                    writeBuffer->image->getHeight() < job.height)
-                {
-                    releaseProgressiveBuffer();
-                    result.cancelled = true;
-                    co_return result;
-                }
-            }
-
-            m_asyncProgressiveBuffer = writeBuffer;
-            m_asyncProgressiveEpoch.store(job.epoch, std::memory_order_release);
-            m_asyncProgressiveViewEpoch.store(job.viewEpoch, std::memory_order_release);
-            m_asyncProgressiveParamGeneration.store(job.paramGeneration,
-                                                    std::memory_order_release);
+            result.cancelled = true;
+            co_return result;
         }
         else
         {
@@ -4276,6 +4290,7 @@ namespace gladius::ui
             if (!usesFullModelApproximation)
             {
                 m_asyncProgressiveBuffer = nullptr;
+                m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
                 m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                         m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
             }
@@ -4847,6 +4862,12 @@ namespace gladius::ui
             return false;
         }
 
+        if (coordinatorTask != nullptr &&
+            !async_rendering::matches(coordinatorTask->stamp, m_renderUpdateCoordinator.latestStamp()))
+        {
+            return false;
+        }
+
         // Don't schedule if a preview job is already in flight
         if (m_asyncPreviewJobInFlight.load(std::memory_order_acquire))
         {
@@ -4944,6 +4965,7 @@ namespace gladius::ui
         };
 
         auto const startTime = std::chrono::steady_clock::now();
+        uint64_t previewParamGeneration = 0u;
 
         // Perform the async preview render using the low-res preview infrastructure.
         // When the precomputed SDF is unavailable (e.g. parameter edits invalidated it),
@@ -4959,6 +4981,7 @@ namespace gladius::ui
             {
                 (void) m_core->tryToupdateParameter(*assembly);
             }
+            previewParamGeneration = m_core->getParameterGeneration();
 
             // Use the non-blocking async preview render
             // This renders at low resolution and returns a cl::Event for completion tracking
@@ -5024,6 +5047,7 @@ namespace gladius::ui
         previewMeta.frameId = job.frameHint;
         previewMeta.epoch = job.epoch;
         previewMeta.viewEpoch = job.viewEpoch;
+        previewMeta.paramGeneration = previewParamGeneration;
         previewMeta.latencyNs = result.computeDurationNs;
         previewMeta.cancelled = false;
         previewMeta.sdfWasValid = m_core->isSdfValid();
@@ -5040,6 +5064,27 @@ namespace gladius::ui
         m_asyncController->setLatestPreviewResult(previewMeta);
 
         co_return result;
+    }
+
+    void RenderWindow::recordLowResPreview(async_rendering::RenderStamp const & stamp,
+                                           uint64_t const epoch,
+                                           uint64_t const viewEpoch,
+                                           uint64_t const paramGeneration)
+    {
+        auto const image = m_core ? m_core->getResultImage() : SharedGLImageBuffer{};
+        if (!image || image->getWidth() <= 0 || image->getHeight() <= 0)
+        {
+            m_hasLowResPreview = false;
+            return;
+        }
+
+        m_lastLowResPreviewStamp = stamp;
+        m_lastLowResPreviewParamGeneration = paramGeneration;
+        m_lastLowResPreviewWidth = static_cast<uint32_t>(image->getWidth());
+        m_lastLowResPreviewHeight = static_cast<uint32_t>(image->getHeight());
+        m_hasLowResPreview = true;
+        m_lastLowResPreviewEpoch.store(epoch, std::memory_order_release);
+        m_lastLowResPreviewViewEpoch.store(viewEpoch, std::memory_order_release);
     }
 
     void RenderWindow::processAsyncPreviewResults()
@@ -5123,7 +5168,22 @@ namespace gladius::ui
         auto resultImage = m_core->getResultImage();
         auto renderProgram = m_core->tryGetBestRenderProgram().value_or(SharedRenderProgram{});
         bool scheduleAdaptivePreview = false;
-        
+
+        if (!lowResImage || !resultImage || !renderProgram)
+        {
+            if (auto logger = m_core->getSharedLogger())
+            {
+                logger->logInfo("[Preview] Presentation failed: render resources are unavailable");
+            }
+            m_streamingFrameConsumed.store(true, std::memory_order_release);
+            m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
+            m_lowResFeedbackPending.store(true, std::memory_order_release);
+            auto rejectedMeta = meta;
+            rejectedMeta.cancelled = true;
+            completeCoordinatorPreviewTask(rejectedMeta);
+            return;
+        }
+
         if (auto logger = m_core->getSharedLogger()) {
             logger->logInfo(std::string("[Preview] Result Consumed, Latency ") + std::to_string(meta.latencyNs / 1000000) + "ms. Resampling!");
         }
@@ -5142,6 +5202,8 @@ namespace gladius::ui
             // Sync the CL buffer to the GL texture
             resultImage->bind();
             resultImage->unbind();
+            recordLowResPreview(
+              meta.coordinatorStamp, meta.epoch, meta.viewEpoch, meta.paramGeneration);
 
             auto const previewPresentationStamp = acceptance.presentAsRequiredStamp
                                                     ? requiredPresentationStamp
@@ -5214,8 +5276,6 @@ namespace gladius::ui
         // Clear low-res feedback pending flag since we now have fresh content
         m_lowResFeedbackPending.store(false, std::memory_order_release);
         m_lastLowResRenderTime = std::chrono::system_clock::now();
-        m_lastLowResPreviewEpoch.store(meta.epoch, std::memory_order_release);
-        m_lastLowResPreviewViewEpoch.store(meta.viewEpoch, std::memory_order_release);
         auto presentedMeta = meta;
         if (acceptance.presentAsRequiredStamp)
         {
@@ -5555,6 +5615,7 @@ namespace gladius::ui
             {
                 (void) m_core->tryToupdateParameter(*assembly);
             }
+            auto const previewParamGeneration = m_core->getParameterGeneration();
 
                         auto const launch =
                             launchAsyncPreviewRender(*m_core, commandQueue, *lowResImage);
@@ -5601,6 +5662,7 @@ namespace gladius::ui
             previewMeta.frameId = frameCounter;
             previewMeta.epoch = job.epoch;
             previewMeta.viewEpoch = job.viewEpoch;
+            previewMeta.paramGeneration = previewParamGeneration;
             previewMeta.cancelled = false;
             previewMeta.sdfWasValid = m_core->isSdfValid();
             previewMeta.quality = async_rendering::FramePresentationQuality::Preview;

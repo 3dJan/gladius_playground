@@ -45,11 +45,12 @@ namespace gladius::ui
         // matching size. Otherwise an old-size render job can complete with the new
         // viewport stamp, making HQ/static catch-up and Auto realtime learning believe
         // the resized viewport is already current.
-        bool const shouldDeferResize = m_preserveContentDuringResize && m_deferredResizePending;
         bool const hqRenderInFlight = m_asyncJobInFlight.load(std::memory_order_acquire);
-        if (!shouldDeferResize && screenResizeRequired)
+        if (screenResizeRequired)
         {
-            if (hqRenderInFlight)
+            if (hqRenderInFlight ||
+                m_asyncPreviewJobInFlight.load(std::memory_order_acquire) ||
+                m_streamingJobInFlight.load(std::memory_order_acquire))
             {
                 m_dirty = true;
                 m_forceLowResRenderOnNextFrame.store(true, std::memory_order_release);
@@ -64,6 +65,7 @@ namespace gladius::ui
                                                          async_rendering::FrameState::Writing,
                                                          async_rendering::FrameState::Idle);
                 m_asyncProgressiveBuffer = nullptr;
+                m_asyncProgressiveBufferSeeded.store(false, std::memory_order_release);
                 m_asyncProgressiveEpoch.store(0, std::memory_order_release);
                 m_asyncProgressiveViewEpoch.store(0, std::memory_order_release);
                 state.currentLine = 0;
@@ -93,13 +95,8 @@ namespace gladius::ui
             }
         }
 
-        // Clear preserve flags once rendering may resume. The early render() guard normally
-        // handles this on the first stable-size frame; this branch is a defensive fallback.
-        if (shouldDeferResize && m_forceLowResRenderOnNextFrame.load(std::memory_order_acquire))
-        {
-            m_preserveContentDuringResize = false;
-            m_deferredResizePending = false;
-        }
+        m_preserveContentDuringResize = false;
+        m_deferredResizePending = false;
 
         if (m_asyncController && m_asyncController->isRunning())
         {
@@ -335,7 +332,8 @@ namespace gladius::ui
             .stateIsMoving = state.isMoving,
             .forceLowResRender = forceLowResRender,
             .lowResFeedbackPending = lowResPending,
-            .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire)});
+            .exactRealtimeJobInFlight = m_asyncRealtimeJobInFlight.load(std::memory_order_acquire),
+            .previewRequired = m_renderUpdateCoordinator.isPreviewRequired()});
 
         if (shouldUseLowResPreview)
         {
@@ -392,9 +390,10 @@ namespace gladius::ui
                     {
                         m_lowResFeedbackPending.store(false, std::memory_order_release);
                         m_lastLowResRenderTime = std::chrono::system_clock::now();
-                        m_lastLowResPreviewEpoch.store(
-                          m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                          std::memory_order_release);
+                        recordLowResPreview(m_renderUpdateCoordinator.latestStamp(),
+                                            m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                                            m_asyncViewEpoch.load(std::memory_order_acquire),
+                                            m_core->getParameterGeneration());
                     }
                 }
             }
@@ -409,9 +408,10 @@ namespace gladius::ui
                     {
                         m_lowResFeedbackPending.store(false, std::memory_order_release);
                         m_lastLowResRenderTime = std::chrono::system_clock::now();
-                        m_lastLowResPreviewEpoch.store(
-                          m_asyncCurrentEpoch.load(std::memory_order_acquire),
-                          std::memory_order_release);
+                        recordLowResPreview(m_renderUpdateCoordinator.latestStamp(),
+                                            m_asyncCurrentEpoch.load(std::memory_order_acquire),
+                                            m_asyncViewEpoch.load(std::memory_order_acquire),
+                                            m_core->getParameterGeneration());
                     }
                 }
                 else

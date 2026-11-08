@@ -443,6 +443,8 @@ namespace gladius::ui::async_rendering::tests
 
                 DisplayFrameSelectionInput const input{.frontBuffer = frontState,
                                                        .progressiveBuffer = progState,
+                                                       .progressiveBufferSeeded =
+                                                         m_prog.valid && !hasGarbage(m_prog),
                                                        .currentEpoch = m_sceneEpoch,
                                                        .currentViewEpoch = m_viewEpoch,
                                                        .exactRealtimeInteraction = false,

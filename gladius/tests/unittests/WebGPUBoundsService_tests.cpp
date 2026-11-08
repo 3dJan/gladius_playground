@@ -1,7 +1,9 @@
 #if defined(GLADIUS_ENABLE_WEBGPU)
 
 #include "Document.h"
+#include "EventLogger.h"
 #include "compute/AnalyticRenderSceneSnapshotFactory.h"
+#include "compute/ApplicationComputeRuntime.h"
 #include "compute/BoundingBoxContracts.h"
 #include "nodes/BuildParameter.h"
 #include "webgpu/WebGPUBoundsService.h"
@@ -339,6 +341,58 @@ namespace gladius::tests
         EXPECT_EQ(result->status, compute::BoundsResultStatus::Cancelled);
         EXPECT_EQ(result->errorCode, compute::BoundsErrorCode::Cancelled);
         EXPECT_FALSE(result->isUsable());
+    }
+
+    TEST(DocumentModelBounds, NoBackendRuntime_ReturnsNoBounds)
+    {
+        events::SharedLogger logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+        Document document{std::move(logger)};
+        document.newModel();
+
+        EXPECT_FALSE(document.computeModelBoundsBlocking().has_value());
+    }
+
+    TEST(DocumentModelBounds, WebGpuRuntimePlanter3mf_ReturnsTightBoundingBox)
+    {
+        if (std::getenv("GLADIUS_RUN_GPU_TESTS") == nullptr || !areWebGpuTestsEnabled())
+        {
+            GTEST_SKIP() << "Set GLADIUS_RUN_GPU_TESTS=1 and GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        auto const * const planterFile = std::getenv("GLADIUS_PLANTER_3MF");
+        if (planterFile == nullptr || !std::filesystem::is_regular_file(planterFile))
+        {
+            GTEST_SKIP() << "Set GLADIUS_PLANTER_3MF to run this test with planter_plate.3mf";
+        }
+
+        auto runtime = compute::ApplicationComputeRuntime::createWebGPU();
+        ASSERT_NE(runtime, nullptr);
+        if (!runtime->isAvailable() || runtime->getBoundsService() == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << runtime->getErrorMessage();
+        }
+
+        events::SharedLogger logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
+        Document document{std::move(logger)};
+        document.setBackendRuntime(runtime.get());
+        ASSERT_NO_THROW(document.load(planterFile));
+
+        auto const bounds = document.computeModelBoundsBlocking();
+        ASSERT_TRUE(bounds.has_value());
+        ASSERT_TRUE(bounds->isUsable());
+
+        auto const bbox = document.computeBoundingBox();
+        EXPECT_GT(bbox.max.x, bbox.min.x);
+        EXPECT_GT(bbox.max.y, bbox.min.y);
+        EXPECT_GT(bbox.max.z, bbox.min.z);
+        // The placeholder build volume is 0..400; a tight probe must be smaller.
+        bool const isPlaceholder = bbox.min.x == 0.0f && bbox.min.y == 0.0f &&
+                                   bbox.min.z == 0.0f && bbox.max.x == 400.0f &&
+                                   bbox.max.y == 400.0f && bbox.max.z == 400.0f;
+        EXPECT_FALSE(isPlaceholder) << "computeBoundingBox returned the placeholder build volume";
+        EXPECT_LT(bbox.max.x - bbox.min.x, 400.0f);
+        EXPECT_LT(bbox.max.y - bbox.min.y, 400.0f);
+        EXPECT_LT(bbox.max.z - bbox.min.z, 400.0f);
     }
 }
 

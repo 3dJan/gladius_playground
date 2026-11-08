@@ -14,11 +14,16 @@ namespace gladius::ui::async_rendering
         bool forceLowResRender{false};
         bool lowResFeedbackPending{false};
         bool exactRealtimeJobInFlight{false};
+        bool previewRequired{false};
     };
 
     [[nodiscard]] constexpr bool usesExactRealtimeInteraction(
       LegacyLowResPreviewInput const & input) noexcept
     {
+        if (input.previewRequired)
+        {
+            return false;
+        }
         if (input.mode == RealtimeRaymarchMode::Force)
         {
             return true;
@@ -58,6 +63,9 @@ namespace gladius::ui::async_rendering
         /// intended feedback path and must not be cancelled as "realtime active".
         bool autoPreviewFallbackActive{false};
         bool exactRealtimeJobInFlight{false};
+        bool previewRequired{false};
+        /// Keep the UI thread free to display the preview while the first HQ frame renders.
+        bool preservePreview{false};
     };
 
     [[nodiscard]] constexpr bool isExactRealtimeInteractionActive(
@@ -71,6 +79,11 @@ namespace gladius::ui::async_rendering
         if (input.exactRealtimeJobInFlight)
         {
             return true;
+        }
+
+        if (input.previewRequired)
+        {
+            return false;
         }
 
         if (input.mode == RealtimeRaymarchMode::Force)
@@ -91,7 +104,7 @@ namespace gladius::ui::async_rendering
     [[nodiscard]] constexpr RealtimeFrameExecutionPath chooseRealtimeFrameExecutionPath(
       RealtimeInteractionActivityInput const & input) noexcept
     {
-        return isExactRealtimeInteractionActive(input)
+        return !input.preservePreview && isExactRealtimeInteractionActive(input)
                  ? RealtimeFrameExecutionPath::SynchronousUiThread
                  : RealtimeFrameExecutionPath::AsyncWorker;
     }

@@ -468,17 +468,17 @@ namespace gladius::ui::async_rendering::tests
         ASSERT_EQ(renderer.submissionCount(), 1u);
 
         auto const firstCameraDecision = scheduler.workflow().notifyCameraChanged(true);
-        auto const firstCameraTask = findStartedTask(firstCameraDecision, RenderTaskType::RealtimeFullFrame);
+        auto const firstCameraTask = findStartedTask(firstCameraDecision, RenderTaskType::LowResolutionPreview);
         ASSERT_TRUE(firstCameraTask.has_value());
         scheduler.requestCancellationForStale();
 
         auto const secondCameraDecision = scheduler.workflow().notifyCameraChanged(true);
-        auto const secondCameraTask = findStartedTask(secondCameraDecision, RenderTaskType::RealtimeFullFrame);
+        auto const secondCameraTask = findStartedTask(secondCameraDecision, RenderTaskType::LowResolutionPreview);
         ASSERT_TRUE(secondCameraTask.has_value());
         scheduler.requestCancellationForStale();
 
         auto const latestCameraDecision = scheduler.workflow().notifyCameraChanged(true);
-        auto const latestCameraTask = findStartedTask(latestCameraDecision, RenderTaskType::RealtimeFullFrame);
+        auto const latestCameraTask = findStartedTask(latestCameraDecision, RenderTaskType::LowResolutionPreview);
         ASSERT_TRUE(latestCameraTask.has_value());
         scheduler.requestCancellationForStale();
 

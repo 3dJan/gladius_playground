@@ -25,9 +25,16 @@ namespace gladius::ui
 
     void RenderWindow::invalidateViewDueToRenderSettingsChange()
     {
-        m_dirty = true;
-        queueRenderDecision(m_renderUpdateCoordinator.notifyRenderSettingsChanged());
-        m_neutralRenderScheduler.requestCancellationForStale();
+        if (m_neutralBackendActive)
+        {
+            m_dirty = true;
+            queueRenderDecision(m_renderUpdateCoordinator.notifyRenderSettingsChanged());
+            m_neutralRenderScheduler.requestCancellationForStale();
+        }
+        else
+        {
+            invalidateView();
+        }
         if (m_view != nullptr)
         {
             m_view->startAnimationMode();
@@ -217,8 +224,7 @@ namespace gladius::ui
             }
             if (zChanged)
             {
-                m_core->invalidatePreCompSdf("sliderZChanged");
-                m_core->precomputeSdfForWholeBuildPlatform();
+                m_core->invalidateDistanceInitBuffer();
                 invalidateView();
             }
             return;

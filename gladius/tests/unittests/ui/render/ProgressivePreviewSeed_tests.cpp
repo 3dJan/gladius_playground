@@ -56,6 +56,27 @@ namespace gladius::ui::async_rendering::tests
                     .completedFrame = false};
         }
 
+        ProgressivePreviewSeedState makePreviewSeedState()
+        {
+            return {.hasPreview = true,
+                    .epoch = 3u,
+                    .viewEpoch = 5u,
+                    .paramGeneration = 7u,
+                    .width = 2u,
+                    .height = 2u,
+                    .stamp = makePreviewCandidate().stamp};
+        }
+
+        ProgressivePreviewSeedTarget makePreviewSeedTarget()
+        {
+            return {.epoch = 3u,
+                    .viewEpoch = 5u,
+                    .paramGeneration = 7u,
+                    .width = 2u,
+                    .height = 2u,
+                    .stamp = makePreviewCandidate().stamp};
+        }
+
         compute::RenderFrame makePreviewFrame()
         {
             return {.width = 2u,
@@ -91,10 +112,49 @@ namespace gladius::ui::async_rendering::tests
           preview, previewCandidate, progressiveFrame, progressiveCandidate));
     }
 
-    TEST(ProgressivePreviewSeed, ViewportResizeWithSameView_AllowsSeeding)
+    TEST(ProgressivePreviewSeed, ResultImageSeedRequiresCurrentPreviewAndMatchingRenderState)
+    {
+        auto const preview = makePreviewSeedState();
+        auto const target = makePreviewSeedTarget();
+        EXPECT_TRUE(isCompatibleProgressivePreviewSeed(preview, target));
+
+        auto resizedTarget = target;
+        ++resizedTarget.stamp.viewportEpoch;
+        EXPECT_FALSE(isCompatibleProgressivePreviewSeed(preview, resizedTarget));
+
+        auto incompatibleTarget = target;
+        ++incompatibleTarget.paramGeneration;
+        EXPECT_FALSE(isCompatibleProgressivePreviewSeed(preview, incompatibleTarget));
+
+        incompatibleTarget = target;
+        ++incompatibleTarget.stamp.sceneEpoch;
+        EXPECT_FALSE(isCompatibleProgressivePreviewSeed(preview, incompatibleTarget));
+
+        incompatibleTarget = target;
+        ++incompatibleTarget.stamp.parameterEpoch;
+        EXPECT_FALSE(isCompatibleProgressivePreviewSeed(preview, incompatibleTarget));
+
+        incompatibleTarget = target;
+        ++incompatibleTarget.stamp.viewEpoch;
+        EXPECT_FALSE(isCompatibleProgressivePreviewSeed(preview, incompatibleTarget));
+
+        incompatibleTarget = target;
+        ++incompatibleTarget.stamp.qualityEpoch;
+        EXPECT_FALSE(isCompatibleProgressivePreviewSeed(preview, incompatibleTarget));
+
+        incompatibleTarget = target;
+        ++incompatibleTarget.width;
+        EXPECT_FALSE(isCompatibleProgressivePreviewSeed(preview, incompatibleTarget));
+
+        auto missingPreview = preview;
+        missingPreview.hasPreview = false;
+        EXPECT_FALSE(isCompatibleProgressivePreviewSeed(missingPreview, target));
+    }
+
+    TEST(ProgressivePreviewSeed, ViewportResizeWithSameView_RequiresFreshPreview)
     {
         auto const preview = makePreviewFrame();
-        auto const previewCandidate = makePreviewCandidate();
+        auto previewCandidate = makePreviewCandidate();
         compute::RenderFrame const progressiveFrame{.width = 4u,
                                                     .height = 4u,
                                                     .firstRow = 0u,
@@ -104,6 +164,10 @@ namespace gladius::ui::async_rendering::tests
         auto progressiveCandidate = makeProgressiveCandidate(previewCandidate.stamp);
         ++progressiveCandidate.stamp.viewportEpoch;
 
+        EXPECT_FALSE(canSeedProgressiveFrame(
+          preview, previewCandidate, progressiveFrame, progressiveCandidate));
+
+        previewCandidate.stamp = progressiveCandidate.stamp;
         EXPECT_TRUE(canSeedProgressiveFrame(
           preview, previewCandidate, progressiveFrame, progressiveCandidate));
 

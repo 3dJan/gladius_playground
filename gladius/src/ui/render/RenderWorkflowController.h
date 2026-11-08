@@ -93,6 +93,11 @@ namespace gladius::ui::async_rendering
             return m_coordinator.isHighQualityFrameCurrent();
         }
 
+        [[nodiscard]] bool isPreviewRequired() const noexcept
+        {
+            return m_coordinator.isPreviewRequired();
+        }
+
         [[nodiscard]] std::optional<PresentedFrame> const & presentedFrame() const noexcept
         {
             return m_presentedFrames.presentedFrame();

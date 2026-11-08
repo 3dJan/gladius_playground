@@ -111,6 +111,41 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_FALSE(decision);
     }
 
+    TEST(RenderModeUpdatePolicy, LegacyLowResPreview_WithRequiredRealtimePreview_IsAllowed)
+    {
+        for (auto const mode : {RealtimeRaymarchMode::Force, RealtimeRaymarchMode::Auto})
+        {
+            auto input = LegacyLowResPreviewInput{
+              .mode = mode,
+              .interactionState = RenderInteractionState::ParameterInteracting,
+              .autoRealtimeActive = true,
+              .lowResFeedbackPending = true,
+              .previewRequired = true};
+
+            EXPECT_TRUE(shouldUseLegacyLowResPreview(input));
+
+            input.exactRealtimeJobInFlight = true;
+            EXPECT_FALSE(shouldUseLegacyLowResPreview(input));
+        }
+    }
+
+    TEST(RenderModeUpdatePolicy, ExactRealtimeInteraction_WithRequiredPreview_UsesPreviewUntilJobStarts)
+    {
+        for (auto const mode : {RealtimeRaymarchMode::Force, RealtimeRaymarchMode::Auto})
+        {
+            auto input = RealtimeInteractionActivityInput{
+              .mode = mode,
+              .interactionState = RenderInteractionState::CameraInteracting,
+              .autoRealtimeActive = true,
+              .previewRequired = true};
+
+            EXPECT_FALSE(isExactRealtimeInteractionActive(input));
+
+            input.exactRealtimeJobInFlight = true;
+            EXPECT_TRUE(isExactRealtimeInteractionActive(input));
+        }
+    }
+
     TEST(RenderModeUpdatePolicy, ExactRealtimeInteraction_WithAutoRealtimeActive_IsActive)
     {
         auto const active = isExactRealtimeInteractionActive(
@@ -184,6 +219,21 @@ namespace gladius::ui::async_rendering::tests
                                            .autoPreviewFallbackActive = true});
 
         EXPECT_EQ(path, RealtimeFrameExecutionPath::AsyncWorker);
+    }
+
+    TEST(RenderModeUpdatePolicy, RealtimeFrameExecution_WithPreviewToPreserve_UsesAsyncWorker)
+    {
+        for (auto const mode : {RealtimeRaymarchMode::Force, RealtimeRaymarchMode::Auto})
+        {
+            auto const path = chooseRealtimeFrameExecutionPath(
+              RealtimeInteractionActivityInput{
+                .mode = mode,
+                .interactionState = RenderInteractionState::CameraInteracting,
+                .autoRealtimeActive = true,
+                .preservePreview = true});
+
+            EXPECT_EQ(path, RealtimeFrameExecutionPath::AsyncWorker);
+        }
     }
 
     TEST(RenderModeUpdatePolicy, ParameterChangeDispatch_WithForce_InvalidatesWithoutStreaming)

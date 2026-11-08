@@ -13,9 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
-#ifdef GLADIUS_ENABLE_OPENCL
 #include "../../ui/OrbitalCamera.h"
-#endif
 
 namespace gladius
 {
@@ -232,6 +230,66 @@ namespace gladius
                 }
                 return response;
             }
+
+            [[nodiscard]] nlohmann::json computeBoundingBoxResponse(Document & document)
+            {
+                auto const bbox = document.computeBoundingBox();
+
+                // Calculate center and size
+                std::array<float, 3> min = {bbox.min.x, bbox.min.y, bbox.min.z};
+                std::array<float, 3> max = {bbox.max.x, bbox.max.y, bbox.max.z};
+                std::array<float, 3> center = {(bbox.min.x + bbox.max.x) / 2.0f,
+                                               (bbox.min.y + bbox.max.y) / 2.0f,
+                                               (bbox.min.z + bbox.max.z) / 2.0f};
+                std::array<float, 3> size = {
+                  bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y, bbox.max.z - bbox.min.z};
+
+                nlohmann::json response;
+                response["success"] = true;
+                response["message"] = "Bounding box calculated successfully";
+                response["boundingBox"] = {
+                  {"min", min}, {"max", max}, {"center", center}, {"size", size}};
+                return response;
+            }
+
+            [[nodiscard]] nlohmann::json computeOptimalCameraPositionResponse(Document & document)
+            {
+                auto const bbox = document.computeBoundingBox();
+
+                // Create an orbital camera and set it up optimally for the bounding box
+                ui::OrbitalCamera optimalCamera;
+
+                // Set good viewing angles (similar to thumbnail generation)
+                optimalCamera.setAngle(0.6f, -2.0f);
+
+                // Center the camera on the bounding box
+                optimalCamera.centerView(bbox);
+
+                // Update camera position
+                optimalCamera.snapToTarget();
+
+                // Adjust distance to fit the model in view (using reasonable viewport size)
+                const float viewportSize = 512.0f;
+                optimalCamera.adjustDistanceToTarget(bbox, viewportSize, viewportSize);
+
+                // Final update
+                optimalCamera.snapToTarget();
+
+                // Get the calculated camera parameters
+                auto eyePosition = optimalCamera.getEyePosition();
+                auto lookAt = optimalCamera.getLookAt();
+
+                nlohmann::json response;
+                response["success"] = true;
+                response["message"] = "Optimal camera position calculated successfully";
+                response["camera_settings"] = {
+                  {"eye_position", {eyePosition.x, eyePosition.y, eyePosition.z}},
+                  {"target_position", {lookAt.x, lookAt.y, lookAt.z}},
+                  {"up_vector", {0.0f, 0.0f, 1.0f}}, // Standard up vector
+                  {"field_of_view", 45.0f}           // Standard FOV
+                };
+                return response;
+            }
         }
 
         RenderingTool::RenderingTool(Application * app)
@@ -354,14 +412,48 @@ namespace gladius
 
                 nlohmann::json RenderingTool::getOptimalCameraPosition()
                 {
-                        return createToolError(
-                            "Optimal camera calculation is unavailable in a pure WebGPU MCP build.");
+                    if (!validateActiveDocument())
+                    {
+                        return createToolError(getLastErrorMessage());
+                    }
+
+                    try
+                    {
+                        auto document = m_application->getCurrentDocument();
+                        if (!document)
+                        {
+                            throw std::runtime_error("No active document");
+                        }
+                        return computeOptimalCameraPositionResponse(*document);
+                    }
+                    catch (const std::exception & e)
+                    {
+                        setErrorMessage("Camera position calculation failed: " + std::string(e.what()));
+                        return createToolError(getLastErrorMessage());
+                    }
                 }
 
                 nlohmann::json RenderingTool::getModelBoundingBox()
                 {
-                        return createToolError(
-                            "MCP rendering is unavailable in a pure WebGPU build.");
+                    if (!validateActiveDocument())
+                    {
+                        return createToolError(getLastErrorMessage());
+                    }
+
+                    try
+                    {
+                        auto document = m_application->getCurrentDocument();
+                        if (!document)
+                        {
+                            throw std::runtime_error("No active document");
+                        }
+                        return computeBoundingBoxResponse(*document);
+                    }
+                    catch (const std::exception & e)
+                    {
+                        setErrorMessage("Bounding box calculation failed: " + std::string(e.what()));
+                        return createToolError(getLastErrorMessage());
+                    }
                 }
 
 #else
@@ -815,6 +907,12 @@ namespace gladius
 
             try
             {
+                auto document = m_application->getCurrentDocument();
+                if (document && document->getBackendKind() == compute::ComputeBackendKind::WebGPU)
+                {
+                    return computeOptimalCameraPositionResponse(*document);
+                }
+
                 // Get validated compute core
                 auto core = getValidatedComputeCore();
                 if (!core)
@@ -891,6 +989,12 @@ namespace gladius
 
             try
             {
+                auto document = m_application->getCurrentDocument();
+                if (document && document->getBackendKind() == compute::ComputeBackendKind::WebGPU)
+                {
+                    return computeBoundingBoxResponse(*document);
+                }
+
                 // Get validated compute core
                 auto core = getValidatedComputeCore();
                 if (!core)

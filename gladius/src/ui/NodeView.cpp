@@ -1939,22 +1939,28 @@ namespace gladius::ui
         float const itemSpacing = ImGui::GetStyle().ItemInnerSpacing.x;
         float const labelWidth = ImGui::CalcTextSize(label).x;
         float const minFieldWidth = 100.f * scale;
-        float const minTotalWidth = labelWidth + minFieldWidth + 44.f * scale + 2.f * itemSpacing;
+        float const minButtonWidth = 40.f * scale;
+        float const maxButtonWidth = 44.f * scale;
+        float const minTotalWidth = labelWidth + minFieldWidth + maxButtonWidth + 2.f * itemSpacing;
+        /// Auto-sized node columns need the requested width, not the previous frame's available width.
         float const totalWidth = std::max(ImGui::CalcItemWidth(), minTotalWidth);
-        float const buttonWidth = std::min(44.f * scale,
-                           std::max(40.f * scale, (totalWidth - labelWidth) * 0.3f));
+        float const buttonWidth = std::min(maxButtonWidth,
+                                           std::max(minButtonWidth, (totalWidth - labelWidth) * 0.3f));
+        float const spacingBudget = (totalWidth - labelWidth - buttonWidth - minFieldWidth) / 2.f;
+        float const rowSpacing = std::min(itemSpacing, std::max(0.f, spacingBudget));
         float const buttonHeight = std::max(40.f * scale, ImGui::GetFrameHeight());
-        float const fieldWidth = std::max(minFieldWidth,
-                          totalWidth - labelWidth - buttonWidth - 2.f * itemSpacing);
+        float const fieldWidth =
+          std::max(1.f, totalWidth - labelWidth - buttonWidth - 2.f * rowSpacing);
         std::string const fieldLabel = fmt::format("##numeric_drag_{}_{}_{}",
                                                     parameter.second.getId(),
                                                     componentIndex,
                                                     label);
 
         bool changed = false;
+        ImGui::BeginGroup();
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(label);
-        ImGui::SameLine(0.f, itemSpacing);
+        ImGui::SameLine(0.f, rowSpacing);
         if (angleInDegrees)
         {
             changed = angleEdit(fieldLabel.c_str(), value, false, fieldWidth);
@@ -1967,7 +1973,7 @@ namespace gladius::ui
             ImGui::PopItemWidth();
         }
 
-        ImGui::SameLine(0.f, itemSpacing);
+        ImGui::SameLine(0.f, rowSpacing);
         std::string const buttonLabel = fmt::format("123##numeric_input_{}_{}",
                                                      parameter.first,
                                                      componentIndex);
@@ -1995,6 +2001,7 @@ namespace gladius::ui
         {
             ImGui::SetTooltip("Open numeric input");
         }
+        ImGui::EndGroup();
 
         return changed;
     }
@@ -2612,9 +2619,8 @@ namespace gladius::ui
             }
             // Use the larger of the measured rect and the CalcItemWidth-based width
             float const itemRectW = std::ceil(ImGui::GetItemRectSize().x);
-                        float const renderedWidth =
-                            std::max(0.f, ImGui::GetItemRectMax().x - controlStartX);
-                        desiredW = std::max({itemRectW, ImGui::CalcItemWidth(), renderedWidth});
+            float const renderedWidth = std::max(0.f, ImGui::GetItemRectMax().x - controlStartX);
+            desiredW = std::max({itemRectW, ImGui::CalcItemWidth(), renderedWidth});
         }
 
         // update column width — add indent so the column is wide enough
