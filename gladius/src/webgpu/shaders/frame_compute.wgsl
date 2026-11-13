@@ -38,9 +38,22 @@ const RF_SHOW_FIELD: u32 = 4u;
 const RF_SHOW_STACK: u32 = 8u;
 const RF_SHOW_COORDINATE_SYSTEM: u32 = 16u;
 const RF_DISABLE_ADAPTIVE_OMEGA: u32 = 16384u;
+const RF_DEBUG_METRICS: u32 = 32768u;
 const RF_DISABLE_SHADOWS: u32 = 65536u;
 const RF_DISABLE_AO: u32 = 131072u;
 const RF_ENABLE_TRANSLUCENCY: u32 = 1048576u;
+
+/// Ray-march metric counters (see compute::FrameMetrics); written only while the
+/// RF_DEBUG_METRICS rendering flag is set. Indices 0..8 mirror the struct fields.
+@group(0) @binding(10)
+var<storage, read_write> metrics: array<atomic<u32>>;
+
+fn recordMetric(index: u32, value: u32) {
+    if ((frame.flags_mode_reserved.x & RF_DEBUG_METRICS) == 0u || value == 0u) {
+        return;
+    }
+    atomicAdd(&metrics[index], value);
+}
 
 struct SceneSample {
     distance: f32,
@@ -228,7 +241,9 @@ fn calc_soft_shadow(position: vec3<f32>, direction: vec3<f32>) -> f32 {
 
     var result = 20.0f;
     var distance = 0.002f;
+    var taps = 0u;
     for (var step = 0u; step < 32u; step++) {
+        taps = taps + 1u;
         let sample_position = position + direction * distance;
         let sample_distance = evaluate_surface(sample_position).distance;
         result = min(result, 8.0f * sample_distance / distance);
@@ -237,6 +252,7 @@ fn calc_soft_shadow(position: vec3<f32>, direction: vec3<f32>) -> f32 {
             break;
         }
     }
+    recordMetric(5u, taps);
     return clamp(result, 0.0f, 1.0f);
 }
 
@@ -249,6 +265,7 @@ fn calc_ambient_occlusion(position: vec3<f32>, normal: vec3<f32>) -> f32 {
         occlusion = occlusion - (sample_distance - distance) * scale;
         scale = scale * 0.95f;
     }
+    recordMetric(6u, 8u);
     return clamp(1.0f - 3.0f * occlusion, 0.0f, 1.0f) * (0.5f + 0.5f * normal.y);
 }
 
@@ -336,8 +353,11 @@ fn interior_transmittance(eye: vec3<f32>,
     var distance = entry_distance;
     var sigma = attenuation_coefficient(eye + ray_direction * distance, reference_thickness);
     var optical_depth = 0.0f;
+    var steps = 0u;
+    var refinement_taps = 0u;
 
     for (var step = 0u; step < max_steps; step++) {
+        steps = steps + 1u;
         var next_distance = distance + step_size;
         var exit_distance = next_distance;
         var exited = false;
@@ -346,6 +366,7 @@ fn interior_transmittance(eye: vec3<f32>,
             var low = distance;
             var high = next_distance;
             for (var refinement = 0u; refinement < 5u; refinement++) {
+                refinement_taps = refinement_taps + 1u;
                 let middle = (low + high) * 0.5f;
                 if (evaluateModel(eye + ray_direction * middle).w > 0.0f) {
                     high = middle;
@@ -361,6 +382,8 @@ fn interior_transmittance(eye: vec3<f32>,
                                                  reference_thickness);
         optical_depth = optical_depth + (sigma + next_sigma) * 0.5f * (next_distance - distance);
         if (exited) {
+            recordMetric(4u, refinement_taps);
+            recordMetric(8u, steps);
             return InteriorResult(exp(-optical_depth), exit_distance, true);
         }
         distance = next_distance;
@@ -369,6 +392,8 @@ fn interior_transmittance(eye: vec3<f32>,
             break;
         }
     }
+    recordMetric(4u, refinement_taps);
+    recordMetric(8u, steps);
     return InteriorResult(exp(-optical_depth), distance, false);
 }
 
@@ -395,9 +420,13 @@ fn march_surface(eye: vec3<f32>, ray_direction: vec3<f32>, start_distance: f32, 
     var consecutive_small_steps = 0u;
     var did_backtrack = false;
     var hit = false;
+    var stepsTaken = 0u;
+    var backtracks = 0u;
+    var refinementTaps = 0u;
     var model = SceneSample(0.0f, vec3<f32>(0.0f), 1.0f);
     let max_ray_steps = u32(frame.vertical_scale_and_max_steps.y);
     for (var step = 0u; step < max_ray_steps; step++) {
+        stepsTaken = stepsTaken + 1u;
         var position = eye + ray_direction * traveled;
         model = evaluate_surface(position);
 
@@ -409,6 +438,7 @@ fn march_surface(eye: vec3<f32>, ray_direction: vec3<f32>, start_distance: f32, 
         let should_backtrack = adaptive_enabled && step > 0u && !did_backtrack &&
                                previous_absolute_distance + absolute_distance < previous_step_size;
         if (should_backtrack) {
+            backtracks = backtracks + 1u;
             traveled = traveled - previous_step_size;
             let conservative_step = max(previous_absolute_distance, min_step_size);
             traveled = traveled + conservative_step;
@@ -450,6 +480,7 @@ fn march_surface(eye: vec3<f32>, ray_direction: vec3<f32>, start_distance: f32, 
             var last_good_distance = traveled - abs(previous_signed_distance);
             var bad_distance = traveled;
             for (var refinement = 0u; refinement < 6u; refinement++) {
+                refinementTaps = refinementTaps + 1u;
                 let middle_distance = (last_good_distance + bad_distance) * 0.5f;
                 let middle_sample = evaluate_surface(eye + ray_direction * middle_distance);
                 if ((previous_signed_distance < 0.0f) != (middle_sample.distance < 0.0f))
@@ -491,6 +522,12 @@ fn march_surface(eye: vec3<f32>, ray_direction: vec3<f32>, start_distance: f32, 
             break;
         }
     }
+    recordMetric(1u, stepsTaken);
+    recordMetric(4u, refinementTaps);
+    recordMetric(7u, backtracks);
+    if (!hit && stepsTaken >= max_ray_steps) {
+        recordMetric(3u, 1u);
+    }
     return MarchResult(hit, traveled);
 }
 
@@ -529,6 +566,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let pixel_index = global_id.y * width + global_id.x;
     let background = vec3<f32>(0.1f);
+    recordMetric(0u, 1u);
 
     if (!translucency_enabled()) {
         let march = march_surface(eye, ray_direction, 0.0f, max_distance);
@@ -536,6 +574,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
             return;
         }
+        recordMetric(2u, 1u);
         let hit_sample = evaluate_surface(eye + ray_direction * march.distance);
         let shaded = shade_for_hit(eye, ray_direction, march.distance, hit_sample);
         let fog = 1.0f - exp(-1.0e-10f * march.distance * march.distance * march.distance);
@@ -556,6 +595,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             accumulated = accumulated + transmittance * background;
             break;
         }
+        recordMetric(2u, 1u);
         let hit_sample = evaluate_surface(eye + ray_direction * march.distance);
         let shaded = shade_for_hit(eye, ray_direction, march.distance, hit_sample);
         let fog = 1.0f - exp(-1.0e-10f * march.distance * march.distance * march.distance);

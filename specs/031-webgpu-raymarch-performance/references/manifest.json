@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {"model": "SimpleGyroid.3mf", "resolution": 256, "pngFile": "SimpleGyroid.3mf_256.png", "pixelHash": 4234605806811003423},
+    {"model": "SimpleGyroid.3mf", "resolution": 512, "pngFile": "SimpleGyroid.3mf_512.png", "pixelHash": 12333346859202665123},
+    {"model": "ImplicitGyroid.3mf", "resolution": 256, "pngFile": "ImplicitGyroid.3mf_256.png", "pixelHash": 762306238272387935},
+    {"model": "ImplicitGyroid.3mf", "resolution": 512, "pngFile": "ImplicitGyroid.3mf_512.png", "pixelHash": 2965730579863346301},
+    {"model": "SphereInACage.3mf", "resolution": 256, "pngFile": "SphereInACage.3mf_256.png", "pixelHash": 6908248158132264110},
+    {"model": "SphereInACage.3mf", "resolution": 512, "pngFile": "SphereInACage.3mf_512.png", "pixelHash": 6890893001326699327},
+    {"model": "lampbase.3mf", "resolution": 256, "pngFile": "lampbase.3mf_256.png", "pixelHash": 2118482914189495555},
+    {"model": "lampbase.3mf", "resolution": 512, "pngFile": "lampbase.3mf_512.png", "pixelHash": 14456060848605713153},
+    {"model": "RadialRadiator.3mf", "resolution": 256, "pngFile": "RadialRadiator.3mf_256.png", "pixelHash": 12387822338567612931},
+    {"model": "RadialRadiator.3mf", "resolution": 512, "pngFile": "RadialRadiator.3mf_512.png", "pixelHash": 9426150399058468788},
+    {"model": "webcam_003.3mf", "resolution": 256, "pngFile": "webcam_003.3mf_256.png", "pixelHash": 7808870318359714159},
+    {"model": "webcam_003.3mf", "resolution": 512, "pngFile": "webcam_003.3mf_512.png", "pixelHash": 6419268074433105751}
+  ]
+}

@@ -8,6 +8,8 @@
 #include <cmrc/cmrc.hpp>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -145,7 +147,7 @@ namespace gladius::webgpu
             shaderDescriptor.nextInChain = &wgsl;
             auto const shader = device.CreateShaderModule(&shaderDescriptor);
 
-            wgpu::BindGroupLayoutEntry bindings[9]{};
+            wgpu::BindGroupLayoutEntry bindings[10]{};
             bindings[0].binding = 0u;
             bindings[0].visibility = wgpu::ShaderStage::Compute;
             bindings[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -198,6 +200,13 @@ namespace gladius::webgpu
                 bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
                 ++bindingCount;
             }
+            // The metric counter buffer is always bound (binding 10); the shader gates the
+            // atomic writes behind the RF_DEBUG_METRICS rendering flag.
+            bindings[bindingCount].binding = 10u;
+            bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+            bindings[bindingCount].buffer.type = wgpu::BufferBindingType::Storage;
+            bindings[bindingCount].buffer.minBindingSize = FRAME_METRICS_SIZE_BYTES;
+            ++bindingCount;
 
             wgpu::BindGroupLayoutDescriptor layoutDescriptor;
             layoutDescriptor.entryCount = bindingCount;
@@ -354,6 +363,15 @@ namespace gladius::webgpu
             WebGPUFrameBufferSet & buffers;
             compute::ComputeCompletionStatus status{compute::ComputeCompletionStatus::Pending};
             std::optional<compute::FrameResult> result;
+            std::optional<compute::FrameMetrics> metrics;
+            /// GPU compute-pass duration in milliseconds from timestamp queries;
+            /// gpuTimestampsAvailable is set only when valid timestamps were resolved.
+            std::optional<double> gpuPassMs;
+            bool gpuTimestampsAvailable{false};
+            /// Raw timepoints; FrameTiming is assembled lazily in getFrameTiming().
+            std::optional<std::chrono::steady_clock::time_point> submittedAt;
+            std::optional<std::chrono::steady_clock::time_point> workDoneAt;
+            std::optional<std::chrono::steady_clock::time_point> readbackAt;
             std::string errorMessage;
         };
 
@@ -726,6 +744,41 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 return m_state->errorMessage;
             }
 
+            [[nodiscard]] std::optional<compute::FrameTiming> getFrameTiming() const override
+            {
+                std::scoped_lock lock{m_state->mutex};
+                if (!m_state->submittedAt.has_value() || !m_state->readbackAt.has_value())
+                {
+                    return std::nullopt;
+                }
+                compute::FrameTiming timing;
+                if (m_state->gpuTimestampsAvailable && m_state->gpuPassMs.has_value())
+                {
+                    timing.gpuPassMs = *m_state->gpuPassMs;
+                    timing.gpuTimestampsAvailable = true;
+                }
+                auto const readback = *m_state->readbackAt;
+                if (m_state->workDoneAt.has_value())
+                {
+                    timing.submitToWorkDoneMs =
+                      std::chrono::duration<double, std::milli>(*m_state->workDoneAt - *m_state->submittedAt).count();
+                    timing.workDoneToReadbackMs =
+                      std::chrono::duration<double, std::milli>(readback - *m_state->workDoneAt).count();
+                }
+                else
+                {
+                    timing.submitToWorkDoneMs =
+                      std::chrono::duration<double, std::milli>(readback - *m_state->submittedAt).count();
+                }
+                return timing;
+            }
+
+            [[nodiscard]] std::optional<compute::FrameMetrics> getFrameMetrics() const override
+            {
+                std::scoped_lock lock{m_state->mutex};
+                return m_state->metrics;
+            }
+
           private:
             static std::string loadDefaultShader()
             {
@@ -764,22 +817,164 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     throw std::logic_error("WebGPU frame dispatch dimensions became invalid");
                 }
 
+                auto const state = m_state;
                 auto const encoder = m_context->getDevice().CreateCommandEncoder();
-                auto const computePass = encoder.BeginComputePass();
+                if (m_collectMetrics)
+                {
+                    // The bundled WebGPU header predates the BufferUsage::Clear flag, so
+                    // ClearBuffer would fail validation; zero the counters via WriteBuffer.
+                    std::array<std::uint32_t, FRAME_METRICS_COUNTER_COUNT> zeroCounters{};
+                    m_context->getQueue().WriteBuffer(m_state->buffers.getMetricsBuffer(),
+                                                      0u,
+                                                      zeroCounters.data(),
+                                                      zeroCounters.size() * sizeof(std::uint32_t));
+                }
+                auto const useTimestamps = m_collectGpuTiming && m_state->buffers.hasTimestampBuffers();
+                wgpu::ComputePassDescriptor passDescriptor;
+                wgpu::PassTimestampWrites timestampWrites;
+                if (useTimestamps)
+                {
+                    timestampWrites.querySet = m_state->buffers.getQuerySet();
+                    timestampWrites.beginningOfPassWriteIndex = 0u;
+                    timestampWrites.endOfPassWriteIndex = 1u;
+                    passDescriptor.timestampWrites = &timestampWrites;
+                }
+                auto const computePass = encoder.BeginComputePass(useTimestamps ? &passDescriptor : nullptr);
                 computePass.SetPipeline(pipelineHandles->computePipeline);
                 computePass.SetBindGroup(0u, m_bindGroup);
                 computePass.DispatchWorkgroups(dispatchSize->workgroupsX, dispatchSize->workgroupsY);
                 computePass.End();
+                if (useTimestamps)
+                {
+                    encoder.ResolveQuerySet(m_state->buffers.getQuerySet(),
+                                            0u,
+                                            2u,
+                                            m_state->buffers.getTimestampResolveBuffer(),
+                                            0u);
+                    encoder.CopyBufferToBuffer(m_state->buffers.getTimestampResolveBuffer(),
+                                               0u,
+                                               m_state->buffers.getTimestampStagingBuffer(),
+                                               0u,
+                                               2u * sizeof(std::uint64_t));
+                }
+                if (m_collectMetrics)
+                {
+                    encoder.CopyBufferToBuffer(m_state->buffers.getMetricsBuffer(),
+                                               0u,
+                                               m_state->buffers.getMetricsStagingBuffer(),
+                                               0u,
+                                               FRAME_METRICS_SIZE_BYTES);
+                }
                 encoder.CopyBufferToBuffer(m_state->buffers.getOutputBuffer(),
                                            0u,
                                            m_state->buffers.getStagingBuffer(),
                                            0u,
-                                           m_state->buffers.getOutputSizeBytes());
+                                           state->buffers.getOutputSizeBytes());
                 auto const commandBuffer = encoder.Finish();
-                m_context->getQueue().Submit(1u, &commandBuffer);
+                auto const & queue = m_context->getQueue();
+                {
+                    std::scoped_lock lock{state->mutex};
+                    state->submittedAt = std::chrono::steady_clock::now();
+                }
+                if (m_collectGpuTiming)
+                {
+                    queue.OnSubmittedWorkDone(
+#ifdef __EMSCRIPTEN__
+                      wgpu::CallbackMode::AllowSpontaneous,
+#else
+                      wgpu::CallbackMode::AllowProcessEvents,
+#endif
+                      [state](wgpu::QueueWorkDoneStatus const workDoneStatus,
+                              wgpu::StringView const message)
+                      {
+                          (void)message;
+                          if (workDoneStatus == wgpu::QueueWorkDoneStatus::Success)
+                          {
+                              std::scoped_lock lock{state->mutex};
+                              state->workDoneAt = std::chrono::steady_clock::now();
+                          }
+                      });
+                }
+                queue.Submit(1u, &commandBuffer);
                 m_frameSubmitted = true;
 
-                auto const state = m_state;
+                auto const collectTimestamps = m_collectGpuTiming && m_state->buffers.hasTimestampBuffers();
+                auto const collectMetrics = m_collectMetrics;
+                auto readMetrics = [state](wgpu::MapAsyncStatus const metricsStatus,
+                                           wgpu::StringView const metricsMessage)
+                {
+                    std::scoped_lock metricsLock{state->mutex};
+                    if (metricsStatus != wgpu::MapAsyncStatus::Success)
+                    {
+                        state->status = compute::ComputeCompletionStatus::Failed;
+                        state->errorMessage =
+                          "WebGPU frame metrics readback failed: " + toString(metricsMessage);
+                        return;
+                    }
+                    auto const * counters = static_cast<std::uint32_t const *>(
+                      state->buffers.getMetricsStagingBuffer().GetConstMappedRange(
+                        0u, FRAME_METRICS_SIZE_BYTES));
+                    if (counters == nullptr)
+                    {
+                        state->buffers.getMetricsStagingBuffer().Unmap();
+                        state->status = compute::ComputeCompletionStatus::Failed;
+                        state->errorMessage = "WebGPU metrics staging buffer returned no mapped data";
+                        return;
+                    }
+                    state->metrics = compute::FrameMetrics{
+                      .totalRays = counters[0],
+                      .totalSteps = counters[1],
+                      .totalHits = counters[2],
+                      .nonConverged = counters[3],
+                      .refinementTaps = counters[4],
+                      .shadowTaps = counters[5],
+                      .aoTaps = counters[6],
+                      .backtracks = counters[7],
+                      .interiorSteps = counters[8]};
+                    state->buffers.getMetricsStagingBuffer().Unmap();
+                    state->status = compute::ComputeCompletionStatus::Succeeded;
+                };
+                auto readTimestamps = [state, collectMetrics, readMetrics](wgpu::MapAsyncStatus const timestampStatus,
+                                                              wgpu::StringView const timestampMessage)
+                {
+                    (void)timestampMessage;
+                    {
+                        std::scoped_lock lock{state->mutex};
+                        if (timestampStatus == wgpu::MapAsyncStatus::Success)
+                        {
+                            auto const * timestamps = static_cast<std::uint64_t const *>(
+                              state->buffers.getTimestampStagingBuffer().GetConstMappedRange(
+                                0u, 2u * sizeof(std::uint64_t)));
+                            if (timestamps != nullptr)
+                            {
+                                auto const deltaNs = timestamps[1] - timestamps[0];
+                                if (deltaNs > 0u)
+                                {
+                                    state->gpuPassMs = static_cast<double>(deltaNs) / 1'000'000.0;
+                                    state->gpuTimestampsAvailable = true;
+                                }
+                            }
+                            state->buffers.getTimestampStagingBuffer().Unmap();
+                        }
+                    }
+                    if (collectMetrics)
+                    {
+                        state->buffers.getMetricsStagingBuffer().MapAsync(
+                          wgpu::MapMode::Read,
+                          0u,
+                          FRAME_METRICS_SIZE_BYTES,
+#ifdef __EMSCRIPTEN__
+                          wgpu::CallbackMode::AllowSpontaneous,
+#else
+                          wgpu::CallbackMode::AllowProcessEvents,
+#endif
+                          readMetrics);
+                        return;
+                    }
+                    std::scoped_lock lock{state->mutex};
+                    state->status = compute::ComputeCompletionStatus::Succeeded;
+                };
+
                 state->buffers.getStagingBuffer().MapAsync(
                   wgpu::MapMode::Read,
                   0u,
@@ -789,10 +984,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 #else
                   wgpu::CallbackMode::AllowProcessEvents,
 #endif
-                  [state, width = m_width, height = m_height](wgpu::MapAsyncStatus const status,
-                                                              wgpu::StringView const message)
+                  [state, width = m_width, height = m_height, collectTimestamps, collectMetrics, readMetrics, readTimestamps](
+                      wgpu::MapAsyncStatus const status,
+                      wgpu::StringView const message)
                   {
-                      std::scoped_lock lock{state->mutex};
+                      std::unique_lock lock{state->mutex};
                       if (status != wgpu::MapAsyncStatus::Success)
                       {
                           state->status = compute::ComputeCompletionStatus::Failed;
@@ -817,7 +1013,43 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                            .height = height,
                                                            .pixels = {mappedPixels, mappedPixels + pixelCount}};
                       state->buffers.getStagingBuffer().Unmap();
-                      state->status = compute::ComputeCompletionStatus::Succeeded;
+                      state->readbackAt = std::chrono::steady_clock::now();
+                      lock.unlock();
+
+                      if (collectTimestamps)
+                      {
+                          state->buffers.getTimestampStagingBuffer().MapAsync(
+                            wgpu::MapMode::Read,
+                            0u,
+                            2u * sizeof(std::uint64_t),
+#ifdef __EMSCRIPTEN__
+                            wgpu::CallbackMode::AllowSpontaneous,
+#else
+                            wgpu::CallbackMode::AllowProcessEvents,
+#endif
+                            readTimestamps);
+                          return;
+                      }
+
+                      if (!collectMetrics)
+                      {
+                          std::scoped_lock finalizeLock{state->mutex};
+                          state->status = compute::ComputeCompletionStatus::Succeeded;
+                          return;
+                      }
+
+                      // Metrics copy is part of the same command buffer, so the GPU work
+                      // finished already; this MapAsync completes on the next event processing.
+                      state->buffers.getMetricsStagingBuffer().MapAsync(
+                        wgpu::MapMode::Read,
+                        0u,
+                        FRAME_METRICS_SIZE_BYTES,
+#ifdef __EMSCRIPTEN__
+                        wgpu::CallbackMode::AllowSpontaneous,
+#else
+                        wgpu::CallbackMode::AllowProcessEvents,
+#endif
+                        readMetrics);
                   });
             }
 
@@ -867,6 +1099,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     throw std::invalid_argument("WebGPU frame pixel count exceeds the safe limit");
                 }
 
+                m_collectGpuTiming = request.collectGpuTiming;
+                m_collectMetrics = request.collectMetrics;
+                auto const effectiveRenderingFlags =
+                  m_collectMetrics ? request.renderingFlags | RF_DEBUG_METRICS
+                                   : request.renderingFlags;
+
                 auto const rowCount = request.endRow - request.firstRow;
                 FrameUniforms uniforms{
                   .eyeAndMaxDistance = {request.eyePosition[0],
@@ -897,7 +1135,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                              request.sliceHeight,
                                              request.quality,
                                              request.normalOffset},
-                  .flagsModeReserved = {request.renderingFlags,
+                  .flagsModeReserved = {effectiveRenderingFlags,
                                         request.renderingMode,
                                         request.modelBounds.has_value() ? 1u : 0u,
                                         request.translucencyMaxSurfaces},
@@ -931,6 +1169,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 m_state->buffers.setImagePayloads(m_context->getDevice(),
                                                   m_context->getQueue(),
                                                   request.imagePayloadTable);
+                m_state->buffers.ensureMetricsBuffers(m_context->getDevice());
+                if (m_collectGpuTiming && m_context->supportsTimestampQueries())
+                {
+                    m_state->buffers.ensureTimestampBuffers(m_context->getDevice());
+                }
 
                 if (request.shaderSource.empty())
                 {
@@ -948,7 +1191,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 m_pipeline = pipelineResult.pipeline;
                 m_rowCount = rowCount;
 
-                wgpu::BindGroupEntry bindGroupEntries[9]{};
+                wgpu::BindGroupEntry bindGroupEntries[10]{};
                 bindGroupEntries[0].binding = 0u;
                 bindGroupEntries[0].buffer = m_state->buffers.getUniformBuffer();
                 bindGroupEntries[0].size = sizeof(FrameUniforms);
@@ -1004,6 +1247,10 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                             m_state->buffers.getImageOffsetTableBuffer().GetSize();
                                         ++bindGroupEntryCount;
                                 }
+                bindGroupEntries[bindGroupEntryCount].binding = 10u;
+                bindGroupEntries[bindGroupEntryCount].buffer = m_state->buffers.getMetricsBuffer();
+                bindGroupEntries[bindGroupEntryCount].size = FRAME_METRICS_SIZE_BYTES;
+                ++bindGroupEntryCount;
 
                 wgpu::BindGroupDescriptor bindGroupDescriptor;
                 bindGroupDescriptor.layout = m_pipeline->getBindGroupLayout();
@@ -1021,6 +1268,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             std::shared_ptr<WebGPUFramePipelineCache::Pipeline> m_pipeline;
             wgpu::BindGroup m_bindGroup;
             bool m_frameSubmitted{false};
+            bool m_collectGpuTiming{false};
+            bool m_collectMetrics{false};
             std::shared_ptr<WebGPUFrameSubmissionState> m_state;
         };
     }

@@ -3,6 +3,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace gladius::webgpu
 {
@@ -71,6 +72,11 @@ namespace gladius::webgpu
     bool WebGPUComputeContext::isValid() const noexcept
     {
         return m_isValid;
+    }
+
+    bool WebGPUComputeContext::supportsTimestampQueries() const noexcept
+    {
+        return m_supportsTimestampQueries;
     }
 
     std::string WebGPUComputeContext::getErrorMessage() const
@@ -210,6 +216,16 @@ namespace gladius::webgpu
         }
 
         wgpu::DeviceDescriptor deviceDescriptor;
+        // GPU timestamp queries measure actual compute-pass duration; the feature is
+        // optional so the device is still created when the adapter does not support it.
+        std::vector<wgpu::FeatureName> requiredFeatures;
+        if (m_adapter.HasFeature(wgpu::FeatureName::TimestampQuery))
+        {
+            m_supportsTimestampQueries = true;
+            requiredFeatures.push_back(wgpu::FeatureName::TimestampQuery);
+            deviceDescriptor.requiredFeatureCount = requiredFeatures.size();
+            deviceDescriptor.requiredFeatures = requiredFeatures.data();
+        }
         deviceDescriptor.SetDeviceLostCallback(
           wgpu::CallbackMode::AllowProcessEvents,
           [state = m_callbackState](wgpu::Device const &,

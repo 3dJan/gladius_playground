@@ -310,8 +310,77 @@ namespace gladius::webgpu
         }
     }
 
+    void WebGPUFrameBufferSet::ensureMetricsBuffers(wgpu::Device const & device)
+    {
+        if (m_metricsBuffer && m_metricsStagingBuffer)
+        {
+            return;
+        }
+
+        wgpu::BufferDescriptor metricsDescriptor;
+        metricsDescriptor.label = "Gladius frame metrics";
+        // CopyDst is required so the per-submission counter zeroing via queue.WriteBuffer
+        // passes validation; without it the counters silently accumulate across frames.
+        metricsDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc
+                                  | wgpu::BufferUsage::CopyDst;
+        metricsDescriptor.size = FRAME_METRICS_SIZE_BYTES;
+        m_metricsBuffer = device.CreateBuffer(&metricsDescriptor);
+
+        wgpu::BufferDescriptor stagingDescriptor;
+        stagingDescriptor.label = "Gladius frame metrics readback";
+        stagingDescriptor.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+        stagingDescriptor.size = FRAME_METRICS_SIZE_BYTES;
+        m_metricsStagingBuffer = device.CreateBuffer(&stagingDescriptor);
+
+        if (!m_metricsBuffer || !m_metricsStagingBuffer)
+        {
+            m_metricsBuffer = nullptr;
+            m_metricsStagingBuffer = nullptr;
+            throw std::runtime_error("Unable to allocate WebGPU frame metrics buffers");
+        }
+    }
+
+    void WebGPUFrameBufferSet::ensureTimestampBuffers(wgpu::Device const & device)
+    {
+        if (m_querySet && m_timestampResolveBuffer && m_timestampStagingBuffer)
+        {
+            return;
+        }
+
+        wgpu::QuerySetDescriptor queryDescriptor;
+        queryDescriptor.label = "Gladius frame timestamps";
+        queryDescriptor.type = wgpu::QueryType::Timestamp;
+        queryDescriptor.count = 2u;
+        m_querySet = device.CreateQuerySet(&queryDescriptor);
+
+        wgpu::BufferDescriptor resolveDescriptor;
+        resolveDescriptor.label = "Gladius frame timestamp resolve";
+        resolveDescriptor.usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc;
+        resolveDescriptor.size = 2u * sizeof(std::uint64_t);
+        m_timestampResolveBuffer = device.CreateBuffer(&resolveDescriptor);
+
+        wgpu::BufferDescriptor stagingDescriptor;
+        stagingDescriptor.label = "Gladius frame timestamp readback";
+        stagingDescriptor.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+        stagingDescriptor.size = 2u * sizeof(std::uint64_t);
+        m_timestampStagingBuffer = device.CreateBuffer(&stagingDescriptor);
+
+        if (!m_querySet || !m_timestampResolveBuffer || !m_timestampStagingBuffer)
+        {
+            m_querySet = nullptr;
+            m_timestampResolveBuffer = nullptr;
+            m_timestampStagingBuffer = nullptr;
+            throw std::runtime_error("Unable to allocate WebGPU frame timestamp buffers");
+        }
+    }
+
     void WebGPUFrameBufferSet::reset()
     {
+        m_metricsBuffer = nullptr;
+        m_metricsStagingBuffer = nullptr;
+        m_querySet = nullptr;
+        m_timestampResolveBuffer = nullptr;
+        m_timestampStagingBuffer = nullptr;
         m_stagingBuffer = nullptr;
         m_parameterBuffer = nullptr;
         m_outputBuffer = nullptr;

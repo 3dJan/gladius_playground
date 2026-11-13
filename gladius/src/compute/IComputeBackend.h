@@ -73,6 +73,13 @@ namespace gladius::compute
         /// Surfaces shaded per ray while translucency is active; zero selects the shader default.
         std::uint32_t translucencyMaxSurfaces{};
         std::optional<RenderBounds> modelBounds{};
+        /// Request per-submission GPU timing (queue work-done and, where supported,
+        /// timestamp queries). Off by default; benchmark harnesses enable it.
+        bool collectGpuTiming{false};
+        /// Request ray-march step counters from the shader (requires the shader to be
+        /// composed with the metrics module). Off by default; never enable together with
+        /// timing measurements because the counters perturb what they measure.
+        bool collectMetrics{false};
         std::string shaderSource;
         std::vector<float> parameterValues;
         /// Mesh payloads indexed by mesh resource id (empty slots = no mesh).
@@ -94,6 +101,39 @@ namespace gladius::compute
         std::uint32_t width{};
         std::uint32_t height{};
         std::vector<std::uint32_t> pixels;
+    };
+
+    /**
+     * @brief Timing of one completed frame submission. All values are milliseconds.
+     */
+    struct FrameTiming
+    {
+        /// CPU wall time from queue submission until the GPU signalled work completion.
+        double submitToWorkDoneMs{};
+        /// Latency between GPU work completion and the readback callback delivering the pixels.
+        double workDoneToReadbackMs{};
+        /// GPU-internal compute pass duration from timestamp queries; zero unless
+        /// gpuTimestampsAvailable is true.
+        double gpuPassMs{};
+        bool gpuTimestampsAvailable{false};
+    };
+
+    /**
+     * @brief Ray-march counters collected by the shader metrics module.
+     *
+     * Layout mirrors the OpenCL RayMarchMetrics counters so both backends are comparable.
+     */
+    struct FrameMetrics
+    {
+        std::uint32_t totalRays{};
+        std::uint32_t totalSteps{};
+        std::uint32_t totalHits{};
+        std::uint32_t nonConverged{};
+        std::uint32_t refinementTaps{};
+        std::uint32_t shadowTaps{};
+        std::uint32_t aoTaps{};
+        std::uint32_t backtracks{};
+        std::uint32_t interiorSteps{};
     };
 
     /**
@@ -127,6 +167,18 @@ namespace gladius::compute
         virtual void wait() = 0;
         [[nodiscard]] virtual std::optional<FrameResult> takeResult() = 0;
         [[nodiscard]] virtual std::string getErrorMessage() const = 0;
+
+        /// @brief GPU timing of the completed submission; only valid after Succeeded.
+        [[nodiscard]] virtual std::optional<FrameTiming> getFrameTiming() const
+        {
+            return std::nullopt;
+        }
+
+        /// @brief Ray-march counters; only valid when FrameRequest::collectMetrics was set.
+        [[nodiscard]] virtual std::optional<FrameMetrics> getFrameMetrics() const
+        {
+            return std::nullopt;
+        }
     };
 
     /**

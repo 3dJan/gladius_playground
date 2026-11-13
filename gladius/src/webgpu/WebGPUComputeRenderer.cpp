@@ -188,6 +188,16 @@ namespace gladius::webgpu
                 return m_submission ? m_submission->getErrorMessage() : "WebGPU frame submission is unavailable";
             }
 
+            [[nodiscard]] std::optional<compute::FrameTiming> getFrameTiming() const override
+            {
+                return m_submission ? m_submission->getFrameTiming() : std::nullopt;
+            }
+
+            [[nodiscard]] std::optional<compute::FrameMetrics> getFrameMetrics() const override
+            {
+                return m_submission ? m_submission->getFrameMetrics() : std::nullopt;
+            }
+
           private:
             std::unique_ptr<compute::IFrameSubmission> m_submission;
             compute::RenderRequest m_request;
@@ -231,6 +241,8 @@ namespace gladius::webgpu
                                            request.settings.translucencyFloor},
                     .translucencyMaxSurfaces = translucencyActive ? request.settings.translucencyMaxSurfaces : 0u,
                     .modelBounds = request.modelBounds,
+                    .collectGpuTiming = request.collectGpuTiming,
+                    .collectMetrics = request.collectMetrics,
                     .shaderSource = composedShader,
                     .parameterValues = parameters.values,
                     .meshPayloadTable = scene.meshResources.size() > 0u

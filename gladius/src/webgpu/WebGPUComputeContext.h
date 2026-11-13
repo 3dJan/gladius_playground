@@ -63,6 +63,8 @@ namespace gladius::webgpu
         [[nodiscard]] wgpu::Queue const & getQueue() const noexcept;
         [[nodiscard]] wgpu::Instance const & getInstance() const noexcept;
         [[nodiscard]] wgpu::Adapter const & getAdapter() const noexcept;
+        /// True when the device was created with the timestamp-query feature enabled.
+        [[nodiscard]] bool supportsTimestampQueries() const noexcept;
         // Returns true until initialize() completes or fails.  Polled by the
         // UI so that the browser can show a status while the WebGPU adapter
         // and device are still being requested.
@@ -97,6 +99,7 @@ namespace gladius::webgpu
         wgpu::Device m_device;
         wgpu::Queue m_queue;
         std::atomic<bool> m_isValid{false};
+        std::atomic<bool> m_supportsTimestampQueries{false};
         mutable std::mutex m_errorMutex;
         std::string m_errorMessage;
     };

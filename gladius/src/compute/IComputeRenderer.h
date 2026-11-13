@@ -1,6 +1,7 @@
 #pragma once
 
 #include "compute/ComputeBackend.h"
+#include "compute/IComputeBackend.h"
 #include "compute/RenderContracts.h"
 #include "compute/RenderSceneSnapshot.h"
 
@@ -43,6 +44,18 @@ namespace gladius::compute
         virtual void wait() = 0;
         [[nodiscard]] virtual std::optional<RenderFrame> takeFrame() = 0;
         [[nodiscard]] virtual std::string getErrorMessage() const = 0;
+
+        /// @brief GPU timing of the completed frame; only valid after Succeeded.
+        [[nodiscard]] virtual std::optional<FrameTiming> getFrameTiming() const
+        {
+            return std::nullopt;
+        }
+
+        /// @brief Ray-march counters; only valid when the request asked for them.
+        [[nodiscard]] virtual std::optional<FrameMetrics> getFrameMetrics() const
+        {
+            return std::nullopt;
+        }
     };
 
     /**

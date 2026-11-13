@@ -294,6 +294,10 @@ namespace gladius::compute
         std::optional<RenderBounds> modelBounds{};
         RenderViewport viewport{};
         RenderFreshnessStamp freshness{};
+        /// Ask the backend to report GPU timing for this frame. Backends without support ignore it.
+        bool collectGpuTiming{false};
+        /// Ask the shader to report ray-march step counters. Backends without support ignore it.
+        bool collectMetrics{false};
 
         [[nodiscard]] bool isValid() const noexcept
         {

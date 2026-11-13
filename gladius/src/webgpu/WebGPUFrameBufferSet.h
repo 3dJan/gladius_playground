@@ -78,6 +78,32 @@ namespace gladius::webgpu
             return m_imageOffsetTableBuffer;
         }
 
+        /// Create (once) the ray-march metric counter buffers used with FrameRequest::collectMetrics.
+        void ensureMetricsBuffers(wgpu::Device const & device);
+        [[nodiscard]] bool hasMetricsBuffers() const noexcept { return m_metricsBuffer != nullptr; }
+        [[nodiscard]] wgpu::Buffer const & getMetricsBuffer() const noexcept { return m_metricsBuffer; }
+        [[nodiscard]] wgpu::Buffer const & getMetricsStagingBuffer() const noexcept
+        {
+            return m_metricsStagingBuffer;
+        }
+
+        /// Create (once) the timestamp query set and resolve buffer used with
+        /// FrameRequest::collectGpuTiming on devices supporting the timestamp-query feature.
+        void ensureTimestampBuffers(wgpu::Device const & device);
+        [[nodiscard]] bool hasTimestampBuffers() const noexcept
+        {
+            return m_querySet != nullptr && m_timestampResolveBuffer != nullptr;
+        }
+        [[nodiscard]] wgpu::QuerySet const & getQuerySet() const noexcept { return m_querySet; }
+        [[nodiscard]] wgpu::Buffer const & getTimestampResolveBuffer() const noexcept
+        {
+            return m_timestampResolveBuffer;
+        }
+        [[nodiscard]] wgpu::Buffer const & getTimestampStagingBuffer() const noexcept
+        {
+            return m_timestampStagingBuffer;
+        }
+
       private:
         std::uint32_t m_width{};
         std::uint32_t m_height{};
@@ -98,5 +124,10 @@ namespace gladius::webgpu
         wgpu::Buffer m_imagePayloadBuffer;
         wgpu::Buffer m_imageOffsetTableBuffer;
         std::size_t m_imagePayloadBufferSize{};
+        wgpu::Buffer m_metricsBuffer;
+        wgpu::Buffer m_metricsStagingBuffer;
+        wgpu::QuerySet m_querySet;
+        wgpu::Buffer m_timestampResolveBuffer;
+        wgpu::Buffer m_timestampStagingBuffer;
     };
 }

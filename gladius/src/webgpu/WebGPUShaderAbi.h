@@ -48,4 +48,14 @@ namespace gladius::webgpu
     static_assert(offsetof(FrameUniforms, clippingBoxMax) == 144u);
     static_assert(offsetof(FrameUniforms, translucencyParams) == 160u);
     static_assert(sizeof(FrameUniforms) == 176u);
+
+    /// Number of u32 ray-march metric counters exposed at frame shader binding 10.
+    /// Indices 0..8 mirror compute::FrameMetrics; the rest are reserved padding.
+    inline constexpr std::size_t FRAME_METRICS_COUNTER_COUNT = 16u;
+    inline constexpr std::size_t FRAME_METRICS_SIZE_BYTES =
+      FRAME_METRICS_COUNTER_COUNT * sizeof(std::uint32_t);
+
+    /// FrameUniforms::flagsModeReserved.x bit that enables shader metric counters.
+    /// Mirrors RF_DEBUG_METRICS in src/kernel/types.h and frame_compute.wgsl.
+    inline constexpr std::uint32_t RF_DEBUG_METRICS = 32768u;
 }
