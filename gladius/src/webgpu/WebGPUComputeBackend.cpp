@@ -811,7 +811,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     return;
                 }
 
-                auto const dispatchSize = calculateSliceDispatchSize(m_width, m_rowCount);
+                auto const dispatchSize =
+                  calculateSliceDispatchSize(m_width, m_rowCount, m_workgroupShape);
                 if (!dispatchSize.has_value())
                 {
                     throw std::logic_error("WebGPU frame dispatch dimensions became invalid");
@@ -1066,8 +1067,15 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     request.endRow = request.height;
                 }
+                if (!request.workgroupShape.isValid())
+                {
+                    throw std::invalid_argument("Invalid WebGPU workgroup shape " +
+                                                request.workgroupShape.toString());
+                }
                 if (request.firstRow >= request.endRow || request.endRow > request.height ||
-                    !calculateSliceDispatchSize(request.width, request.endRow - request.firstRow)
+                    !calculateSliceDispatchSize(request.width,
+                                                request.endRow - request.firstRow,
+                                                request.workgroupShape)
                        .has_value())
                 {
                     throw std::invalid_argument("Invalid WebGPU frame row range");
@@ -1179,6 +1187,9 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     request.shaderSource = loadDefaultShader();
                 }
+                request.shaderSource =
+                  WebGPUFrameShaderComposer::applyWorkgroupShape(request.shaderSource,
+                                                                 request.workgroupShape);
 
                 bool const hasMeshPayloads = m_state->buffers.hasMeshPayloads();
                 bool const hasBeamPayloads = m_state->buffers.hasBeamPayloads();
@@ -1190,6 +1201,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                                          hasImagePayloads);
                 m_pipeline = pipelineResult.pipeline;
                 m_rowCount = rowCount;
+                m_workgroupShape = request.workgroupShape;
 
                 wgpu::BindGroupEntry bindGroupEntries[10]{};
                 bindGroupEntries[0].binding = 0u;
@@ -1264,6 +1276,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             std::uint32_t m_width{};
             std::uint32_t m_height{};
             std::uint32_t m_rowCount{};
+            compute::WorkgroupShape m_workgroupShape{};
             std::shared_ptr<WebGPUFramePipelineCache> m_pipelineCache;
             std::shared_ptr<WebGPUFramePipelineCache::Pipeline> m_pipeline;
             wgpu::BindGroup m_bindGroup;

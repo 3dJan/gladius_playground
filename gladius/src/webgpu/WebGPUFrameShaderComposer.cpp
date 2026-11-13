@@ -172,4 +172,29 @@ namespace gladius::webgpu
                 }
         return composeFrameShader(std::move(modules), modelEvaluator, translucencyEvaluator);
     }
+
+    std::string WebGPUFrameShaderComposer::applyWorkgroupShape(std::string shaderSource,
+                                                               compute::WorkgroupShape const shape)
+    {
+        if (shape.isDefault())
+        {
+            return shaderSource;
+        }
+        if (!shape.isValid())
+        {
+            throw std::invalid_argument("Invalid WebGPU workgroup shape " + shape.toString());
+        }
+
+        static constexpr std::string_view defaultDeclaration = "@compute @workgroup_size(16, 16, 1)";
+        auto const position = shaderSource.find(defaultDeclaration);
+        if (position == std::string::npos)
+        {
+            throw std::runtime_error("WebGPU frame shader has no default workgroup declaration");
+        }
+
+        auto const replacement =
+            fmt::format("@compute @workgroup_size({}, {}, 1)", shape.width, shape.height);
+        shaderSource.replace(position, defaultDeclaration.size(), replacement);
+        return shaderSource;
+    }
 }

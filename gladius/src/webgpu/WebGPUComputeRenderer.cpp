@@ -243,6 +243,7 @@ namespace gladius::webgpu
                     .modelBounds = request.modelBounds,
                     .collectGpuTiming = request.collectGpuTiming,
                     .collectMetrics = request.collectMetrics,
+                    .workgroupShape = request.settings.workgroupShape,
                     .shaderSource = composedShader,
                     .parameterValues = parameters.values,
                     .meshPayloadTable = scene.meshResources.size() > 0u

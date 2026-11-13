@@ -80,6 +80,9 @@ namespace gladius::compute
         /// composed with the metrics module). Off by default; never enable together with
         /// timing measurements because the counters perturb what they measure.
         bool collectMetrics{false};
+        /// Compute workgroup tile shape used for the frame dispatch. The shader source must
+        /// declare the same workgroup size, otherwise the dispatch would not cover the frame.
+        compute::WorkgroupShape workgroupShape{};
         std::string shaderSource;
         std::vector<float> parameterValues;
         /// Mesh payloads indexed by mesh resource id (empty slots = no mesh).

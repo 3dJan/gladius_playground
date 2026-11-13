@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace gladius::compute
@@ -168,6 +169,34 @@ namespace gladius::compute
     };
 
     /**
+     * @brief Compute workgroup tile shape for a frame dispatch.
+     *
+     * WebGPU allows at most 256 invocations per workgroup, so width * height must not
+     * exceed 256. Backends fall back to their own default when this is not set.
+     */
+    struct WorkgroupShape
+    {
+        std::uint32_t width{16u};
+        std::uint32_t height{16u};
+
+        [[nodiscard]] constexpr bool isValid() const noexcept
+        {
+            return width > 0u && height > 0u && width <= 256u && height <= 256u &&
+                   width * height <= 256u;
+        }
+
+        [[nodiscard]] constexpr bool isDefault() const noexcept
+        {
+            return width == 16u && height == 16u;
+        }
+
+        [[nodiscard]] std::string toString() const
+        {
+            return std::to_string(width) + "x" + std::to_string(height);
+        }
+    };
+
+    /**
      * @brief Copy of the rendering values consumed by a single backend dispatch.
      */
     struct RenderSettingsSnapshot
@@ -176,6 +205,8 @@ namespace gladius::compute
         float sliceHeight{};
         std::uint32_t flags{RENDER_FLAG_ENABLE_TRANSLUCENCY};
         RenderMode mode{RenderMode::FullModel};
+        /// Compute workgroup tile shape for frame dispatch; 16x16 keeps the shipped behavior.
+        WorkgroupShape workgroupShape{};
         float quality{1.0f};
         float normalOffset{0.001f};
         float meshEarlyExitDistanceSquared{};
@@ -200,7 +231,8 @@ namespace gladius::compute
 
         [[nodiscard]] bool isValid() const noexcept
         {
-            return std::isfinite(timeSeconds) && std::isfinite(sliceHeight) && std::isfinite(quality) &&
+            return workgroupShape.isValid() && std::isfinite(timeSeconds) && std::isfinite(sliceHeight) &&
+               std::isfinite(quality) &&
                    quality >= 0.0f && std::isfinite(normalOffset) && normalOffset > 0.0f &&
                    std::isfinite(meshEarlyExitDistanceSquared) && meshEarlyExitDistanceSquared >= 0.0f &&
                    std::isfinite(meshInflationDistance) && std::isfinite(meshFwnBeta) && meshFwnBeta > 0.0f &&

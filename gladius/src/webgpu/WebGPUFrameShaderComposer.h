@@ -1,5 +1,7 @@
 #pragma once
 
+#include "compute/RenderContracts.h"
+
 #include <string>
 #include <string_view>
 
@@ -37,5 +39,14 @@ namespace gladius::webgpu
                                                                     bool includeBeam,
                                                                     bool includeImage,
                                                                     std::string_view translucencyEvaluator = {});
+
+        /**
+         * @brief Rewrites the frame shader's workgroup tile shape.
+         *
+         * The dispatch policy must use the same shape, otherwise the dispatch would not cover
+         * the whole frame. Returns the source unchanged for the shipped 16x16 default.
+         */
+        [[nodiscard]] static std::string applyWorkgroupShape(std::string shaderSource,
+                                                             compute::WorkgroupShape const shape);
     };
 }

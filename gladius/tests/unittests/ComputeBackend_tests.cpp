@@ -6,6 +6,7 @@
 #include "compute/RenderBackendSession.h"
 #include "Document.h"
 #include "webgpu/WebGPUDispatchPolicy.h"
+#include "webgpu/WebGPUFrameShaderComposer.h"
 #include "webgpu/WebGPUShaderAbi.h"
 
 #include "ConfigManager.h"
@@ -278,6 +279,68 @@ namespace gladius::compute::tests
     {
         EXPECT_FALSE(webgpu::calculateSliceDispatchSize(0u, 16u).has_value());
         EXPECT_FALSE(webgpu::calculateSliceDispatchSize(16u, 0u).has_value());
+    }
+
+    TEST(WebGPUDispatchPolicy, CalculateSliceDispatchSize_WithWideWorkgroup_RoundsUpPerShape)
+    {
+        auto const dispatchSize = webgpu::calculateSliceDispatchSize(
+          17u, 33u, compute::WorkgroupShape{.width = 32u, .height = 8u});
+
+        ASSERT_TRUE(dispatchSize.has_value());
+        EXPECT_EQ(dispatchSize->workgroupsX, 1u);
+        EXPECT_EQ(dispatchSize->workgroupsY, 5u);
+        EXPECT_EQ(dispatchSize->outputSizeBytes, 17u * 33u * sizeof(std::uint32_t));
+    }
+
+    TEST(WebGPUDispatchPolicy, CalculateSliceDispatchSize_WithInvalidWorkgroup_ReturnsEmpty)
+    {
+        EXPECT_FALSE(webgpu::calculateSliceDispatchSize(
+                       16u, 16u, compute::WorkgroupShape{.width = 0u, .height = 16u})
+                       .has_value());
+        EXPECT_FALSE(webgpu::calculateSliceDispatchSize(
+                       16u, 16u, compute::WorkgroupShape{.width = 16u, .height = 17u})
+                       .has_value());
+    }
+
+    TEST(WebGPUWorkgroupShape, IsValid_TileWithinInvocationLimit)
+    {
+        EXPECT_TRUE(compute::WorkgroupShape{}.isValid());
+        EXPECT_TRUE(compute::WorkgroupShape{}.isDefault());
+        EXPECT_TRUE((compute::WorkgroupShape{.width = 8u, .height = 32u}).isValid());
+        EXPECT_FALSE((compute::WorkgroupShape{.width = 16u, .height = 17u}).isValid());
+        EXPECT_FALSE((compute::WorkgroupShape{.width = 257u, .height = 1u}).isValid());
+    }
+
+    TEST(WebGPUFrameShaderComposer, ApplyWorkgroupShape_DefaultKeepsShaderUnchanged)
+    {
+        auto const composed = webgpu::WebGPUFrameShaderComposer::compose(
+          "fn evaluateModel(position: vec3<f32>) -> vec4<f32> { return vec4<f32>(vec3<f32>(1.0), 0.0); }");
+        EXPECT_EQ(webgpu::WebGPUFrameShaderComposer::applyWorkgroupShape(composed, {}), composed);
+    }
+
+    TEST(WebGPUFrameShaderComposer, ApplyWorkgroupShape_NonDefault_RewritesDeclaration)
+    {
+        auto const composed = webgpu::WebGPUFrameShaderComposer::compose(
+          "fn evaluateModel(position: vec3<f32>) -> vec4<f32> { return vec4<f32>(vec3<f32>(1.0), 0.0); }");
+        auto const rewritten = webgpu::WebGPUFrameShaderComposer::applyWorkgroupShape(
+          composed, compute::WorkgroupShape{.width = 8u, .height = 32u});
+
+        EXPECT_NE(rewritten, composed);
+        EXPECT_NE(rewritten.find("@workgroup_size(8, 32, 1)"), std::string::npos);
+        EXPECT_EQ(rewritten.find("@workgroup_size(16, 16, 1)"), std::string::npos);
+    }
+
+    TEST(WebGPUFrameShaderComposer, ApplyWorkgroupShape_InvalidShape_ThrowsException)
+    {
+        EXPECT_THROW(
+          [&]()
+          {
+              auto const rewritten = webgpu::WebGPUFrameShaderComposer::applyWorkgroupShape(
+                "@compute @workgroup_size(16, 16, 1)",
+                compute::WorkgroupShape{.width = 16u, .height = 17u});
+              static_cast<void>(rewritten);
+          }(),
+          std::invalid_argument);
     }
 
 #if defined(GLADIUS_ENABLE_WEBGPU)

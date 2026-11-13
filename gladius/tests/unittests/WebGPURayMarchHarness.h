@@ -17,6 +17,7 @@
 #include "webgpu/WebGPUBoundsService.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -26,10 +27,49 @@
 
 namespace gladius::tests::bench
 {
+    /**
+     * @brief Workgroup tile shape requested through GLADIUS_BENCH_WORKGROUP ("8x32").
+     *
+     * Returns the shipped 16x16 default when the variable is unset or malformed, so
+     * baselines and reference captures stay unaffected.
+     */
+    [[nodiscard]] inline compute::WorkgroupShape workgroupShapeFromEnvironment()
+    {
+        auto const * value = std::getenv("GLADIUS_BENCH_WORKGROUP");
+        if (value == nullptr)
+        {
+            return {};
+        }
+
+        std::string const text{value};
+        auto const separator = text.find('x');
+        if (separator == std::string::npos || separator == 0u || separator + 1u >= text.size())
+        {
+            return {};
+        }
+
+        try
+        {
+            compute::WorkgroupShape shape{
+              .width = static_cast<std::uint32_t>(std::stoul(text.substr(0u, separator))),
+              .height = static_cast<std::uint32_t>(std::stoul(text.substr(separator + 1u)))};
+            if (!shape.isValid())
+            {
+                return {};
+            }
+            return shape;
+        }
+        catch (std::exception const &)
+        {
+            return {};
+        }
+    }
+
     /// @brief High-quality settings matching the application's neutral render path.
     inline compute::RenderSettingsSnapshot createHqSettings()
     {
         return {.flags = RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM | RF_ENABLE_TRANSLUCENCY,
+                .workgroupShape = workgroupShapeFromEnvironment(),
                 .normalOffset = 0.0001f,
                 .maxRaySteps = 2000u,
                 .maxTravelDistance = 100000.0f};
