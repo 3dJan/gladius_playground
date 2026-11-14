@@ -1,4 +1,4 @@
-# WebGPU Ray-March Performance — Running Findings
+c# WebGPU Ray-March Performance — Running Findings
 
 Working notes for spec 031. Committed results live in [results.md](./results.md); this file
 tracks the measurements, cost model, and potentials discovered along the way.
@@ -88,8 +88,9 @@ empty space above/around the model) the potential is much larger.
   quality-knob todo will wire `.z` as the LQ axis (e.g. fewer refinement taps, larger omega).
 - refinementTaps ≈ 42% of march steps: an LQ knob that reduces the 6-tap refinement to 3–4 taps
   is a cheap, high-leverage LQ win (HQ must keep 6 taps).
-- E5 distance-init buffer: initialize each ray's first step distance from a coarse distance
-  field instead of 0, cutting early march steps.
+- ~~E5 distance-init buffer~~: rejected — a dedicated low-res prepass costs more than the
+  ~2-8% march steps it saves (wall +5..+50%, geomean 0.846x on the LQ path). Reuse a
+  *free* previous-frame depth field instead (E8 temporal reprojection).
 - E7 tile culling: build on E2's `ray_misses_bounds()` at tile granularity — biggest potential for
   background-heavy views.
 - E8 adaptive resolution + temporal reprojection: LQ-only, largest theoretical speedups but needs

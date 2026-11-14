@@ -199,15 +199,7 @@ namespace gladius::tests::quality
     /// @brief Low-quality settings used by the LQ recognizability gate.
     [[nodiscard]] inline compute::RenderSettingsSnapshot createLqSettings()
     {
-        auto settings = bench::createHqSettings();
-        settings.flags |= RF_FAST_SHADOW | RF_FAST_AO;
-        settings.maxRaySteps = 300u;
-        settings.normalOffset = 0.0005f;
-        settings.quality = 0.5f;
-        settings.translucencyInteriorStepSize = 4.0f;
-        settings.translucencyMaxInteriorSteps = 512u;
-        settings.translucencyMaxSurfaces = 2u;
-        return settings;
+        return bench::createLqSettings();
     }
 
     /// @brief Renders one frame into a qa::Image.

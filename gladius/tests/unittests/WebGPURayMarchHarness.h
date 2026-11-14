@@ -98,6 +98,23 @@ namespace gladius::tests::bench
                 .maxTravelDistance = 100000.0f};
     }
 
+    /// @brief Low-quality settings matching the LQ gate (preview-like path).
+    ///
+    /// Preview-path accelerators are allowed to change LQ output, so experiments
+    /// targeting the fast path must be measured here rather than on the HQ path.
+    inline compute::RenderSettingsSnapshot createLqSettings()
+    {
+        auto settings = createHqSettings();
+        settings.flags |= RF_FAST_SHADOW | RF_FAST_AO;
+        settings.maxRaySteps = 300u;
+        settings.normalOffset = 0.0005f;
+        settings.quality = 0.5f;
+        settings.translucencyInteriorStepSize = 4.0f;
+        settings.translucencyMaxInteriorSteps = 512u;
+        settings.translucencyMaxSurfaces = 2u;
+        return settings;
+    }
+
     /// @brief A model materialized through the authoritative application render path.
     class BenchScene
     {

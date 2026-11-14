@@ -183,6 +183,11 @@ namespace gladius::tests
                                .iterations = config.iterations};
 
             // Timing pass: counters stay off so they cannot perturb what they measure.
+            // GLADIUS_BENCH_LQ=1 measures the preview/LQ path instead of HQ, for
+            // accelerators that may only change preview/LQ output.
+            auto const * lqBench = std::getenv("GLADIUS_BENCH_LQ");
+            auto const benchSettings = lqBench != nullptr ? bench::createLqSettings()
+                                                          : bench::createHqSettings();
             std::vector<double> wallDurationsMs;
             std::vector<double> workDoneMs;
             std::vector<double> gpuDurationsMs;
@@ -193,7 +198,7 @@ namespace gladius::tests
             {
                 auto const start = std::chrono::steady_clock::now();
                 auto frame = scene->renderFrame(config.resolution, config.resolution,
-                                                bench::createHqSettings(), true, false);
+                                                benchSettings, true, false);
                 auto const elapsedMs = std::chrono::duration<double, std::milli>(
                                          std::chrono::steady_clock::now() - start)
                                          .count();
@@ -231,7 +236,7 @@ namespace gladius::tests
 
             // Counter pass: one instrumented frame reports the ray-march work for this resolution.
             auto frame = scene->renderFrame(config.resolution, config.resolution,
-                                            bench::createHqSettings(), false, true);
+                                            benchSettings, false, true);
             ASSERT_EQ(frame.pixels.size(),
                       static_cast<std::size_t>(config.resolution) * config.resolution);
             auto const metrics = scene->getLastMetrics();

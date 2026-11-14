@@ -160,3 +160,32 @@ models failing, so the mesh SDF path cannot be safely bounded with 7-point sampl
 Decision: **rejected** — violates both decision rules (no speed gain, HQ parity broken).
 All E4 code reverted; the idea remains documented in findings.md as a potential for
 implicit-only scenes if a provably-safe bound is ever found.
+
+## E5 — Distance-init buffer (rejected)
+
+Mechanism tried: `RF_DISTANCE_INIT` (bit 8, ABI mirror `256u`) + `RF_DISTANCE_INIT_WRITE`
+(bit 9, `512u`). A low-res prepass (res/4, HQ camera framing) marches each ray from 0 and
+stores the first-hit distance into a storage buffer (binding 11, always bound); the main
+pass samples it (MIN of the 4 nearest texels, conservative) and starts the march at
+`init_distance * 0.9` — the same 0.9 safety margin the OpenCL kernel uses
+(`rendering.cl:185-215`, `AM_USE_DISTANCE_INIT`). First-sample validation reverts to a
+march-from-0 fallback when the jump lands inside solid geometry.
+
+HQ stays bit-exact by design: distance-init is masked out of HQ settings (only preview/LQ
+may use it, mirroring OpenCL where only the preview pass sets `AM_USE_DISTANCE_INIT`).
+HQ parity with flags `300`: 12/12 bit-exact, PASS.
+
+LQ gate with E5 on: RadialRadiator fails the histogram-overlap criterion (0.916 @256,
+0.949 @512 vs ≥0.95) — the quarter-res init field shifts shading on thin radial fins.
+IoU/SSIM/color-error criteria pass.
+
+Performance (LQ bench mode `GLADIUS_BENCH_LQ=1`, median of 3 alternating runs):
+steps −8.0..−8.6% on RadialRadiator, −1.9..−2.2% on lampbase, ~0% on the procedural
+gyroids (their rays already converge quickly); **wall +5..+50% everywhere** — geomean
+0.846x (a slowdown). The extra prepass submission costs more than the steps it saves,
+the same failure mode as E4. On the HQ path the effect is noise-level (geomean 1.02x).
+
+Decision: **rejected** — net slowdown on the path it targets, and it degrades the LQ
+recognizability gate on mesh-heavy models. All E5 code reverted. The idea stays viable
+only if the init field comes from a *free* source (e.g. the previous frame's depth at the
+same camera — see temporal reprojection in E8) rather than a dedicated prepass.
