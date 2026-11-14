@@ -74,6 +74,23 @@ mostly hit nothing.
 - **Kept flag-gated, default off** (E2 precedent): no corpus win to justify a default flip, and browser
   WASM validation is required before defaulting. Strongest measured accelerator for background-heavy views.
 
+### E8 — half-resolution march (rejected)
+- Flag bit 9 `RF_HALF_RESOLUTION` (ABI `512u`). Non-sample invocations return early; the sample
+  invocation marches one ray and replicates its colour into the block via `write_pixel()`, so the
+  output buffer, ABI, layout and pipeline key are unchanged and the frame stays full resolution.
+- **2x2 blocks**: rays and steps exactly 0.25x, wall geomean **1.295x** (256px 1.5–2.1x, 512px
+  1.04–1.15x, 1024px 1.01–1.11x). The win is concentrated where the GPU march pass dominates
+  (256px); at 512/1024px CPU + readback dominate and the gain shrinks to ~1.0–1.15x.
+- **Quality is the blocker, not speed.** Mask IoU stays ≥ 0.965 everywhere (silhouettes survive),
+  but SSIM collapses on thin-feature scenes: RadialRadiator 0.671/0.765, lampbase@256 0.892,
+  histogram overlap 0.817/0.898/0.948 — all below the LQ gate (SSIM ≥ 0.90, overlap ≥ 0.95).
+- **Re-scoped to 2x1 blocks** (horizontal replication only, rays 0.5x): recovers gyroid/sphere/webcam
+  (SSIM 0.916–0.924, overlap ≥ 0.994) but still fails RadialRadiator (0.703/0.809) and lampbase@256
+  (0.896). Halving the quantization also halves the speed win, so the ceiling drops. Reverted.
+- **Lesson**: pixel-count reduction is only viable when the *shaded detail*, not just the mask,
+  survives quantization. Scenes with sub-pixel features (thin fins, relief) are the binding
+  constraint. A future resolution knob must be per-scene or use a lower tier the gate does not cover.
+
 ## E4 — macrocell grid prepass (rejected)
 
 Design decisions made during investigation:
@@ -112,6 +129,9 @@ empty space above/around the model) the potential is much larger.
 - ~~E5 distance-init buffer~~: rejected — a dedicated low-res prepass costs more than the
   ~2-8% march steps it saves (wall +5..+50%, geomean 0.846x on the LQ path). Reuse a
   *free* previous-frame depth field instead (E8 temporal reprojection).
+- ~~E8 half-resolution march~~: rejected — see E8 above. Ray-count reduction is real (0.25x →
+  1.295x wall) but the shaded detail of thin-feature scenes falls below the LQ gate. Temporal
+  reprojection from a previous frame remains unexplored and would need the same gate.
 - ~~E6 per-subexpression bounding volumes~~: rejected — see E6 post-mortem below. Tile-level
   culling with the existing uniform bounds (E7) is the viable form of the same idea.
 - ~~E7 tile culling~~: implemented (flag-gated, default off) — see E7 above. ~8.3x on background-heavy

@@ -292,3 +292,60 @@ requires browser WASM validation before defaulting E7. The mechanism is bit-exac
 cheap when it does not fire, and it is the strongest measured accelerator for
 background-heavy views (~8.3x), so it is retained for Phase 3 integration where the app
 camera — not the harness camera — is the workload.
+
+## E8 — Half-resolution march with pixel replication
+
+Mechanism (as implemented, then re-scoped): flag `RF_HALF_RESOLUTION` (bit 9, kernel
+`types.h`, ABI mirror `512u`). Non-sample invocations return without writing; the sample
+invocation marches one ray and replicates its shaded colour into the whole block of the
+**full-size** output buffer via `write_pixel()`. No new bindings, no ABI/layout/pipeline-key
+change, and the reported frame geometry stays the requested resolution.
+
+Two forms were tried:
+
+1. **2x2 blocks** (sample = even x AND even y, sample offset `(0.5, 0.5)`): rays and steps
+   exactly 0.25x.
+2. **2x1 blocks** (sample = even x only, horizontal replication, offset `(0.5, 0)`): rays
+   exactly 0.5x, vertical detail preserved. Added after the 2x2 form failed the gate.
+
+Validation (both forms): `WebGPUShaderAbi.HalfResolutionFlag_MirrorsKernelAndShader`,
+`SubmitFrame_WithHalfResolutionFlag_ReplicatesTwoBy{Two,One}Blocks` (uniform blocks, ray
+count, odd-dimension clamp), and the bench ray-count expectation. HQ parity is bit-exact
+with the flag off; the full WebGPU suite passes.
+
+Measured speed (2x2 form, LQ path, median-of-2 alternating A/B):
+
+- Rays and steps exactly 0.25x on every sample; GPU-pass ratios 1.04–2.63.
+- Wall geomean **1.295x faster**: 256px 1.5–2.1x, 512px 1.04–1.15x, 1024px 1.01–1.11x.
+  The gain is concentrated at 256px, where the GPU march pass dominates; at 512/1024px the
+  CPU/readback side dominates and the win shrinks.
+
+Measured quality (LQ gate against the HQ references; mask IoU stays ≥ 0.965 everywhere, so
+silhouettes survive — the failures are texture/shading detail):
+
+| scene | form | SSIM | masked color error | histogram overlap |
+| --- | --- | --- | --- | --- |
+| RadialRadiator @256 | 2x2 | 0.671 | 37.9 | 0.817 |
+| RadialRadiator @512 | 2x2 | 0.765 | 28.5 | 0.898 |
+| lampbase @256 | 2x2 | 0.892 | — | 0.948 |
+| RadialRadiator @256 | 2x1 | 0.703 | 34.95 | 0.858 |
+| RadialRadiator @512 | 2x1 | 0.809 | 24.06 | 0.922 |
+| lampbase @256 | 2x1 | 0.896 | 3.52 | 0.955 |
+| lampbase @512 | 2x1 | 0.915 | 2.82 | 0.962 |
+| gyroid/sphere/webcam @256/@512 | 2x1 | 0.916–0.924 | ≤ 2.1 | ≥ 0.994 |
+
+Baseline (flag off) for comparison: RadialRadiator SSIM 0.995/0.994, histogram 0.961/0.972;
+lampbase SSIM 0.996, histogram 0.965.
+
+Decision: **rejected**. Both forms fail the LQ recognizability gate (SSIM ≥ 0.90, histogram
+overlap ≥ 0.95) on `RadialRadiator.3mf` at both resolutions and on `lampbase.3mf` @256. The
+horizontal quantization destroys the thin radial fins and the lamp's fine relief: the mask is
+still correct, but the model is no longer recognizable as its own geometry. Halving the
+replication to 2x1 recovers most scenes but not the two thin-feature scenes, and it also
+halves the ray saving (0.5x instead of 0.25x), so the speed ceiling drops. All experiment
+files were reverted (`git checkout --`), matching the E5 precedent.
+
+Note on measurement hygiene: the stored baseline sample `webcam_003.3mf@1024` (8.80 ms wall /
+7.93 ms GPU) now measures 11.5–12.0 ms wall / 9.3–9.6 ms GPU on a HEAD control build with
+identical counters (65,167,211 steps). That is machine drift plus a stale baseline, not a
+regression — confirm with a control build before attributing a per-sample FAIL.
