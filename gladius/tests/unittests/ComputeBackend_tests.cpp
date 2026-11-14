@@ -382,6 +382,21 @@ namespace gladius::compute::tests
         EXPECT_NE(source.find("frame.vertical_scale_and_max_steps.z"), std::string::npos);
     }
 
+    TEST(WebGPUShaderAbi, FastShadingFlags_MirrorKernelAndShader)
+    {
+        EXPECT_EQ(webgpu::RF_FAST_SHADOW, RF_FAST_SHADOW);
+        EXPECT_EQ(webgpu::RF_FAST_SHADOW, 64u);
+        EXPECT_EQ(webgpu::RF_FAST_AO, RF_FAST_AO);
+        EXPECT_EQ(webgpu::RF_FAST_AO, 128u);
+
+        auto const source = loadFrameShaderSource();
+        ASSERT_FALSE(source.empty());
+        EXPECT_NE(source.find("const RF_FAST_SHADOW: u32 = 64u;"), std::string::npos);
+        EXPECT_NE(source.find("const RF_FAST_AO: u32 = 128u;"), std::string::npos);
+        EXPECT_NE(source.find("RF_FAST_SHADOW) != 0u"), std::string::npos);
+        EXPECT_NE(source.find("RF_FAST_AO) != 0u"), std::string::npos);
+    }
+
 #if defined(GLADIUS_ENABLE_WEBGPU)
     TEST(WebGPUComputeBackend, SubmitSlice_WithHeadlessDevice_ReturnsReadbackPixels)
     {

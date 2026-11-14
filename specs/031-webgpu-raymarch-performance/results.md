@@ -93,3 +93,40 @@ Decision: keep the flag-gated mechanism (default off) as infrastructure for LQ/p
 paths where the camera can be outside content; do not adopt it as an HQ default. A
 tile-level variant (E4/E7 macrocell culling) is the more promising form of the same
 idea because it amortizes the AABB test per tile instead of per ray.
+
+## E3 — Fast shadow / ambient-occlusion shading (LQ-only)
+
+Mechanism: two new flag bits reduce the per-hit shading cost in `frame_compute.wgsl`.
+
+- `RF_FAST_SHADOW` (bit 6, kernel `types.h`, ABI mirror `64u`): `calc_soft_shadow()`
+  marches 10 taps instead of 32, clamps step size to 1.5..3.0 instead of 0.5..1.0, and
+  exits early at shadow value < 0.02 instead of < 0.005.
+- `RF_FAST_AO` (bit 7, ABI mirror `128u`): `calc_ambient_occlusion()` samples 4 taps
+  instead of 8, spacing 0.06 instead of 0.03, decay 0.9 instead of 0.95. Metric 6 now
+  records the actual tap count (previously hardcoded `8u`).
+
+Both flags are ORed into `createLqSettings()` in `WebGPUQualityReferences.h`; HQ
+settings never set them, so the HQ path is untouched by default.
+
+Counters (median-of-3 A/B runs, flags 0 vs `c0`, instrumented counter pass):
+
+- `shadowTaps` reduced 58.5-62.9% across all 18 samples (32 taps/ray -> ≤10 taps/ray,
+  early exit cuts most of the remaining taps on lit surfaces).
+- `aoTaps` halved exactly (8 -> 4 taps/hit).
+- March `totalSteps` unchanged (shadow/AO taps are not march steps).
+
+Wall time (median of 3 alternating off/fast corpus runs): geomean −0.8%, worst sample
++6.2% (RadialRadiator@512), no sample beyond the ±10% noise band established in E2.
+GPU-pass timestamps: geomean −2.0%, worst +9.1% (same RadialRadiator@512 sample).
+RadialRadiator and lampbase regress within noise; gyroid/sphere/webcam samples improve
+up to −9.7% GPU.
+
+Quality: HQ parity stays bit-exact (flags off by default). With fast shadow/AO active,
+the LQ gate passes on all 12 frames: worst mask IoU 0.9956, worst SSIM 0.9943, worst
+mean foreground color error 1.63, worst histogram overlap 0.961 — all comfortably above
+the 0.90/0.90/≤12/≥0.95 thresholds.
+
+Decision: keep both flags as LQ/preview knobs (default off for HQ). The measured wall
+benefit is modest and noisy on this GPU, but the tap reduction is exact and the LQ
+quality cost is small; revisit adoption in the combination run (E-combine) where
+multiple LQ knobs stack.

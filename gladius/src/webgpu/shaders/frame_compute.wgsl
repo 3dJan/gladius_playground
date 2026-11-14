@@ -38,6 +38,8 @@ const RF_SHOW_FIELD: u32 = 4u;
 const RF_SHOW_STACK: u32 = 8u;
 const RF_SHOW_COORDINATE_SYSTEM: u32 = 16u;
 const RF_SKIP_BACKGROUND_RAYS: u32 = 32u;
+const RF_FAST_SHADOW: u32 = 64u;
+const RF_FAST_AO: u32 = 128u;
 const RF_DISABLE_ADAPTIVE_OMEGA: u32 = 16384u;
 const RF_DEBUG_METRICS: u32 = 32768u;
 const RF_DISABLE_SHADOWS: u32 = 65536u;
@@ -309,16 +311,22 @@ fn calc_soft_shadow(position: vec3<f32>, direction: vec3<f32>) -> f32 {
         }
     }
 
+    let fast = (frame.flags_mode_reserved.x & RF_FAST_SHADOW) != 0u;
+    let max_taps = select(32u, 10u, fast);
+    let minimum_step = select(0.5f, 1.5f, fast);
+    let maximum_step = select(1.0f, 3.0f, fast);
+    let exit_threshold = select(0.005f, 0.02f, fast);
+
     var result = 20.0f;
     var distance = 0.002f;
     var taps = 0u;
-    for (var step = 0u; step < 32u; step++) {
+    for (var step = 0u; step < max_taps; step++) {
         taps = taps + 1u;
         let sample_position = position + direction * distance;
         let sample_distance = evaluate_surface(sample_position).distance;
         result = min(result, 8.0f * sample_distance / distance);
-        distance = distance + clamp(sample_distance, 0.5f, 1.0f);
-        if (result < 0.005f || distance > maximum_distance) {
+        distance = distance + clamp(sample_distance, minimum_step, maximum_step);
+        if (result < exit_threshold || distance > maximum_distance) {
             break;
         }
     }
@@ -327,15 +335,20 @@ fn calc_soft_shadow(position: vec3<f32>, direction: vec3<f32>) -> f32 {
 }
 
 fn calc_ambient_occlusion(position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let fast = (frame.flags_mode_reserved.x & RF_FAST_AO) != 0u;
+    let tap_count = select(8u, 4u, fast);
+    let tap_spacing = select(0.03f, 0.06f, fast);
+    let decay = select(0.95f, 0.9f, fast);
+
     var occlusion = 0.0f;
     var scale = 1.0f;
-    for (var step = 0u; step < 8u; step++) {
-        let distance = 0.01f + 0.03f * f32(step);
+    for (var step = 0u; step < tap_count; step++) {
+        let distance = 0.01f + tap_spacing * f32(step);
         let sample_distance = evaluate_surface(position + normal * distance).distance;
         occlusion = occlusion - (sample_distance - distance) * scale;
-        scale = scale * 0.95f;
+        scale = scale * decay;
     }
-    recordMetric(6u, 8u);
+    recordMetric(6u, tap_count);
     return clamp(1.0f - 3.0f * occlusion, 0.0f, 1.0f) * (0.5f + 0.5f * normal.y);
 }
 

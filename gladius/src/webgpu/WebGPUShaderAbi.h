@@ -63,4 +63,12 @@ namespace gladius::webgpu
     /// missing the scene bounds. Mirrors RF_SKIP_BACKGROUND_RAYS in src/kernel/types.h
     /// and frame_compute.wgsl.
     inline constexpr std::uint32_t RF_SKIP_BACKGROUND_RAYS = 32u;
+
+    /// FrameUniforms::flagsModeReserved.x bit that coarsens the soft-shadow march.
+    /// Mirrors RF_FAST_SHADOW in src/kernel/types.h and frame_compute.wgsl.
+    inline constexpr std::uint32_t RF_FAST_SHADOW = 64u;
+
+    /// FrameUniforms::flagsModeReserved.x bit that reduces AO to 4 taps.
+    /// Mirrors RF_FAST_AO in src/kernel/types.h and frame_compute.wgsl.
+    inline constexpr std::uint32_t RF_FAST_AO = 128u;
 }
