@@ -302,6 +302,8 @@ namespace gladius::ui
         [[nodiscard]] bool isAsyncBackendActive() const noexcept;
         [[nodiscard]] std::optional<BoundingBox> tryFetchBoundingBox(bool requestAsyncUpdate);
         [[nodiscard]] std::optional<compute::RenderBounds> getNeutralModelBounds() const;
+        /// @brief Upper bound on the error of getNeutralModelBounds(); nullopt when unavailable.
+        [[nodiscard]] std::optional<float> getNeutralBoundsErrorBound() const;
         [[nodiscard]] bool updateCameraCentering();
 
         // Async bounding box computation
@@ -573,6 +575,7 @@ namespace gladius::ui
                                 .verticalScale = 0.5f / static_cast<float>(width) * height},
                     .settings = settings,
                     .modelBounds = modelBounds,
+                    .boundsErrorBound = getNeutralBoundsErrorBound(),
                     .viewport = viewport,
                     .freshness = {.sceneGeneration = task.stamp.sceneEpoch,
                                   .viewGeneration = task.stamp.viewEpoch,
@@ -632,6 +635,7 @@ namespace gladius::ui
         UiFpsBenchmarkStageTimings m_uiFpsBenchmarkStageTimings{};
         std::unique_ptr<compute::IBoundsSubmission> m_neutralBoundsSubmission;
         std::optional<compute::RenderBounds> m_neutralModelBounds;
+        std::optional<float> m_neutralBoundsErrorBound{};
         compute::RenderFreshnessStamp m_neutralBoundsFreshness{};
         bool m_neutralBoundsFailed{false};
         bool m_neutralBackendActive{false};

@@ -324,6 +324,9 @@ namespace gladius::compute
         RenderFrustum frustum{};
         RenderSettingsSnapshot settings{};
         std::optional<RenderBounds> modelBounds{};
+        /// Upper bound on the error of `modelBounds`, propagated to the frame shader so
+        /// conservative optimizations (e.g. background-ray skipping) stay sound.
+        std::optional<float> boundsErrorBound{};
         RenderViewport viewport{};
         RenderFreshnessStamp freshness{};
         /// Ask the backend to report GPU timing for this frame. Backends without support ignore it.

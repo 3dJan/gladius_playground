@@ -65,10 +65,33 @@ namespace gladius::tests::bench
         }
     }
 
+    /// @brief Rendering flags requested through GLADIUS_BENCH_FLAGS (hex bitmask).
+    ///
+    /// Returns zero when the variable is unset or malformed, so baselines and
+    /// reference captures stay unaffected.
+    [[nodiscard]] inline std::uint32_t renderFlagsFromEnvironment()
+    {
+        auto const * value = std::getenv("GLADIUS_BENCH_FLAGS");
+        if (value == nullptr)
+        {
+            return 0u;
+        }
+
+        try
+        {
+            return static_cast<std::uint32_t>(std::stoul(std::string{value}, nullptr, 16));
+        }
+        catch (std::exception const &)
+        {
+            return 0u;
+        }
+    }
+
     /// @brief High-quality settings matching the application's neutral render path.
     inline compute::RenderSettingsSnapshot createHqSettings()
     {
-        return {.flags = RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM | RF_ENABLE_TRANSLUCENCY,
+        return {.flags = RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM | RF_ENABLE_TRANSLUCENCY |
+                         renderFlagsFromEnvironment(),
                 .workgroupShape = workgroupShapeFromEnvironment(),
                 .normalOffset = 0.0001f,
                 .maxRaySteps = 2000u,
@@ -82,11 +105,13 @@ namespace gladius::tests::bench
         BenchScene(std::shared_ptr<webgpu::WebGPUComputeContext> context,
                    std::unique_ptr<Document> document,
                    std::unique_ptr<compute::RenderBackendSession> session,
-                   compute::RenderBounds modelBounds)
+                   compute::RenderBounds modelBounds,
+                   std::optional<float> boundsErrorBound)
             : m_context{std::move(context)}
             , m_document{std::move(document)}
             , m_session{std::move(session)}
             , m_modelBounds{modelBounds}
+            , m_boundsErrorBound{boundsErrorBound}
         {
         }
 
@@ -141,6 +166,7 @@ namespace gladius::tests::bench
                           .verticalScale = 0.5f * static_cast<float>(height) / static_cast<float>(width)},
               .settings = settings,
               .modelBounds = m_modelBounds,
+              .boundsErrorBound = m_boundsErrorBound,
               .viewport = {.width = width,
                            .height = height,
                            .firstRow = 0u,
@@ -181,6 +207,7 @@ namespace gladius::tests::bench
         std::unique_ptr<Document> m_document;
         std::unique_ptr<compute::RenderBackendSession> m_session;
         compute::RenderBounds m_modelBounds;
+        std::optional<float> m_boundsErrorBound{};
         std::optional<compute::FrameTiming> m_lastTiming{};
         std::optional<compute::FrameMetrics> m_lastMetrics{};
     };
@@ -245,6 +272,7 @@ namespace gladius::tests::bench
 
         auto * const boundsService = session->getBoundsService();
         compute::RenderBounds modelBounds{.min = {0.0f, 0.0f, 0.0f}, .max = {400.0f, 400.0f, 400.0f}};
+        std::optional<float> boundsErrorBound{};
         if (boundsService != nullptr && boundsService->isAvailable())
         {
             auto boundsRequest = compute::BoundsRequest{};
@@ -257,11 +285,12 @@ namespace gladius::tests::bench
             if (result.has_value() && result->isUsable())
             {
                 modelBounds = *result->modelBounds;
+                boundsErrorBound = result->errorBound;
             }
         }
 
         return std::make_unique<BenchScene>(std::move(context), std::move(document), std::move(session),
-                                            modelBounds);
+                                            modelBounds, boundsErrorBound);
     }
 }
 

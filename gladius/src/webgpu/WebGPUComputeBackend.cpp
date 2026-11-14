@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -1098,6 +1099,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 {
                     throw std::invalid_argument("WebGPU frame model bounds are invalid");
                 }
+                if (request.boundsErrorBound.has_value() &&
+                    !(std::isfinite(*request.boundsErrorBound) && *request.boundsErrorBound >= 0.0f))
+                {
+                    throw std::invalid_argument("WebGPU frame bounds error bound must be finite and non-negative");
+                }
 
                 auto const framePixelCount = static_cast<std::size_t>(request.width) *
                                               static_cast<std::size_t>(request.height);
@@ -1133,7 +1139,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                   static_cast<float>(request.height)},
                   .verticalScaleAndMaxSteps = {request.verticalScale,
                                                static_cast<float>(request.maxRaySteps),
-                                               0.0f,
+                                               request.boundsErrorBound.value_or(0.0f),
                                                0.0f},
                   .firstRowAndCount = {static_cast<float>(request.firstRow),
                                        static_cast<float>(rowCount),

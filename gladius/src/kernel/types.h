@@ -58,6 +58,7 @@ enum RenderingFlags
     RF_SHOW_FIELD = (1u << 2),
     RF_SHOW_STACK = (1u << 3),
     RF_SHOW_COORDINATE_SYSTEM = (1u << 4),
+    RF_SKIP_BACKGROUND_RAYS = (1u << 5),  // Skip marching for rays provably missing scene bounds
     RF_DISABLE_ADAPTIVE_OMEGA = (1u << 14),  // Disable adaptive ω for A/B testing (SC-002)
     RF_DEBUG_METRICS = (1u << 15),  // Enable debug metrics collection (dev builds)
     RF_DISABLE_SHADOWS = (1u << 16),  // Skip soft-shadow computation (low-res preview)

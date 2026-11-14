@@ -5,6 +5,7 @@
 #include "compute/IComputeBackend.h"
 #include "compute/RenderBackendSession.h"
 #include "Document.h"
+#include "kernel/types.h"
 #include "webgpu/WebGPUDispatchPolicy.h"
 #include "webgpu/WebGPUFrameShaderComposer.h"
 #include "webgpu/WebGPUShaderAbi.h"
@@ -18,11 +19,34 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 #include <gtest/gtest.h>
 
 namespace gladius::compute::tests
 {
+    namespace
+    {
+        /// @brief Read the WebGPU frame shader source from the kernel source tree.
+        std::string loadFrameShaderSource()
+        {
+            std::filesystem::path const path =
+              std::filesystem::path{GLADIUS_KERNEL_SOURCE_DIR}.parent_path() / "webgpu" /
+              "shaders" / "frame_compute.wgsl";
+            std::ifstream file(path);
+            if (!file)
+            {
+                return {};
+            }
+
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            return buffer.str();
+        }
+    }
+
     TEST(ComputeBackend, ToString_WithKnownBackend_ReturnsStableConfigurationValue)
     {
         EXPECT_EQ(toString(ComputeBackendKind::OpenCL), "opencl");
@@ -343,6 +367,21 @@ namespace gladius::compute::tests
           std::invalid_argument);
     }
 
+    TEST(WebGPUShaderAbi, SkipBackgroundRaysFlag_MirrorsKernelAndShader)
+    {
+        EXPECT_EQ(webgpu::RF_SKIP_BACKGROUND_RAYS, RF_SKIP_BACKGROUND_RAYS);
+        EXPECT_EQ(webgpu::RF_SKIP_BACKGROUND_RAYS, 32u);
+
+        auto const source = loadFrameShaderSource();
+        ASSERT_FALSE(source.empty());
+        EXPECT_NE(source.find("const RF_SKIP_BACKGROUND_RAYS: u32 = 32u;"), std::string::npos);
+        EXPECT_NE(source.find("fn background_skip_bounds()"), std::string::npos);
+        EXPECT_NE(source.find("fn ray_misses_bounds("), std::string::npos);
+        EXPECT_NE(source.find("ray_misses_bounds(eye, ray_direction, max_distance)"),
+                  std::string::npos);
+        EXPECT_NE(source.find("frame.vertical_scale_and_max_steps.z"), std::string::npos);
+    }
+
 #if defined(GLADIUS_ENABLE_WEBGPU)
     TEST(WebGPUComputeBackend, SubmitSlice_WithHeadlessDevice_ReturnsReadbackPixels)
     {
@@ -448,6 +487,72 @@ namespace gladius::compute::tests
         EXPECT_GT(metrics->totalSteps, 0u);
         EXPECT_GT(metrics->totalHits, 0u);
         EXPECT_LE(metrics->totalHits, metrics->totalRays);
+    }
+
+    TEST(WebGPUComputeBackend, SubmitFrame_WithBackgroundSkipFlag_MissesBoundsWithoutMarching)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        std::unique_ptr<webgpu::WebGPUComputeBackend> backend;
+        try
+        {
+            backend = std::make_unique<webgpu::WebGPUComputeBackend>();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        auto const run = [&](std::uint32_t const flags)
+          -> std::pair<std::optional<FrameResult>, std::optional<FrameMetrics>>
+        {
+            auto submission = backend->submitFrame(
+              FrameRequest{.width = 33u,
+                           .height = 33u,
+                           .eyePosition = {2000.0f, 2000.0f, 2000.0f},
+                           .maxTravelDistance = 10.0f,
+                           .renderingFlags = flags,
+                           .modelBounds = RenderBounds{.min = {1000.0f, 1000.0f, 1000.0f},
+                                                       .max = {1100.0f, 1100.0f, 1100.0f}},
+                           .boundsErrorBound = 8.0f,
+                           .collectMetrics = true});
+            submission->wait();
+            EXPECT_EQ(submission->getStatus(), ComputeCompletionStatus::Succeeded)
+              << submission->getErrorMessage();
+            auto result = submission->takeResult();
+            EXPECT_TRUE(result.has_value());
+            if (result.has_value())
+            {
+                EXPECT_EQ(result->pixels.size(), 33u * 33u);
+            }
+            auto metrics = submission->getFrameMetrics();
+            EXPECT_TRUE(metrics.has_value());
+            return std::pair{result, metrics};
+        };
+
+        auto const [unskipped, unskippedMetrics] = run(0u);
+        ASSERT_TRUE(unskipped.has_value());
+        ASSERT_TRUE(unskippedMetrics.has_value());
+        for (auto const pixel : unskipped->pixels)
+        {
+            EXPECT_EQ(pixel, 0xFF1A1A1Au);
+        }
+
+        auto const [skipped, skippedMetrics] = run(RF_SKIP_BACKGROUND_RAYS);
+        ASSERT_TRUE(skipped.has_value());
+        ASSERT_TRUE(skippedMetrics.has_value());
+        for (auto const pixel : skipped->pixels)
+        {
+            EXPECT_EQ(pixel, 0xFF1A1A1Au);
+        }
+
+        EXPECT_EQ(skippedMetrics->totalRays, unskippedMetrics->totalRays);
+        EXPECT_GT(unskippedMetrics->totalSteps, 0u);
+        EXPECT_EQ(skippedMetrics->totalSteps, 0u);
+        EXPECT_EQ(skippedMetrics->totalHits, 0u);
     }
 
     TEST(WebGPUComputeBackend, SubmitFrame_WithDesktopViewportPixelCount_IsAccepted)

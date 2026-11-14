@@ -24,12 +24,19 @@ namespace gladius::webgpu
         constexpr std::uint32_t BOUNDS_RESOLUTION = 64u;
         constexpr std::uint32_t BOUNDS_TILE_SIZE = 32u;
 
-        [[nodiscard]] compute::RenderBounds determineBounds(
+        /// @brief Probed model bounds together with the probe's conservative error bound.
+        struct ThumbnailBounds
+        {
+            compute::RenderBounds bounds;
+            std::optional<float> errorBound{};
+        };
+
+        [[nodiscard]] ThumbnailBounds determineBounds(
           compute::RenderBackendSession & session,
           std::uint64_t const sceneGeneration)
         {
-            compute::RenderBounds fallback{.min = {0.0f, 0.0f, 0.0f},
-                                           .max = {400.0f, 400.0f, 400.0f}};
+            ThumbnailBounds fallback{.bounds = {.min = {0.0f, 0.0f, 0.0f},
+                                                .max = {400.0f, 400.0f, 400.0f}}};
             auto * const boundsService = session.getBoundsService();
             if (boundsService == nullptr || !boundsService->isAvailable())
             {
@@ -50,28 +57,28 @@ namespace gladius::webgpu
             auto result = submission->takeResult();
             if (result.has_value() && result->isUsable())
             {
-                return *result->modelBounds;
+                return {.bounds = *result->modelBounds, .errorBound = result->errorBound};
             }
             return fallback;
         }
 
         [[nodiscard]] compute::RenderRequest createRequest(
-          compute::RenderBounds const & bounds,
+          ThumbnailBounds const & bounds,
           std::uint32_t const width,
           std::uint32_t const height,
           std::uint64_t const sceneGeneration,
           std::optional<compute::RenderCamera> camera,
           compute::RenderSettingsSnapshot const & settings)
         {
-            BoundingBox const cameraBounds{{bounds.min[0], bounds.min[1], bounds.min[2], 0.0f},
-                                           {bounds.max[0], bounds.max[1], bounds.max[2], 0.0f}};
+            BoundingBox const cameraBounds{{bounds.bounds.min[0], bounds.bounds.min[1], bounds.bounds.min[2], 0.0f},
+                                           {bounds.bounds.max[0], bounds.bounds.max[1], bounds.bounds.max[2], 0.0f}};
             if (!camera.has_value())
             {
                 ui::OrbitalCamera orbitalCamera;
                 orbitalCamera.setAngle(0.6f, -2.0f);
-                orbitalCamera.setLookAt({(bounds.min[0] + bounds.max[0]) * 0.5f,
-                                         (bounds.min[1] + bounds.max[1]) * 0.5f,
-                                         (bounds.min[2] + bounds.max[2]) * 0.5f});
+                orbitalCamera.setLookAt({(bounds.bounds.min[0] + bounds.bounds.max[0]) * 0.5f,
+                                         (bounds.bounds.min[1] + bounds.bounds.max[1]) * 0.5f,
+                                         (bounds.bounds.min[2] + bounds.bounds.max[2]) * 0.5f});
                 orbitalCamera.snapToTarget();
                 orbitalCamera.adjustDistanceToTarget(cameraBounds,
                                                      static_cast<float>(width),
@@ -92,7 +99,8 @@ namespace gladius::webgpu
                                 .verticalScale = 0.5f * static_cast<float>(height) /
                                                  static_cast<float>(width)},
                     .settings = settings,
-                    .modelBounds = bounds,
+                    .modelBounds = bounds.bounds,
+                    .boundsErrorBound = bounds.errorBound,
                     .viewport = {.width = width,
                                  .height = height,
                                  .firstRow = 0u,
@@ -256,7 +264,7 @@ namespace gladius::webgpu
             scene = renderer.materializeScene(std::move(sceneSnapshot));
         }
 
-        auto const request = createRequest(modelBounds,
+        auto const request = createRequest(ThumbnailBounds{.bounds = modelBounds},
                                            width,
                                            height,
                                            sceneGeneration,

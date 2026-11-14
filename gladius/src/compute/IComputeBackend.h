@@ -73,6 +73,9 @@ namespace gladius::compute
         /// Surfaces shaded per ray while translucency is active; zero selects the shader default.
         std::uint32_t translucencyMaxSurfaces{};
         std::optional<RenderBounds> modelBounds{};
+        /// Upper bound on the error of `modelBounds`; consumed by conservative
+        /// frame-shader optimizations such as background-ray skipping.
+        std::optional<float> boundsErrorBound{};
         /// Request per-submission GPU timing (queue work-done and, where supported,
         /// timestamp queries). Off by default; benchmark harnesses enable it.
         bool collectGpuTiming{false};

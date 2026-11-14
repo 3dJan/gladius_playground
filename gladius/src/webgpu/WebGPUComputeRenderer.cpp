@@ -241,6 +241,7 @@ namespace gladius::webgpu
                                            request.settings.translucencyFloor},
                     .translucencyMaxSurfaces = translucencyActive ? request.settings.translucencyMaxSurfaces : 0u,
                     .modelBounds = request.modelBounds,
+                    .boundsErrorBound = request.boundsErrorBound,
                     .collectGpuTiming = request.collectGpuTiming,
                     .collectMetrics = request.collectMetrics,
                     .workgroupShape = request.settings.workgroupShape,

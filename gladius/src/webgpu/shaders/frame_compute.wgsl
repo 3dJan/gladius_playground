@@ -37,6 +37,7 @@ const RF_CUT_OFF_OBJECT: u32 = 2u;
 const RF_SHOW_FIELD: u32 = 4u;
 const RF_SHOW_STACK: u32 = 8u;
 const RF_SHOW_COORDINATE_SYSTEM: u32 = 16u;
+const RF_SKIP_BACKGROUND_RAYS: u32 = 32u;
 const RF_DISABLE_ADAPTIVE_OMEGA: u32 = 16384u;
 const RF_DEBUG_METRICS: u32 = 32768u;
 const RF_DISABLE_SHADOWS: u32 = 65536u;
@@ -149,6 +150,75 @@ fn stack_overlay(position: vec3<f32>, slice_height: f32) -> f32 {
     let stack_distance = bounding_box_distance(
       vec3<f32>(position.x, position.y, stack_position), minimum, maximum);
     return max(clipping_box_distance(position, slice_height), stack_distance);
+}
+
+struct SkipBounds {
+    min: vec3<f32>,
+    max: vec3<f32>,
+};
+
+/// AABB containing every surface evaluate_surface() can report: the model bounds
+/// (expanded, since numerical probe bounds are not conservative), the time-slice
+/// field and stack overlays, and the build plate plus coordinate axes, which exist
+/// independently of the model bounds.
+fn background_skip_bounds() -> SkipBounds {
+    let slice_height = frame.time_slice_quality_normal.y;
+    let helper_min = vec3<f32>(-2.0, -2.0, -22.0);
+    let helper_max = vec3<f32>(402.0, 402.0, 402.0);
+    let minimum = vec3<f32>(min(frame.clipping_box_min.x, helper_min.x),
+                            min(frame.clipping_box_min.y, helper_min.y),
+                            min(min(frame.clipping_box_min.z, slice_height - 1.0), helper_min.z));
+    let maximum = vec3<f32>(max(frame.clipping_box_max.x, helper_max.x),
+                            max(frame.clipping_box_max.y, helper_max.y),
+                            max(max(frame.clipping_box_max.z, slice_height), helper_max.z));
+    let margin = max(vec3<f32>(frame.vertical_scale_and_max_steps.z), vec3<f32>(1.0));
+    return SkipBounds(minimum - margin, maximum + margin);
+}
+
+/// True when the segment origin..origin + direction * max_distance provably stays
+/// outside the skip bounds, so no surface can be reached along this ray.
+fn ray_misses_bounds(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> bool {
+    let bounds = background_skip_bounds();
+    var t_min = 0.0;
+    var t_max = max_distance;
+
+    if (direction.x == 0.0) {
+        if (origin.x < bounds.min.x || origin.x > bounds.max.x) {
+            return true;
+        }
+    } else {
+        let inv = 1.0 / direction.x;
+        let t0 = (bounds.min.x - origin.x) * inv;
+        let t1 = (bounds.max.x - origin.x) * inv;
+        t_min = max(t_min, min(t0, t1));
+        t_max = min(t_max, max(t0, t1));
+    }
+
+    if (direction.y == 0.0) {
+        if (origin.y < bounds.min.y || origin.y > bounds.max.y) {
+            return true;
+        }
+    } else {
+        let inv = 1.0 / direction.y;
+        let t0 = (bounds.min.y - origin.y) * inv;
+        let t1 = (bounds.max.y - origin.y) * inv;
+        t_min = max(t_min, min(t0, t1));
+        t_max = min(t_max, max(t0, t1));
+    }
+
+    if (direction.z == 0.0) {
+        if (origin.z < bounds.min.z || origin.z > bounds.max.z) {
+            return true;
+        }
+    } else {
+        let inv = 1.0 / direction.z;
+        let t0 = (bounds.min.z - origin.z) * inv;
+        let t1 = (bounds.max.z - origin.z) * inv;
+        t_min = max(t_min, min(t0, t1));
+        t_max = min(t_max, max(t0, t1));
+    }
+
+    return t_min > t_max;
 }
 
 fn evaluate_surface(position: vec3<f32>) -> SceneSample {
@@ -567,6 +637,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pixel_index = global_id.y * width + global_id.x;
     let background = vec3<f32>(0.1f);
     recordMetric(0u, 1u);
+
+    // Rays that provably stay outside the scene AABB cannot hit anything: both the
+    // plain and the translucent miss path end on the plain background colour.
+    if ((frame.flags_mode_reserved.x & RF_SKIP_BACKGROUND_RAYS) != 0u && has_model_bounds() &&
+        ray_misses_bounds(eye, ray_direction, max_distance)) {
+        output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
+        return;
+    }
 
     if (!translucency_enabled()) {
         let march = march_surface(eye, ray_direction, 0.0f, max_distance);

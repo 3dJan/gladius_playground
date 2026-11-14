@@ -51,3 +51,45 @@ Decision: `1x256` is the strongest single change (-12.3% median, no sample regre
 `2x128` and `4x64` are close secondaries and may interact differently with later
 experiments (E4/E7 tile culling prefers square-ish tiles), so E1 stays flag-selectable
 and the default is re-evaluated after the combination run.
+
+## E2 - Background-ray AABB skip
+
+Mechanism: flag `RF_SKIP_BACKGROUND_RAYS` (bit 5). Before marching, a ray is tested
+against a conservative skip box built in WGSL from the clipping box (model bounds), the
+slice-height z range, the helper platform/axis box `(-2,-2,-22)-(402,402,402)`, and a
+margin of `max(boundsErrorBound, 1.0)`. The error bound travels through
+`RenderRequest::boundsErrorBound` -> `FrameRequest::boundsErrorBound` and is packed into
+the previously unused `FrameUniforms::verticalScaleAndMaxSteps.z`. Rays proven to miss
+the box write the background color directly and never march. Bench selection:
+`GLADIUS_BENCH_FLAGS=<hex>`.
+
+Validation: HQ parity is bit-exact (PSNR inf, SSIM 1, max channel diff 0) on all 12
+reference frames with the flag on; the LQ gate passes unchanged. A headless behavior
+test asserts a camera far outside the bounds marches zero steps (`totalSteps == 0`)
+while the unflagged path marches, with identical background pixels.
+
+Measured effect (full corpus A/B, flag off vs on):
+
+- Steps reduced by only ~0.03-0.05% (e.g. webcam_003@1024: 65167211 -> 65146711 steps,
+  hits identical). The skip almost never fires in the neutral HQ path.
+- Wall-time deltas are dominated by run-to-run noise: three repeat flag-off runs of
+  webcam_003@1024 spanned 8.7-12.2 ms median (the 8.7 ms value is the original A/B
+  "off" run), so the +11.9% flagged by `bench_compare.py` on that sample is noise,
+  not a real regression. Alternating off/on runs of SimpleGyroid@512 (3 pairs) show
+  overlapping ranges (off 5.58-5.79 ms, on 5.63-5.75 ms), confirming the apparent
+  +14% regression on that sample is noise too. GPU-pass deltas are within noise.
+
+Findings:
+
+- The skip box must cover everything `march_surface()` can hit: model bounds, plate,
+  coordinate axes, field/stack overlays, plus the bounds-service error bound (harness
+  probe 64^3 gives errorBound ~32.5, so the box spans ~ -34.5..434.5). The harness
+  camera is framed tightly around the model with `maxTravelDistance` 100000, so nearly
+  every ray enters the box and the AABB test is pure overhead for marching rays.
+- The mechanism is correct and safe (bit-exact background, zero steps for far cameras)
+  but gives negligible benefit on the neutral HQ path as designed.
+
+Decision: keep the flag-gated mechanism (default off) as infrastructure for LQ/preview
+paths where the camera can be outside content; do not adopt it as an HQ default. A
+tile-level variant (E4/E7 macrocell culling) is the more promising form of the same
+idea because it amortizes the AABB test per tile instead of per ray.

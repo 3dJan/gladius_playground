@@ -329,6 +329,7 @@ namespace gladius::ui
             m_neutralBoundsSubmission.reset();
         }
         m_neutralModelBounds.reset();
+        m_neutralBoundsErrorBound.reset();
         m_neutralBoundsFreshness = {};
         m_neutralBoundsFailed = false;
         m_neutralSliceHeightInitialized = false;
@@ -358,6 +359,7 @@ namespace gladius::ui
             m_neutralBoundsSubmission->requestCancellation();
         }
         m_neutralModelBounds.reset();
+        m_neutralBoundsErrorBound.reset();
         m_neutralBoundsFreshness = {};
         m_neutralBoundsFailed = false;
         m_neutralSliceHeightInitialized = false;
@@ -394,6 +396,7 @@ namespace gladius::ui
             }
             m_neutralBoundsFreshness = freshness;
             m_neutralModelBounds.reset();
+            m_neutralBoundsErrorBound.reset();
             m_neutralBoundsFailed = false;
         }
 
@@ -419,6 +422,7 @@ namespace gladius::ui
                 result->isUsable())
             {
                 m_neutralModelBounds = result->modelBounds;
+                m_neutralBoundsErrorBound = result->errorBound;
                 m_neutralBoundsFreshness = result->freshness;
                 m_neutralBoundsFailed = false;
                 if (m_renderUpdateCoordinator.interactionState() == async_rendering::RenderInteractionState::Static)
@@ -449,6 +453,7 @@ namespace gladius::ui
             cached.has_value() && cached->isUsable())
         {
             m_neutralModelBounds = cached->modelBounds;
+            m_neutralBoundsErrorBound = cached->errorBound;
             m_neutralBoundsFreshness = cached->freshness;
             m_neutralBoundsFailed = false;
             return true;
@@ -2967,6 +2972,41 @@ namespace gladius::ui
                     cached.has_value() && cached->isUsable())
                 {
                     return cached->modelBounds;
+                }
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    std::optional<float> RenderWindow::getNeutralBoundsErrorBound() const
+    {
+        if (!m_neutralBackendActive || !m_document)
+        {
+            return std::nullopt;
+        }
+
+        auto const stamp = m_renderUpdateCoordinator.latestStamp();
+        auto const freshness = compute::RenderFreshnessStamp{
+          .sceneGeneration = stamp.sceneEpoch,
+          .viewGeneration = stamp.viewEpoch,
+          .parameterGeneration = stamp.parameterEpoch};
+        if (m_neutralModelBounds.has_value() &&
+            m_neutralBoundsFreshness.hasSameModelGeneration(freshness))
+        {
+            return m_neutralBoundsErrorBound;
+        }
+
+        auto * const session = const_cast<RenderWindow *>(this)->getActiveRenderBackendSession();
+        if (session != nullptr)
+        {
+            auto * const boundsService = session->getBoundsService();
+            if (boundsService != nullptr)
+            {
+                if (auto const cached = boundsService->getCachedResult(freshness);
+                    cached.has_value() && cached->isUsable())
+                {
+                    return cached->errorBound;
                 }
             }
         }

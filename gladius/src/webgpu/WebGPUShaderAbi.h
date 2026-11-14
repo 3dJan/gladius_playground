@@ -58,4 +58,9 @@ namespace gladius::webgpu
     /// FrameUniforms::flagsModeReserved.x bit that enables shader metric counters.
     /// Mirrors RF_DEBUG_METRICS in src/kernel/types.h and frame_compute.wgsl.
     inline constexpr std::uint32_t RF_DEBUG_METRICS = 32768u;
+
+    /// FrameUniforms::flagsModeReserved.x bit that skips marching for rays provably
+    /// missing the scene bounds. Mirrors RF_SKIP_BACKGROUND_RAYS in src/kernel/types.h
+    /// and frame_compute.wgsl.
+    inline constexpr std::uint32_t RF_SKIP_BACKGROUND_RAYS = 32u;
 }
