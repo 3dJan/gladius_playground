@@ -130,3 +130,33 @@ Decision: keep both flags as LQ/preview knobs (default off for HQ). The measured
 benefit is modest and noisy on this GPU, but the tap reduction is exact and the LQ
 quality cost is small; revisit adoption in the combination run (E-combine) where
 multiple LQ knobs stack.
+
+## E4 — Macrocell grid empty-space skipping (rejected)
+
+Mechanism tried: `RF_MACROCELL_GRID` (bit 8, ABI mirror `256u`). A compute prepass
+(`macrocell_prepass.wgsl`, `@workgroup_size(4,4,4)`) writes a per-cell lower bound of the
+distance field into a storage buffer (binding 11, shared bind group with the frame pipeline);
+the march loop queries the grid and jumps to the nearest forward cell plane when the cell is
+provably empty. Cells intersecting analytic overlay AABBs (build plate, axes, field slab,
+stack slabs) are marked non-skippable since overlays are not part of `evaluateModel()`.
+
+Counter effect (A/B, flags 0 vs `100`): march steps −27.6..−34.9%, refinement taps ~halved,
+hits identical — the skip logic works.
+
+Performance effect: **net slowdown**. Wall/GPU +5..+25% on most samples (median of 3
+alternating runs; 8/18 samples regress >10%). The per-step grid lookup is a random-access
+storage read that costs more than the sphere-tracing steps it removes; a `probe_distance`
+gate (skip the lookup when the last sample is already within one cell of a surface) did not
+change the outcome.
+
+HQ parity: **fails** for every model containing mesh geometry (lampbase 68–70,
+SphereInACage 188–196, RadialRadiator 116–119, webcam_003 212–222 max channel diff; gate ≤16).
+Pure implicit gyroids pass (maxdiff 13). Root causes found along the way (see findings.md):
+non-1-Lipschitz composed field (`omega = 1.6`), wrong AABB exit axis (`max` instead of
+`min` plane distance), per-axis-max instead of gradient magnitude, mesh SDF sentinel
+discontinuities. Even the most conservative bound settings (near-never-skip) leave mesh
+models failing, so the mesh SDF path cannot be safely bounded with 7-point sampling.
+
+Decision: **rejected** — violates both decision rules (no speed gain, HQ parity broken).
+All E4 code reverted; the idea remains documented in findings.md as a potential for
+implicit-only scenes if a provably-safe bound is ever found.
