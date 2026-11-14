@@ -189,3 +189,41 @@ Decision: **rejected** — net slowdown on the path it targets, and it degrades 
 recognizability gate on mesh-heavy models. All E5 code reverted. The idea stays viable
 only if the init field comes from a *free* source (e.g. the previous frame's depth at the
 same camera — see temporal reprojection in E8) rather than a dedicated prepass.
+
+## E6 — Bounding-volume early-out inside the composed SDF (rejected, feasibility analysis)
+
+Mechanism planned: gate each subexpression of the composed SDF by an AABB test in the
+generated WGSL (`src/nodes/ToWgslVisitor.cpp` + composer), so a subexpression whose
+primitive is far from the sample position returns a conservative positive distance
+without evaluating it.
+
+Investigation found no path to a sound implementation at the planned cost:
+
+- `ToWgslVisitor` emits a flat function of inline expressions (`m_inlineExpressions`) or
+  `let` bindings chosen by `OutputPortReferenceAnalyzer::shouldInline()`. `visit(Min)`
+  (:561) and `visit(Max)` (:566) are plain `emitBinaryOperation` calls with no bounds
+  knowledge, so gating a subexpression requires per-node spatial extents the visitor does
+  not have.
+- `NodeBase` has no bounds API and `src/nodes/` has no interval arithmetic. The only AABB
+  representation in the graph is `nodes::BoxMinMax` (`ToWgslVisitor.cpp:816`), created by
+  `Builder.cpp:397-422` for bounding-box visualization, not for primitives.
+- Per-primitive AABBs live in compute metadata
+  (`ComputeCore::computeBoundingBoxFromPrimitives()`, `ComputeCore.cpp:608-648`, aggregating
+  `meta.boundingBox`), not in the expression graph, and there is no primitive-to-graph-node
+  mapping available to the visitor.
+- Correctness needs *conservative* bounds propagated through composition. Smooth-min/max
+  blends and transformations make a per-subexpression "skip when outside the primitive AABB"
+  test unsound unless the whole tree is evaluated with interval arithmetic — a new
+  subsystem, not a visitor change. That is E7's High-cost interval-arithmetic work, not E6's
+  Medium cost.
+- The node class that would benefit most is already accelerated: `gladius_mesh_sdf_core`
+  culls BVH nodes by AABB against an internally-seeded `min_sq_dist`
+  (`MESH_INVALID_DISTANCE`, `mesh_sdf.wgsl:374-460`), so an external conservative bound
+  cannot be passed without changing the mesh module ABI.
+
+Decision: **rejected** before any measured experiment — the implementation cost is High
+(per-node bounds + interval arithmetic) with Medium+ risk to HQ parity, and mesh nodes gain
+nothing from an external bound. The bounding-volume idea moves to E7 as tile-level culling
+against the bounds the shader already has as uniforms (`frame.clipping_box_min/max` plus
+`background_skip_bounds()`), which is the E4/E5-compliant pattern: uniform data, no
+per-step storage reads.

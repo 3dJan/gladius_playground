@@ -1,4 +1,4 @@
-c# WebGPU Ray-March Performance — Running Findings
+# WebGPU Ray-March Performance — Running Findings
 
 Working notes for spec 031. Committed results live in [results.md](./results.md); this file
 tracks the measurements, cost model, and potentials discovered along the way.
@@ -53,7 +53,7 @@ mostly hit nothing.
   noise band). LQ gate PASS (worst mask IoU 0.9956, SSIM 0.9943, color error 1.639).
 - HQ stays bit-exact because the flags are off by default. **Kept as LQ/preview knobs.**
 
-## E4 — macrocell grid prepass (in progress)
+## E4 — macrocell grid prepass (rejected)
 
 Design decisions made during investigation:
 
@@ -91,6 +91,8 @@ empty space above/around the model) the potential is much larger.
 - ~~E5 distance-init buffer~~: rejected — a dedicated low-res prepass costs more than the
   ~2-8% march steps it saves (wall +5..+50%, geomean 0.846x on the LQ path). Reuse a
   *free* previous-frame depth field instead (E8 temporal reprojection).
+- ~~E6 per-subexpression bounding volumes~~: rejected — see E6 post-mortem below. Tile-level
+  culling with the existing uniform bounds (E7) is the viable form of the same idea.
 - E7 tile culling: build on E2's `ray_misses_bounds()` at tile granularity — biggest potential for
   background-heavy views.
 - E8 adaptive resolution + temporal reprojection: LQ-only, largest theoretical speedups but needs
@@ -119,3 +121,24 @@ empty space above/around the model) the potential is much larger.
   refinement bracket `traveled - abs(previous_signed_distance)` is invalid after a jump (the
   previous sample sits far behind, not one step behind). Bracket fixes were verified inert —
   the residual failures came from wrongly-empty cells, not the bracket.
+
+## E6 post-mortem (per-subexpression bounding volumes — rejected, feasibility analysis)
+
+- **The composed WGSL field is a flat inline expression tree.** `ToWgslVisitor` emits one
+  function of inline sub-expressions (`m_inlineExpressions`, bindings only where
+  `OutputPortReferenceAnalyzer::shouldInline` says so). There is no per-node call boundary
+  where a bounding-volume early-out could be inserted without restructuring codegen.
+- **No bounds API and no interval arithmetic.** `NodeBase` has no bounding-volume method, and
+  `src/nodes/` evaluates nothing at compile time — `Min`/`Max` are plain binary emissions
+  (`ToWgslVisitor.cpp:561/:566`). Deriving conservative per-node AABBs (including smooth-min
+  offsetting) would require an interval-arithmetic evaluator: that is E7's High-cost work, not
+  a flag-gated experiment.
+- **Primitive AABBs exist but don't map to graph nodes.** `ComputeCore::getBoundingBox()`
+  aggregates primitive boxes (`computeBoundingBoxFromPrimitives()`), but there is no
+  primitive→node mapping, so the info cannot be attached to sub-expressions.
+- **Mesh nodes already self-accelerate.** `gladius_mesh_sdf_core` BVH-culls against its own
+  AABBs (`mesh_sdf.wgsl:374-460`) and seeds `min_sq_dist` internally to `MESH_INVALID_DISTANCE`
+  — an external bound would need ABI changes and would duplicate existing culling.
+- **Conclusion**: bounding-volume early-out is only viable at *tile* level using the bounds the
+  uniform already provides (`clippingBoxMin/Max` + model bounds, E2's `ray_misses_bounds()`),
+  which is exactly E7. The idea survives there; the per-subexpression form is dead.
