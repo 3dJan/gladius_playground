@@ -61,6 +61,7 @@ enum RenderingFlags
     RF_SKIP_BACKGROUND_RAYS = (1u << 5),  // Skip marching for rays provably missing scene bounds
     RF_FAST_SHADOW = (1u << 6),  // Coarse soft-shadow march (fewer taps) for low-quality paths
     RF_FAST_AO = (1u << 7),  // 4-tap ambient occlusion instead of 8-tap for low-quality paths
+    RF_TILE_CULLING = (1u << 8),  // Skip whole workgroup tiles whose frustum box provably misses scene bounds
     RF_DISABLE_ADAPTIVE_OMEGA = (1u << 14),  // Disable adaptive ω for A/B testing (SC-002)
     RF_DEBUG_METRICS = (1u << 15),  // Enable debug metrics collection (dev builds)
     RF_DISABLE_SHADOWS = (1u << 16),  // Skip soft-shadow computation (low-res preview)

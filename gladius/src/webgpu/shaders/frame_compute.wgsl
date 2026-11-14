@@ -40,6 +40,7 @@ const RF_SHOW_COORDINATE_SYSTEM: u32 = 16u;
 const RF_SKIP_BACKGROUND_RAYS: u32 = 32u;
 const RF_FAST_SHADOW: u32 = 64u;
 const RF_FAST_AO: u32 = 128u;
+const RF_TILE_CULLING: u32 = 256u;
 const RF_DISABLE_ADAPTIVE_OMEGA: u32 = 16384u;
 const RF_DEBUG_METRICS: u32 = 32768u;
 const RF_DISABLE_SHADOWS: u32 = 65536u;
@@ -159,6 +160,22 @@ struct SkipBounds {
     max: vec3<f32>,
 };
 
+/// Range of a value that varies linearly between two endpoints.
+fn value_range(p0: f32, p1: f32) -> vec2<f32> {
+    return vec2<f32>(min(p0, p1), max(p0, p1));
+}
+
+/// Smallest absolute value inside the interval `lo..hi`.
+fn interval_abs_minimum(lo: f32, hi: f32) -> f32 {
+    if (lo > 0.0) {
+        return lo;
+    }
+    if (hi < 0.0) {
+        return -hi;
+    }
+    return 0.0;
+}
+
 /// AABB containing every surface evaluate_surface() can report: the model bounds
 /// (expanded, since numerical probe bounds are not conservative), the time-slice
 /// field and stack overlays, and the build plate plus coordinate axes, which exist
@@ -221,6 +238,84 @@ fn ray_misses_bounds(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32)
     }
 
     return t_min > t_max;
+}
+
+/// True when two boxes do not overlap.
+fn boxes_disjoint(a: SkipBounds, b: SkipBounds) -> bool {
+    return a.min.x > b.max.x || a.max.x < b.min.x ||
+        a.min.y > b.max.y || a.max.y < b.min.y ||
+        a.min.z > b.max.z || a.max.z < b.min.z;
+}
+
+/// Invocations per workgroup tile along x/y. Kept in sync with the
+/// `@workgroup_size` declaration by `WebGPUFrameShaderComposer::applyWorkgroupShape`.
+const tile_columns: u32 = 16u;
+const tile_rows: u32 = 16u;
+
+/**
+ * @brief Conservative box covering every point reachable by the rays of the current tile.
+ *
+ * Tile rays share the eye and are `normalize(forward + right * (screen.x * horizontalScale) +
+ * up * (screen.y * verticalScale))`, where `screen` varies linearly across the tile. The unnormalized
+ * direction offset therefore spans a parallelogram; bounding each axis independently gives a
+ * conservative interval. Because the direction is normalized afterwards, the unit direction on each
+ * axis is bounded by that axis interval divided by the smallest possible direction length. Tiles may
+ * overshoot the frame edge, so the tile extent is clamped to the rendered rows. No assumption about
+ * the camera basis being orthonormal is required.
+ */
+fn tile_reach_bounds(global_id: vec3<u32>, width: u32, row_count: u32) -> SkipBounds {
+    let first_row = u32(frame.first_row_and_count.x);
+    let height = u32(frame.up_and_height.w);
+
+    let tile_origin_x = global_id.x - (global_id.x % tile_columns);
+    let tile_origin_y = global_id.y - (global_id.y % tile_rows);
+    let tile_max_x = min(tile_origin_x + tile_columns - 1u, width - 1u);
+    let tile_max_y = min(tile_origin_y + tile_rows - 1u, row_count - 1u);
+
+    let column_span = value_range(
+        f32(tile_origin_x) / f32(max(width - 1u, 1u)) - 0.5f,
+        f32(tile_max_x) / f32(max(width - 1u, 1u)) - 0.5f);
+    let row_span = value_range(
+        0.5f - f32(tile_origin_y + first_row) / f32(max(height - 1u, 1u)),
+        0.5f - f32(tile_max_y + first_row) / f32(max(height - 1u, 1u)));
+
+    let horizontal_start =
+        frame.right_and_width.xyz * (column_span.x * frame.forward_and_horizontal_scale.w);
+    let horizontal_end =
+        frame.right_and_width.xyz * (column_span.y * frame.forward_and_horizontal_scale.w);
+    let vertical_start =
+        frame.up_and_height.xyz * (row_span.x * frame.vertical_scale_and_max_steps.x);
+    let vertical_end =
+        frame.up_and_height.xyz * (row_span.y * frame.vertical_scale_and_max_steps.x);
+
+    let offset_min = min(horizontal_start, horizontal_end) + min(vertical_start, vertical_end);
+    let offset_max = max(horizontal_start, horizontal_end) + max(vertical_start, vertical_end);
+
+    let direction_min = frame.forward_and_horizontal_scale.xyz + offset_min;
+    let direction_max = frame.forward_and_horizontal_scale.xyz + offset_max;
+    let length_min = sqrt(
+        interval_abs_minimum(direction_min.x, direction_max.x) *
+            interval_abs_minimum(direction_min.x, direction_max.x) +
+        interval_abs_minimum(direction_min.y, direction_max.y) *
+            interval_abs_minimum(direction_min.y, direction_max.y) +
+        interval_abs_minimum(direction_min.z, direction_max.z) *
+            interval_abs_minimum(direction_min.z, direction_max.z));
+
+    // Points along a ray are eye + normalize(direction) * traveled with traveled <= max_distance.
+    // Dividing the direction interval by the smallest possible length and multiplying by the
+    // largest travel keeps the bound conservative even when the camera basis is not orthonormal.
+    let scale = frame.eye_and_max_distance.w / max(length_min, 1.0e-6f);
+    let eye = frame.eye_and_max_distance.xyz;
+    // Interval arithmetic runs in f32, so widen the box by the same margin the skip bounds use:
+    // rounding must never make a tile look provably empty.
+    let margin = max(vec3<f32>(frame.vertical_scale_and_max_steps.z), vec3<f32>(1.0));
+    return SkipBounds(eye + min(direction_min * scale, vec3<f32>(0.0)) - margin,
+                     eye + max(direction_max * scale, vec3<f32>(0.0)) + margin);
+}
+
+/// True when no ray of the current tile can reach any surface.
+fn tile_misses_bounds(global_id: vec3<u32>, width: u32, row_count: u32) -> bool {
+    return boxes_disjoint(tile_reach_bounds(global_id, width, row_count), background_skip_bounds());
 }
 
 fn evaluate_surface(position: vec3<f32>) -> SceneSample {
@@ -655,6 +750,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // plain and the translucent miss path end on the plain background colour.
     if ((frame.flags_mode_reserved.x & RF_SKIP_BACKGROUND_RAYS) != 0u && has_model_bounds() &&
         ray_misses_bounds(eye, ray_direction, max_distance)) {
+        output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
+        return;
+    }
+
+    // Whole-tile variant: one conservative box test rejects every ray of the workgroup tile.
+    if ((frame.flags_mode_reserved.x & RF_TILE_CULLING) != 0u && has_model_bounds() &&
+        tile_misses_bounds(global_id, width, row_count)) {
         output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
         return;
     }

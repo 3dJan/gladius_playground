@@ -227,3 +227,68 @@ nothing from an external bound. The bounding-volume idea moves to E7 as tile-lev
 against the bounds the shader already has as uniforms (`frame.clipping_box_min/max` plus
 `background_skip_bounds()`), which is the E4/E5-compliant pattern: uniform data, no
 per-step storage reads.
+
+## E7 — Whole-tile frustum/bounds culling
+
+Mechanism: flag `RF_TILE_CULLING` (bit 8, kernel `types.h` and ABI mirror `256u`).
+Instead of testing every ray (E2), the workgroup's tile is proven empty once:
+`tile_misses_bounds()` builds a conservative reach box for the whole tile and, if it is
+disjoint from `background_skip_bounds()`, every invocation in the tile writes the
+background color and marches zero steps.
+
+Bound derivation (all inputs are existing uniforms, no new ABI slots):
+
+- Tile origin is `global_id - (global_id % tile_columns/rows)`; the tile's column/row
+  extents are clamped to `width-1` / `row_count-1` because dispatch overshoots the frame.
+- Screen-space span of the tile maps to a per-axis interval of the *unnormalized*
+  direction offset (`right * (colSpan * hScale)`, `up * (rowSpan * vScale)`);
+  `direction_min/max = forward + offset_min/max`.
+- Rays are `eye + normalize(direction) * t` with `t <= maxDistance`, so the reachable
+  region is the box spanned by `eye + min(direction_min*scale, 0)` and
+  `eye + max(direction_max*scale, 0)` with `scale = maxDistance / max(length_min, 1e-6)`,
+  where `length_min` is the interval minimum of the direction magnitude. Adding the
+  direction offsets as *positions* (the first attempt) is unsound — it assumes the
+  direction is already unit length.
+- `length_min` uses interval minima per axis (`interval_abs_minimum`) so a tile whose
+  directions straddle zero still gets a valid lower bound.
+- The box is expanded by the same margin `background_skip_bounds()` uses
+  (`max(vertical_scale_and_max_steps.z, 1.0)`) so f32 interval rounding can never make a
+  tile look provably empty.
+- The basis is not assumed orthonormal (`RenderCamera::isValid()` has no orthogonality
+  check), which keeps the bound conservative.
+
+Composer: `applyWorkgroupShape()` rewrites `const tile_columns/tile_rows` to the actual
+dispatch shape, so the gate matches the pipeline. The later declaration (`tile_rows`) is
+replaced first because `replace()` changes source length and invalidates a previously
+found offset.
+
+Validation:
+
+- `WebGPUShaderAbi.TileCullingFlag_MirrorsKernelAndShader` (kernel/shader/ABI agreement).
+- `ApplyWorkgroupShape_NonDefault_RewritesDeclaration` asserts both tile constants are
+  rewritten.
+- `SubmitFrame_WithTileCullingFlag_CullsWholeTilesOutsideBounds`: far camera → all pixels
+  `0xFF1A1A1A`, rays parity, `totalSteps == 0`, `totalHits == 0`; near camera →
+  `totalSteps > 0`, proving overlapping tiles are not culled.
+- HQ parity bit-exact (PSNR inf, SSIM 1, max channel diff 0) on all 12 references at
+  flags `0` and `100`; LQ gate PASS at both, with identical metric values.
+
+Measured effect (median-of-3 HQ / median-of-2 LQ alternating A/B):
+
+- Steps **identical** on the bench corpus (e.g. webcam_003@1024: 65167211 both ways). The
+  harness camera fully frames the model and the skip box includes the helper platform box
+  `(-2,-2,-22)-(402,402,402)`, so no tile is provably empty.
+- HQ wall geomean 1.0035x (worst +3.8% webcam_003@512, best −1.6% ImplicitGyroid@512).
+- LQ wall geomean 0.9930x (worst +4.1% ImplicitGyroid@256, best −13.4% webcam_003@1024).
+  Both are inside the ±10% noise band; there is no measurable corpus win or loss.
+- Background-heavy probe (`E7BackgroundHeavyProbe_FarCameraTileCullingSpeed`, 1024²,
+  eye (2000,2000,2000), `maxTravelDistance` 10, bounds 1000..1100): **5.56 ms → 0.67 ms,
+  ≈8.3x**. This is the case the corpus cannot show: a camera looking at mostly-empty
+  space, which is common in the real app (zoomed-in models, panned views).
+
+Decision: **keep flag-gated, default off** (same precedent as E2). The bench corpus is
+neutral, so there is no measured HQ/LQ win to justify a default flip, and plan rule 2.2
+requires browser WASM validation before defaulting E7. The mechanism is bit-exact and
+cheap when it does not fire, and it is the strongest measured accelerator for
+background-heavy views (~8.3x), so it is retained for Phase 3 integration where the app
+camera — not the harness camera — is the workload.

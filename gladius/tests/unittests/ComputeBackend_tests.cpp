@@ -18,6 +18,7 @@
 #endif
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -352,6 +353,10 @@ namespace gladius::compute::tests
         EXPECT_NE(rewritten, composed);
         EXPECT_NE(rewritten.find("@workgroup_size(8, 32, 1)"), std::string::npos);
         EXPECT_EQ(rewritten.find("@workgroup_size(16, 16, 1)"), std::string::npos);
+        EXPECT_NE(rewritten.find("const tile_columns: u32 = 8u;"), std::string::npos);
+        EXPECT_NE(rewritten.find("const tile_rows: u32 = 32u;"), std::string::npos);
+        EXPECT_EQ(rewritten.find("const tile_columns: u32 = 16u;"), std::string::npos);
+        EXPECT_EQ(rewritten.find("const tile_rows: u32 = 16u;"), std::string::npos);
     }
 
     TEST(WebGPUFrameShaderComposer, ApplyWorkgroupShape_InvalidShape_ThrowsException)
@@ -395,6 +400,22 @@ namespace gladius::compute::tests
         EXPECT_NE(source.find("const RF_FAST_AO: u32 = 128u;"), std::string::npos);
         EXPECT_NE(source.find("RF_FAST_SHADOW) != 0u"), std::string::npos);
         EXPECT_NE(source.find("RF_FAST_AO) != 0u"), std::string::npos);
+    }
+
+    TEST(WebGPUShaderAbi, TileCullingFlag_MirrorsKernelAndShader)
+    {
+        EXPECT_EQ(webgpu::RF_TILE_CULLING, RF_TILE_CULLING);
+        EXPECT_EQ(webgpu::RF_TILE_CULLING, 256u);
+
+        auto const source = loadFrameShaderSource();
+        ASSERT_FALSE(source.empty());
+        EXPECT_NE(source.find("const RF_TILE_CULLING: u32 = 256u;"), std::string::npos);
+        EXPECT_NE(source.find("const tile_columns: u32 = 16u;"), std::string::npos);
+        EXPECT_NE(source.find("const tile_rows: u32 = 16u;"), std::string::npos);
+        EXPECT_NE(source.find("fn tile_reach_bounds("), std::string::npos);
+        EXPECT_NE(source.find("fn tile_misses_bounds("), std::string::npos);
+        EXPECT_NE(source.find("tile_misses_bounds(global_id, width, row_count)"),
+                  std::string::npos);
     }
 
 #if defined(GLADIUS_ENABLE_WEBGPU)
@@ -568,6 +589,130 @@ namespace gladius::compute::tests
         EXPECT_GT(unskippedMetrics->totalSteps, 0u);
         EXPECT_EQ(skippedMetrics->totalSteps, 0u);
         EXPECT_EQ(skippedMetrics->totalHits, 0u);
+    }
+
+    TEST(WebGPUComputeBackend, SubmitFrame_WithTileCullingFlag_CullsWholeTilesOutsideBounds)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        std::unique_ptr<webgpu::WebGPUComputeBackend> backend;
+        try
+        {
+            backend = std::make_unique<webgpu::WebGPUComputeBackend>();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        auto const run = [&](std::array<float, 3> const eye,
+                             std::uint32_t const flags,
+                             compute::WorkgroupShape const shape = {})
+          -> std::pair<std::optional<FrameResult>, std::optional<FrameMetrics>>
+        {
+            auto submission = backend->submitFrame(
+              FrameRequest{.width = 33u,
+                           .height = 33u,
+                           .eyePosition = eye,
+                           .maxTravelDistance = 10.0f,
+                           .renderingFlags = flags,
+                           .modelBounds = RenderBounds{.min = {1000.0f, 1000.0f, 1000.0f},
+                                                       .max = {1100.0f, 1100.0f, 1100.0f}},
+                           .boundsErrorBound = 8.0f,
+                           .collectMetrics = true,
+                           .workgroupShape = shape});
+            submission->wait();
+            EXPECT_EQ(submission->getStatus(), ComputeCompletionStatus::Succeeded)
+              << submission->getErrorMessage();
+            auto result = submission->takeResult();
+            EXPECT_TRUE(result.has_value());
+            if (result.has_value())
+            {
+                EXPECT_EQ(result->pixels.size(), 33u * 33u);
+            }
+            auto metrics = submission->getFrameMetrics();
+            EXPECT_TRUE(metrics.has_value());
+            return std::pair{result, metrics};
+        };
+
+        auto const far = std::array<float, 3>{2000.0f, 2000.0f, 2000.0f};
+        auto const [farUnflagged, farUnflaggedMetrics] = run(far, 0u);
+        ASSERT_TRUE(farUnflagged.has_value());
+        ASSERT_TRUE(farUnflaggedMetrics.has_value());
+        for (auto const pixel : farUnflagged->pixels)
+        {
+            EXPECT_EQ(pixel, 0xFF1A1A1Au);
+        }
+
+        auto const [farCulled, farCulledMetrics] = run(far, RF_TILE_CULLING);
+        ASSERT_TRUE(farCulled.has_value());
+        ASSERT_TRUE(farCulledMetrics.has_value());
+        for (auto const pixel : farCulled->pixels)
+        {
+            EXPECT_EQ(pixel, 0xFF1A1A1Au);
+        }
+
+        EXPECT_EQ(farCulledMetrics->totalRays, farUnflaggedMetrics->totalRays);
+        EXPECT_GT(farUnflaggedMetrics->totalSteps, 0u);
+        EXPECT_EQ(farCulledMetrics->totalSteps, 0u);
+        EXPECT_EQ(farCulledMetrics->totalHits, 0u);
+
+        // A tile whose rays can reach the bounds must keep marching.
+        auto const near = std::array<float, 3>{1050.0f, 1050.0f, 1050.0f};
+        auto const [nearCulled, nearCulledMetrics] = run(near, RF_TILE_CULLING);
+        ASSERT_TRUE(nearCulled.has_value());
+        ASSERT_TRUE(nearCulledMetrics.has_value());
+        EXPECT_EQ(nearCulledMetrics->totalRays, farCulledMetrics->totalRays);
+        EXPECT_GT(nearCulledMetrics->totalSteps, 0u);
+    }
+
+    TEST(WebGPUComputeBackend, E7BackgroundHeavyProbe_FarCameraTileCullingSpeed)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        std::unique_ptr<webgpu::WebGPUComputeBackend> backend;
+        try
+        {
+            backend = std::make_unique<webgpu::WebGPUComputeBackend>();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        auto const run = [&](std::uint32_t const flags)
+        {
+            double totalMs = 0.0;
+            for (int iteration = 0; iteration < 5; ++iteration)
+            {
+                auto const start = std::chrono::steady_clock::now();
+                auto submission = backend->submitFrame(
+                  FrameRequest{.width = 1024u,
+                               .height = 1024u,
+                               .eyePosition = {2000.0f, 2000.0f, 2000.0f},
+                               .maxTravelDistance = 10.0f,
+                               .renderingFlags = flags,
+                               .modelBounds = RenderBounds{.min = {1000.0f, 1000.0f, 1000.0f},
+                                                           .max = {1100.0f, 1100.0f, 1100.0f}},
+                               .boundsErrorBound = 8.0f});
+                submission->wait();
+                EXPECT_EQ(submission->getStatus(), ComputeCompletionStatus::Succeeded)
+                  << submission->getErrorMessage();
+                totalMs += std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+            }
+            return totalMs / 5.0;
+        };
+
+        std::printf("E7 background-heavy probe: unflagged %.2f ms, tile-culled %.2f ms\n",
+                    run(0u), run(RF_TILE_CULLING));
     }
 
     TEST(WebGPUComputeBackend, SubmitFrame_WithDesktopViewportPixelCount_IsAccepted)

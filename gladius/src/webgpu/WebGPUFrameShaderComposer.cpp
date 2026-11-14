@@ -195,6 +195,21 @@ namespace gladius::webgpu
         auto const replacement =
             fmt::format("@compute @workgroup_size({}, {}, 1)", shape.width, shape.height);
         shaderSource.replace(position, defaultDeclaration.size(), replacement);
+
+        static constexpr std::string_view tileColumns = "const tile_columns: u32 = 16u;";
+        static constexpr std::string_view tileRows = "const tile_rows: u32 = 16u;";
+        auto const columnsPosition = shaderSource.find(tileColumns);
+        auto const rowsPosition = shaderSource.find(tileRows);
+        if (columnsPosition == std::string::npos || rowsPosition == std::string::npos)
+        {
+            throw std::runtime_error("WebGPU frame shader has no tile shape declaration");
+        }
+
+        // Replace the later declaration first so the earlier offset stays valid.
+        shaderSource.replace(rowsPosition, tileRows.size(),
+                             fmt::format("const tile_rows: u32 = {}u;", shape.height));
+        shaderSource.replace(columnsPosition, tileColumns.size(),
+                             fmt::format("const tile_columns: u32 = {}u;", shape.width));
         return shaderSource;
     }
 }

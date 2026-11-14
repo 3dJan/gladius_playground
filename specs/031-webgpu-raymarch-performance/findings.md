@@ -53,6 +53,27 @@ mostly hit nothing.
   noise band). LQ gate PASS (worst mask IoU 0.9956, SSIM 0.9943, color error 1.639).
 - HQ stays bit-exact because the flags are off by default. **Kept as LQ/preview knobs.**
 
+### E7 — whole-tile frustum/bounds culling
+- Flag bit 8 `RF_TILE_CULLING` (ABI `256u`). One AABB test per *tile* instead of per ray:
+  `tile_misses_bounds()` derives the tile's reachable region from existing uniforms and, if it
+  is disjoint from `background_skip_bounds()`, the whole tile writes background with zero steps.
+- The reach box must be built from **scaled directions**, not direction offsets as positions:
+  rays are `eye + normalize(direction) * t` with `t <= maxDistance`, so the box is spanned by
+  `eye + min(direction_min*scale, 0)` .. `eye + max(direction_max*scale, 0)` with
+  `scale = maxDistance / max(length_min, 1e-6)`. Per-axis interval minima give a valid
+  `length_min` even when directions straddle zero.
+- The box needs the same margin as `background_skip_bounds()` (`max(verticalScaleAndMaxSteps.z, 1.0)`)
+  or f32 interval rounding can make a tile look provably empty.
+- Composer must rewrite `const tile_columns/tile_rows` to the dispatch shape, and must replace the
+  **later** declaration first: `replace()` changes source length and invalidates a previously found offset.
+- HQ parity bit-exact at flags `0` and `100`; LQ gate PASS with identical metrics. Steps identical on
+  the corpus (harness camera fully frames the model, and the skip box includes the helper platform box).
+- Corpus wall: HQ geomean 1.0035x, LQ geomean 0.9930x — both inside the ±10% noise band, no win there.
+- **Measured win where it matters**: far-camera 1024² probe (eye (2000,2000,2000), `maxTravelDistance` 10)
+  goes **5.56 ms → 0.67 ms ≈ 8.3x**. Real app views (zoomed/panned, mostly background) are this workload.
+- **Kept flag-gated, default off** (E2 precedent): no corpus win to justify a default flip, and browser
+  WASM validation is required before defaulting. Strongest measured accelerator for background-heavy views.
+
 ## E4 — macrocell grid prepass (rejected)
 
 Design decisions made during investigation:
@@ -93,8 +114,8 @@ empty space above/around the model) the potential is much larger.
   *free* previous-frame depth field instead (E8 temporal reprojection).
 - ~~E6 per-subexpression bounding volumes~~: rejected — see E6 post-mortem below. Tile-level
   culling with the existing uniform bounds (E7) is the viable form of the same idea.
-- E7 tile culling: build on E2's `ray_misses_bounds()` at tile granularity — biggest potential for
-  background-heavy views.
+- ~~E7 tile culling~~: implemented (flag-gated, default off) — see E7 above. ~8.3x on background-heavy
+  views; the corpus camera never triggers it, so the app-side win needs integration-phase measurement.
 - E8 adaptive resolution + temporal reprojection: LQ-only, largest theoretical speedups but needs
   the recognizability gate.
 

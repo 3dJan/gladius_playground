@@ -71,4 +71,9 @@ namespace gladius::webgpu
     /// FrameUniforms::flagsModeReserved.x bit that reduces AO to 4 taps.
     /// Mirrors RF_FAST_AO in src/kernel/types.h and frame_compute.wgsl.
     inline constexpr std::uint32_t RF_FAST_AO = 128u;
+
+    /// FrameUniforms::flagsModeReserved.x bit that skips whole workgroup tiles whose
+    /// frustum box provably misses the scene bounds. Mirrors RF_TILE_CULLING in
+    /// src/kernel/types.h and frame_compute.wgsl.
+    inline constexpr std::uint32_t RF_TILE_CULLING = 256u;
 }
