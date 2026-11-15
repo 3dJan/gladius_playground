@@ -463,15 +463,48 @@ deltas: `totalRays`, `totalHits`, `shadowTaps`, `aoTaps` identical; `totalSteps`
 | Technique | Wall | GPU | Quality verdict |
 | --- | --- | --- | --- |
 | QK coarse refinement | **1.444x** | **1.662x** | LQ gate PASS on all 12 samples |
-| HQ workgroup `2x128` | 1.067x | 1.075x | bit-exact, counters unchanged |
-| HQ workgroup `1x256` | 1.068x | 1.087x | bit-exact, but one HQ sample regresses |
 | E7 tile culling | ~1.00x steady-state | ~1.02x | bit-exact; real value is the far-camera probe (5.56 ms → 0.67 ms ≈ 8.3x) |
 | E2 skip background rays | ~1.01x | ~1.01x | bit-exact; ~0.05 % steps in the bench corpus |
 | E3 fast shadow/AO | −0.8 % wall | −2.0 % GPU | LQ gate PASS |
+| Workgroup `2x128` / `1x256` | see integration re-measure below | — | bit-exact, but not shipped |
 | E1/E5/E6/E8 | — | — | rejected (see their sections) |
 
-**Decision:** ship `2x128` as the WebGPU default frame workgroup shape. It wins on both wall
-and GPU in HQ with every sample faster, is neutral-to-positive in LQ, stays bit-exact, and
-changes no counters. `1x256` is rejected: its GPU-only HQ win comes with a `RadialRadiator@256`
-regression and a 0.940x net LQ loss. The coarse refinement flag stays flag-gated (never set by
-app-side flag assembly), so HQ remains bit-exact.
+## Integration re-measurement (supersedes the shape figures above)
+
+The earlier combine batch was collected while the machine carried a sustained ~9 load average
+from an unrelated process, and GPU medians are quantized to ~0.06 ms steps. A fresh
+**interleaved** A/B loop (control/shipped alternating within one loop, 3 repeats, 18 samples,
+same binary) was therefore run to separate shape from flags:
+
+| Comparison | Wall median | Wall geomean | Faster samples | GPU geomean |
+| --- | --- | --- | --- | --- |
+| HQ `2x128` vs `16x16` (flags 0) | 0.967 | 0.963 | 12/18 | 1.018 |
+| HQ flags `120` vs `0` (`16x16`) | 0.954 | 0.941 | 14/18 | 1.008 |
+| HQ shipped (`2x128` + `120`) | 0.963 | 0.938 | 13/18 | 0.994 |
+| LQ flags `120` vs `0` (`16x16`) | 0.956 | 0.940 | 15/18 | 0.946 |
+| LQ `2x128` vs `16x16` (flags `120`) | **1.078** | **1.098** | 5/18 | 1.013 |
+
+The shape-only comparison is the decisive one: `2x128` is a **net slowdown in LQ**
+(`lampbase` 0.69–0.79x, `RadialRadiator` 0.78–0.88x) and inside the noise band in HQ. The
+earlier 1.067x/1.075x shape figures do not reproduce and are superseded. Flag-only
+(skip + tile culling) is consistently faster on wall (0.94x geomean, 14–15 of 18 samples)
+and neutral-to-positive on GPU.
+
+**Decision:** keep the **16x16** frame workgroup default; do not ship a wider shape. Ship the
+task-type accelerator policy instead: bounds guards (skip + tile culling) on every frame task,
+plus the quality knobs (fast shadow/AO, coarse refinement) on `LowResolutionPreview` only.
+
+## Phase 3 integration
+
+`async_rendering::chooseFrameAccelerationFlags(RenderTaskType)` in
+`gladius/src/ui/render/WebGPUFrameAccelerationPolicy.h` is applied to the copied neutral
+settings inside the `RenderWindow` async scheduler. Verified after integration:
+
+- HQ parity: 12/12 bit-exact (PSNR inf, SSIM 1, max channel diff 0).
+- LQ gate: PASS, worst sample `RadialRadiator.3mf@256` histogram overlap 0.9099.
+- Policy unit tests: 4/4 (`WebGPUFrameAccelerationPolicy_tests.cpp`).
+- Full regression: 1750 tests, 1708 passed, 42 skipped (WebGPU gated), 0 failed, 2 disabled.
+
+Interactive WASM/WebGPU QA could not be automated here (no browser MCP server configured), so
+the preview-path behaviour is covered by the deterministic quality gates rather than by
+in-browser inspection.

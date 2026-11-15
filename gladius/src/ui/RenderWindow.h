@@ -14,6 +14,7 @@
 #include "render/ParameterInteractionPolicy.h"
 #include "render/FramePresenter.h"
 #include "render/RealtimeRaymarchController.h"
+#include "render/WebGPUFrameAccelerationPolicy.h"
 #include "RenderTranslucencyControls.h"
 #include <algorithm>
 #include <array>
@@ -512,6 +513,9 @@ namespace gladius::ui
         bool renderTranslucencyMenuSection();
 
         async_rendering::AsyncRenderFeatureConfig m_asyncConfig{};
+        /// The frame workgroup shape stays at the 16x16 default: interleaved A/B runs
+        /// (specs/031-webgpu-raymarch-performance) show wider shapes are a net slowdown
+        /// on the low-quality path and within the noise band on the high-quality path.
         compute::RenderSettingsSnapshot m_neutralRenderSettings{
           .flags = RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM | RF_ENABLE_TRANSLUCENCY,
           .normalOffset = 0.0001f,
@@ -559,6 +563,7 @@ namespace gladius::ui
                   auto const & matrix = m_camera.computeModelViewPerspectiveMatrix();
                   auto const modelBounds = getNeutralModelBounds();
                   auto settings = m_neutralRenderSettings;
+                  settings.flags |= async_rendering::chooseFrameAccelerationFlags(task.type);
                   // A missing model bound is not the build-volume bound. The fallback cutoff
                   // plane would otherwise clip every object above z=0, including a freshly
                   // imported model, until the backend can provide authoritative bounds.

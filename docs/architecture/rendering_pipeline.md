@@ -204,6 +204,40 @@ Source files:
 - `gladius/src/kernel/renderer.cl` - Kernel entry points
 - `gladius/src/compute/ComputeCore.cpp` - Distance buffer management
 
+## WebGPU frame path acceleration (spec 031)
+
+The WebGPU frame renderer (`gladius/src/webgpu/shaders/frame_compute.wgsl`) keeps the
+**16x16 workgroup default**. Wider shapes (`2x128`, `1x256`) are selectable through
+`RenderSettingsSnapshot::workgroupShape` and are rewritten into the composed shader by
+`WebGPUFrameShaderComposer::applyWorkgroupShape()`, but interleaved A/B measurements show
+they are a net slowdown on the low-quality path and inside the noise band on the
+high-quality path, so they are not the shipped default.
+
+Acceleration is keyed on the render task type instead of being a global setting.
+`async_rendering::chooseFrameAccelerationFlags()` in
+`gladius/src/ui/render/WebGPUFrameAccelerationPolicy.h` is applied to the copied neutral
+settings inside the `RenderWindow` async scheduler:
+
+| Task type | Flags applied | Why |
+|-----------|---------------|-----|
+| `LowResolutionPreview` | background-skip, tile-culling, fast shadow, fast AO, coarse refinement | preview output may be approximate |
+| `RealtimeFullFrame`, `StaticFullFrameProbe`, `ProgressiveHighQualityChunk` | background-skip, tile-culling only | these feed the high-quality frame stamp and must stay bit-exact |
+| `StreamingPreview` and non-frame tasks | none | OpenCL-only / not a frame dispatch |
+
+Background-skip and tile-culling are bounds guards that never change pixel output, so they
+are safe on the high-quality path. Tile-culling is what makes far-camera frames cheap
+(~8x on the probe). The quality knobs (fast shadow/AO, coarse refinement) are preview-only.
+
+Interactive WASM/WebGPU QA could not be automated in this environment (no browser MCP
+server is configured), so the preview-path behaviour is validated by the deterministic
+quality gates in `gladius/tests/unittests/WebGPUQuality_tests.cpp` instead.
+
+Source files:
+- `gladius/src/ui/render/WebGPUFrameAccelerationPolicy.h` - task-type flag policy
+- `gladius/src/ui/RenderWindow.h` - neutral settings and scheduler application
+- `gladius/src/webgpu/WebGPUFrameShaderComposer.cpp` - workgroup shape rewriting
+- `specs/031-webgpu-raymarch-performance/` - benchmarks, gates, and experiment results
+
 ## Related deep dives
 
 - Async bbox convergence strategy: [`gladius/docs/architecture/async_bbox_flow.md`](../../gladius/docs/architecture/async_bbox_flow.md)

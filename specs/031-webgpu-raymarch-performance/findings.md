@@ -208,15 +208,18 @@ empty space above/around the model) the potential is much larger.
 
 ## Combine — what actually ships
 
-- **Workgroup shape is the only HQ win.** `2x128` gives **1.067x wall / 1.075x GPU** geomean
-  over the 18-sample HQ corpus with *every* sample faster, bit-exact output and identical
-  counters. `1x256` looks better on GPU alone (1.087x) but `RadialRadiator.3mf@256` is 1.024
-  slower, so it is rejected. In the LQ path no shape beats 16x16 (`1x256` is a 0.940x net
-  loss, hurting `RadialRadiator` and `lampbase`), so the shape default is chosen for HQ.
+- **Workgroup shape does *not* ship.** An interleaved A/B loop (control/shipped alternating,
+  3 repeats, 18 samples) gives `2x128` wall geomean 0.963 in HQ (12/18 faster, noise band) and
+  **1.098 in LQ** — a net slowdown, with `lampbase` at 0.69–0.79x and `RadialRadiator` at
+  0.78–0.88x. The earlier 1.067x/1.075x figures came from a batch collected under a sustained
+  ~9 load average from an unrelated process and do not reproduce. `1x256` also loses in LQ.
+  Keep the 16x16 default.
+- **Flag-only (skip + tile culling) is the reliable HQ win**: wall geomean 0.941 with 14/18
+  samples faster, GPU neutral. Tile culling's real value is *conditional*: a far-camera frame
+  goes 5.56 ms → 0.67 ms (~8.3x).
 - **The coarse refinement knob is the only real LQ win** (1.444x wall / 1.662x GPU). Skip,
   tile culling and fast shadow/AO are individually inside the ±1.13 measurement-noise band in
-  steady-state benches; their value is *conditional*, not average: tile culling turns a
-  far-camera frame from 5.56 ms to 0.67 ms (~8.3x).
+  steady-state benches; their value is *conditional*, not average.
 - **Analysis rule that fixed earlier numbers:** divide GPU medians by the *GPU* median of the
   same baseline config and wall medians by the *wall* median. Mixing baselines produced bogus
   GPU ratios (the earlier "1.074x/1.085x" LQ shape figures are superseded).
@@ -229,3 +232,17 @@ empty space above/around the model) the potential is much larger.
 - **LQ isolation limit:** `createLqSettings()` always ORs the coarse knobs, so
   `GLADIUS_BENCH_FLAGS=0` in the LQ path still runs coarse refinement/shadow/AO. Only
   skip/tile/shape can be isolated there.
+
+## Phase 3 integration
+
+- **Accelerate by task type, not globally.** `chooseFrameAccelerationFlags()` in
+  `gladius/src/ui/render/WebGPUFrameAccelerationPolicy.h` gives bounds guards
+  (background-skip + tile culling) to every frame task, and the quality knobs
+  (fast shadow/AO + coarse refinement) only to `LowResolutionPreview`. The other frame kinds
+  all feed the HQ frame stamp, so they must stay bit-exact.
+- **The flag mask survives a settings load.** `MainWindow::loadRenderSettings()` only toggles
+  display flags via `applyFlag()`, so bits set in the neutral initializer persist.
+- **No browser QA available.** `.mcp.json` configures only gdb, headless OpenCL gladius and
+  serena, so the WASM UI cannot be driven; the deterministic HQ/LQ gates are the substitute.
+- **Timing discipline:** run control and candidate *interleaved* in one loop. Sequential batches
+  under external load produced contradictory numbers (identical config measured 1.41 ms vs 7.11 ms).
