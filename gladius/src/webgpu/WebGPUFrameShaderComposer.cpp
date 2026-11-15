@@ -173,6 +173,42 @@ namespace gladius::webgpu
         return composeFrameShader(std::move(modules), modelEvaluator, translucencyEvaluator);
     }
 
+        std::string WebGPUFrameShaderComposer::composeSdfPrebake(std::string_view const modelEvaluator,
+                                                     bool const includeMesh,
+                                                     bool const includeBeam,
+                                                     bool const includeImage)
+        {
+                if (modelEvaluator.empty())
+                {
+                    throw std::invalid_argument("WGSL model evaluator source must not be empty");
+                }
+
+                std::string shader = loadEmbeddedShader("src/webgpu/shaders/sdf_prebake.wgsl");
+                auto const replaceMarker = [&](std::string_view marker, std::string const & content)
+                {
+                    auto const pos = shader.find(marker);
+                    if (pos != std::string::npos)
+                    {
+        shader.replace(pos, marker.size(), content);
+                    }
+                };
+
+                replaceMarker("// GLADIUS_MESH_SDF_MODULE",
+              includeMesh ? loadEmbeddedModule("src/webgpu/shaders/mesh_sdf.wgsl",
+                                               "// GLADIUS_MESH_SDF_MODULE")
+                          : std::string{});
+                replaceMarker("// GLADIUS_BEAM_SDF_MODULE",
+              includeBeam ? loadEmbeddedModule("src/webgpu/shaders/beam_sdf.wgsl",
+                                               "// GLADIUS_BEAM_SDF_MODULE")
+                          : std::string{});
+                replaceMarker("// GLADIUS_IMAGE_SAMPLING_MODULE",
+              includeImage ? loadEmbeddedModule("src/webgpu/shaders/image_sampling.wgsl",
+                                                "// GLADIUS_IMAGE_SAMPLING_MODULE")
+                           : std::string{});
+                replaceMarker("// GLADIUS_MODEL_EVALUATOR", std::string{modelEvaluator});
+                return shader;
+        }
+
     std::string WebGPUFrameShaderComposer::applyWorkgroupShape(std::string shaderSource,
                                                                compute::WorkgroupShape const shape)
     {

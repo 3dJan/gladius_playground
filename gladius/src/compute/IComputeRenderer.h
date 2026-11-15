@@ -125,6 +125,26 @@ namespace gladius::compute
           throw std::runtime_error("This renderer does not submit materialized scenes");
         }
 
+        /// @brief Submit an async 3D SDF precomputation pass for the materialized scene.
+        /// @return A submission handle, or nullptr if the backend does not prebake 3D SDFs.
+        [[nodiscard]] virtual std::unique_ptr<IRenderSubmission>
+        submitSdfPrecomputation(IRenderScene const & scene,
+                                RenderBounds const & bounds,
+                                std::uint32_t gridSize,
+                                std::uint64_t parameterGeneration)
+        {
+            (void) scene;
+            (void) bounds;
+            (void) gridSize;
+            (void) parameterGeneration;
+            return nullptr;
+        }
+
+        /// @brief Invalidate any backend-cached precomputed SDF (e.g. after parameter/scene edits).
+        virtual void invalidatePrecomputedSdf() noexcept
+        {
+        }
+
         /// @brief Transitional entry point for renderers that retain their scene externally.
         [[nodiscard]] virtual std::unique_ptr<IRenderSubmission> submitFrame(RenderRequest request) = 0;
     };

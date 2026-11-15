@@ -28,6 +28,12 @@ namespace gladius::webgpu
         [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
         submitFrame(compute::IRenderScene const & scene, compute::RenderRequest request) override;
         [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
+        submitSdfPrecomputation(compute::IRenderScene const & scene,
+                                compute::RenderBounds const & bounds,
+                                std::uint32_t gridSize,
+                                std::uint64_t parameterGeneration) override;
+        void invalidatePrecomputedSdf() noexcept override;
+        [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
         submitFrame(compute::RenderRequest request) override;
 
         [[nodiscard]] std::shared_ptr<WebGPUComputeContext> getContext() const noexcept

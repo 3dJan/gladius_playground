@@ -246,3 +246,25 @@ empty space above/around the model) the potential is much larger.
   serena, so the WASM UI cannot be driven; the deterministic HQ/LQ gates are the substitute.
 - **Timing discipline:** run control and candidate *interleaved* in one loop. Sequential batches
   under external load produced contradictory numbers (identical config measured 1.41 ms vs 7.11 ms).
+
+## Interactive preview, adaptive progressive HQ & prebaked 3D SDF
+
+- **Preview profile (`applyFrameAccelerationSettings`):** `LowResolutionPreview` now disables
+  shadows, AO, and translucency (`RF_DISABLE_SHADOWS | RF_DISABLE_AO`, `~RF_ENABLE_TRANSLUCENCY`),
+  caps `maxRaySteps` at `192`, and uses `normalOffset >= 0.0015` so parameter/camera edits
+  stay fast on complex models and weaker GPUs.
+- **Adaptive progressive HQ (`NeutralRenderScheduler`):** replaced the fixed 2048-pixel chunk
+  cap with duration-driven chunk sizing (2K–256K pixels/chunk, 20 ms target), wired
+  `recordStaticProgressiveSample` / `recordStaticFullFrameSample` / `recordInteractiveRealtimeSample`
+  and `hqProgressiveRenderProgress()` in `RenderWindowWebGPU.cpp`, and hardened
+  `WebGPUFramePresenter` progressive seeding.
+- **Prebaked 3D SDF (`SdfPrecomputation` + `RF_USE_PRECOMPUTED_SDF`):** `WebGPUComputeBackend`
+  prebakes a `128³` (or `64³` on low preview quality) `R32Float` 3D SDF texture asynchronously
+  when static, and `frame_compute.wgsl` skips empty space (`abs(d) > 2.5 * maxVoxelSize`)
+  while evaluating exact `evaluateModel` near the surface. Invalidated automatically on
+  `replaceScene` and `updateParameterValues`.
+- **Beam-lattice benchmark (`variable_voronoi.3mf`, 1291 beams, 512x512):**
+  - Exact HQ 512: **1313.8 ms**
+  - Prebake `128³`: **13.7 ms** (91.9 ms cold pipeline)
+  - Cached HQ 512: **7.0 ms** (**~187x speedup**, PSNR **74.78 dB**, SSIM **0.999983**)
+  - Interactive preview 256: **0.47 ms**

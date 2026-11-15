@@ -374,8 +374,81 @@ namespace gladius::webgpu
         }
     }
 
+    void WebGPUFrameBufferSet::ensurePrecomputedSdfResources(wgpu::Device const & device,
+                                                           wgpu::Queue const & queue,
+                                                           std::uint32_t const gridSize)
+    {
+        auto const targetGridSize = std::max(gridSize, 1u);
+        if (!m_precomputedSdfUniformBuffer)
+        {
+            wgpu::BufferDescriptor uniformDescriptor;
+            uniformDescriptor.label = "Gladius precomputed SDF uniforms";
+            uniformDescriptor.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+            uniformDescriptor.size = sizeof(PrecomputedSdfUniforms);
+            m_precomputedSdfUniformBuffer = device.CreateBuffer(&uniformDescriptor);
+            if (!m_precomputedSdfUniformBuffer)
+            {
+                throw std::runtime_error("Unable to allocate WebGPU precomputed SDF uniform buffer");
+            }
+            PrecomputedSdfUniforms const emptyUniforms{};
+            queue.WriteBuffer(
+              m_precomputedSdfUniformBuffer, 0u, &emptyUniforms, sizeof(emptyUniforms));
+        }
+
+        if (!m_precomputedSdfTexture || m_precomputedSdfGridSize < targetGridSize)
+        {
+            wgpu::TextureDescriptor textureDescriptor;
+            textureDescriptor.label = "Gladius precomputed SDF 3D";
+            textureDescriptor.dimension = wgpu::TextureDimension::e3D;
+            textureDescriptor.size = {
+              .width = targetGridSize, .height = targetGridSize, .depthOrArrayLayers = targetGridSize};
+            textureDescriptor.format = wgpu::TextureFormat::R32Float;
+            textureDescriptor.mipLevelCount = 1u;
+            textureDescriptor.sampleCount = 1u;
+            textureDescriptor.usage =
+              wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::StorageBinding;
+            m_precomputedSdfTexture = device.CreateTexture(&textureDescriptor);
+            m_precomputedSdfTextureView =
+              m_precomputedSdfTexture ? m_precomputedSdfTexture.CreateView() : wgpu::TextureView{};
+            if (!m_precomputedSdfTexture || !m_precomputedSdfTextureView)
+            {
+                m_precomputedSdfTexture = nullptr;
+                m_precomputedSdfTextureView = nullptr;
+                m_precomputedSdfGridSize = 0u;
+                throw std::runtime_error("Unable to allocate WebGPU precomputed SDF 3D texture");
+            }
+            m_precomputedSdfGridSize = targetGridSize;
+            invalidatePrecomputedSdf(queue);
+        }
+    }
+
+    void WebGPUFrameBufferSet::writePrecomputedSdfUniforms(
+      wgpu::Queue const & queue,
+      PrecomputedSdfUniforms const & uniforms) const
+    {
+        if (!m_precomputedSdfUniformBuffer)
+        {
+            return;
+        }
+        queue.WriteBuffer(m_precomputedSdfUniformBuffer, 0u, &uniforms, sizeof(uniforms));
+    }
+
+    void WebGPUFrameBufferSet::invalidatePrecomputedSdf(wgpu::Queue const & queue)
+    {
+        if (!m_precomputedSdfUniformBuffer)
+        {
+            return;
+        }
+        PrecomputedSdfUniforms const emptyUniforms{};
+        queue.WriteBuffer(m_precomputedSdfUniformBuffer, 0u, &emptyUniforms, sizeof(emptyUniforms));
+    }
+
     void WebGPUFrameBufferSet::reset()
     {
+        m_precomputedSdfTextureView = nullptr;
+        m_precomputedSdfTexture = nullptr;
+        m_precomputedSdfUniformBuffer = nullptr;
+        m_precomputedSdfGridSize = 0u;
         m_metricsBuffer = nullptr;
         m_metricsStagingBuffer = nullptr;
         m_querySet = nullptr;

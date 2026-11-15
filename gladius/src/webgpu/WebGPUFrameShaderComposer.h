@@ -40,6 +40,12 @@ namespace gladius::webgpu
                                                                     bool includeImage,
                                                                     std::string_view translucencyEvaluator = {});
 
+        /// Compose the 3D SDF prebake compute shader with the required resource modules.
+        [[nodiscard]] static std::string composeSdfPrebake(std::string_view modelEvaluator,
+                                                           bool includeMesh,
+                                                           bool includeBeam,
+                                                           bool includeImage);
+
         /**
          * @brief Rewrites the frame shader's workgroup tile shape.
          *

@@ -148,7 +148,7 @@ namespace gladius::webgpu
             shaderDescriptor.nextInChain = &wgsl;
             auto const shader = device.CreateShaderModule(&shaderDescriptor);
 
-            wgpu::BindGroupLayoutEntry bindings[10]{};
+            wgpu::BindGroupLayoutEntry bindings[12]{};
             bindings[0].binding = 0u;
             bindings[0].visibility = wgpu::ShaderStage::Compute;
             bindings[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -207,6 +207,18 @@ namespace gladius::webgpu
             bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
             bindings[bindingCount].buffer.type = wgpu::BufferBindingType::Storage;
             bindings[bindingCount].buffer.minBindingSize = FRAME_METRICS_SIZE_BYTES;
+            ++bindingCount;
+
+            bindings[bindingCount].binding = 11u;
+            bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+            bindings[bindingCount].buffer.type = wgpu::BufferBindingType::Uniform;
+            bindings[bindingCount].buffer.minBindingSize = sizeof(PrecomputedSdfUniforms);
+            ++bindingCount;
+
+            bindings[bindingCount].binding = 12u;
+            bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+            bindings[bindingCount].texture.sampleType = wgpu::TextureSampleType::UnfilterableFloat;
+            bindings[bindingCount].texture.viewDimension = wgpu::TextureViewDimension::e3D;
             ++bindingCount;
 
             wgpu::BindGroupLayoutDescriptor layoutDescriptor;
@@ -317,6 +329,79 @@ namespace gladius::webgpu
 
         std::mutex m_mutex;
         std::vector<std::shared_ptr<Slot>> m_slots;
+    };
+
+    struct PrecomputedSdfState
+    {
+        std::mutex mutex;
+        wgpu::Buffer uniformBuffer;
+        wgpu::Texture texture;
+        wgpu::TextureView textureView;
+        std::uint32_t gridSize{0u};
+        std::uint64_t generationEpoch{0u};
+        bool valid{false};
+
+        void ensureInitialized(wgpu::Device const & device,
+                               wgpu::Queue const & queue,
+                               std::uint32_t const targetGridSize)
+        {
+            std::scoped_lock lock{mutex};
+            auto const clampedSize = std::max(targetGridSize, 1u);
+            if (!uniformBuffer)
+            {
+                wgpu::BufferDescriptor uniformDescriptor;
+                uniformDescriptor.label = "Gladius precomputed SDF uniforms";
+                uniformDescriptor.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+                uniformDescriptor.size = sizeof(PrecomputedSdfUniforms);
+                uniformBuffer = device.CreateBuffer(&uniformDescriptor);
+                if (!uniformBuffer)
+                {
+                    throw std::runtime_error("Unable to allocate precomputed SDF uniform buffer");
+                }
+                PrecomputedSdfUniforms const emptyUniforms{};
+                queue.WriteBuffer(uniformBuffer, 0u, &emptyUniforms, sizeof(emptyUniforms));
+            }
+
+            if (!texture || gridSize < clampedSize)
+            {
+                wgpu::TextureDescriptor textureDescriptor;
+                textureDescriptor.label = "Gladius precomputed SDF 3D";
+                textureDescriptor.dimension = wgpu::TextureDimension::e3D;
+                textureDescriptor.size = {.width = clampedSize,
+                                          .height = clampedSize,
+                                          .depthOrArrayLayers = clampedSize};
+                textureDescriptor.format = wgpu::TextureFormat::R32Float;
+                textureDescriptor.mipLevelCount = 1u;
+                textureDescriptor.sampleCount = 1u;
+                textureDescriptor.usage =
+                  wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::StorageBinding;
+                texture = device.CreateTexture(&textureDescriptor);
+                textureView = texture ? texture.CreateView() : wgpu::TextureView{};
+                if (!texture || !textureView)
+                {
+                    texture = nullptr;
+                    textureView = nullptr;
+                    gridSize = 0u;
+                    throw std::runtime_error("Unable to allocate precomputed SDF 3D texture");
+                }
+                gridSize = clampedSize;
+                valid = false;
+                PrecomputedSdfUniforms const emptyUniforms{};
+                queue.WriteBuffer(uniformBuffer, 0u, &emptyUniforms, sizeof(emptyUniforms));
+            }
+        }
+
+        void invalidate(wgpu::Queue const & queue)
+        {
+            std::scoped_lock lock{mutex};
+            ++generationEpoch;
+            valid = false;
+            if (uniformBuffer && queue)
+            {
+                PrecomputedSdfUniforms const emptyUniforms{};
+                queue.WriteBuffer(uniformBuffer, 0u, &emptyUniforms, sizeof(emptyUniforms));
+            }
+        }
     };
 
     namespace
@@ -630,11 +715,13 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             WebGPUFrameSubmission(std::shared_ptr<WebGPUComputeContext> context,
                                   compute::FrameRequest request,
                                   std::shared_ptr<WebGPUFrameBufferSet> bufferLease,
-                                  std::shared_ptr<WebGPUFramePipelineCache> pipelineCache)
+                                  std::shared_ptr<WebGPUFramePipelineCache> pipelineCache,
+                                  std::shared_ptr<PrecomputedSdfState> precomputedSdf)
                 : m_context(std::move(context))
                 , m_width(request.width)
                 , m_height(request.height)
                 , m_pipelineCache(std::move(pipelineCache))
+                , m_precomputedSdf(std::move(precomputedSdf))
                 , m_state(std::make_shared<WebGPUFrameSubmissionState>(std::move(bufferLease)))
             {
                 try
@@ -1209,7 +1296,18 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 m_rowCount = rowCount;
                 m_workgroupShape = request.workgroupShape;
 
-                wgpu::BindGroupEntry bindGroupEntries[10]{};
+                m_precomputedSdf->ensureInitialized(m_context->getDevice(),
+                                                    m_context->getQueue(),
+                                                    1u);
+                wgpu::Buffer precomputedUniformBuffer;
+                wgpu::TextureView precomputedTextureView;
+                {
+                    std::scoped_lock lock{m_precomputedSdf->mutex};
+                    precomputedUniformBuffer = m_precomputedSdf->uniformBuffer;
+                    precomputedTextureView = m_precomputedSdf->textureView;
+                }
+
+                wgpu::BindGroupEntry bindGroupEntries[12]{};
                 bindGroupEntries[0].binding = 0u;
                 bindGroupEntries[0].buffer = m_state->buffers.getUniformBuffer();
                 bindGroupEntries[0].size = sizeof(FrameUniforms);
@@ -1270,6 +1368,15 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 bindGroupEntries[bindGroupEntryCount].size = FRAME_METRICS_SIZE_BYTES;
                 ++bindGroupEntryCount;
 
+                bindGroupEntries[bindGroupEntryCount].binding = 11u;
+                bindGroupEntries[bindGroupEntryCount].buffer = precomputedUniformBuffer;
+                bindGroupEntries[bindGroupEntryCount].size = sizeof(PrecomputedSdfUniforms);
+                ++bindGroupEntryCount;
+
+                bindGroupEntries[bindGroupEntryCount].binding = 12u;
+                bindGroupEntries[bindGroupEntryCount].textureView = precomputedTextureView;
+                ++bindGroupEntryCount;
+
                 wgpu::BindGroupDescriptor bindGroupDescriptor;
                 bindGroupDescriptor.layout = m_pipeline->getBindGroupLayout();
                 bindGroupDescriptor.entryCount = bindGroupEntryCount;
@@ -1285,11 +1392,434 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             compute::WorkgroupShape m_workgroupShape{};
             std::shared_ptr<WebGPUFramePipelineCache> m_pipelineCache;
             std::shared_ptr<WebGPUFramePipelineCache::Pipeline> m_pipeline;
+            std::shared_ptr<PrecomputedSdfState> m_precomputedSdf;
             wgpu::BindGroup m_bindGroup;
             bool m_frameSubmitted{false};
             bool m_collectGpuTiming{false};
             bool m_collectMetrics{false};
             std::shared_ptr<WebGPUFrameSubmissionState> m_state;
+        };
+
+        class WebGPUSdfPrebakeSubmission final : public compute::IRenderSubmission
+        {
+          public:
+            WebGPUSdfPrebakeSubmission(
+              std::shared_ptr<WebGPUComputeContext> context,
+              SdfPrebakeRequest request,
+              std::shared_ptr<WebGPUFrameBufferSet> bufferLease,
+              std::shared_ptr<PrecomputedSdfState> precomputedSdf)
+                : m_context(std::move(context))
+                , m_precomputedSdf(std::move(precomputedSdf))
+                , m_bufferLease(std::move(bufferLease))
+                , m_gridSize(std::clamp(request.gridSize, 8u, 256u))
+                , m_state(std::make_shared<PrebakeStatusState>())
+            {
+                try
+                {
+                    prepare(std::move(request));
+                }
+                catch (std::exception const & exception)
+                {
+                    std::scoped_lock lock{m_state->mutex};
+                    m_state->status = compute::RenderSubmissionStatus::Failed;
+                    m_state->errorMessage = exception.what();
+                }
+            }
+
+            ~WebGPUSdfPrebakeSubmission() override
+            {
+#ifndef __EMSCRIPTEN__
+                if (getStatus() == compute::RenderSubmissionStatus::Pending)
+                {
+                    try
+                    {
+                        wait();
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+#endif
+            }
+
+            [[nodiscard]] compute::RenderSubmissionStatus getStatus() const noexcept override
+            {
+                std::scoped_lock lock{m_state->mutex};
+                return m_state->status;
+            }
+
+            void progress() noexcept override
+            {
+                if (getStatus() != compute::RenderSubmissionStatus::Pending || !m_context)
+                {
+                    return;
+                }
+                try
+                {
+#ifndef __EMSCRIPTEN__
+                    m_context->processEvents();
+#endif
+                    if (!m_context->isValid())
+                    {
+                        std::scoped_lock lock{m_state->mutex};
+                        if (m_state->status == compute::RenderSubmissionStatus::Pending)
+                        {
+                            m_state->status = compute::RenderSubmissionStatus::Failed;
+                            m_state->errorMessage = m_context->getErrorMessage();
+                        }
+                        return;
+                    }
+                    submitIfPipelineReady();
+                }
+                catch (std::exception const & exception)
+                {
+                    std::scoped_lock lock{m_state->mutex};
+                    if (m_state->status == compute::RenderSubmissionStatus::Pending)
+                    {
+                        m_state->status = compute::RenderSubmissionStatus::Failed;
+                        m_state->errorMessage = exception.what();
+                    }
+                }
+            }
+
+            void requestCancellation() noexcept override
+            {
+                {
+                    std::scoped_lock lock{m_state->mutex};
+                    if (m_state->status == compute::RenderSubmissionStatus::Pending)
+                    {
+                        m_state->status = compute::RenderSubmissionStatus::Cancelled;
+                    }
+                }
+                if (m_precomputedSdf && m_context && m_context->isValid())
+                {
+                    m_precomputedSdf->invalidate(m_context->getQueue());
+                }
+            }
+
+            void wait() override
+            {
+                while (getStatus() == compute::RenderSubmissionStatus::Pending)
+                {
+                    progress();
+                    if (getStatus() == compute::RenderSubmissionStatus::Pending)
+                    {
+                        std::this_thread::yield();
+                    }
+                }
+            }
+
+            [[nodiscard]] std::optional<compute::RenderFrame> takeFrame() override
+            {
+                return std::nullopt;
+            }
+
+            [[nodiscard]] std::string getErrorMessage() const override
+            {
+                std::scoped_lock lock{m_state->mutex};
+                return m_state->errorMessage;
+            }
+
+          private:
+            struct PrebakeStatusState
+            {
+                std::mutex mutex;
+                compute::RenderSubmissionStatus status{compute::RenderSubmissionStatus::Pending};
+                std::string errorMessage;
+            };
+            void prepare(SdfPrebakeRequest request)
+            {
+                if (!m_context || !m_context->isValid() || !m_precomputedSdf || !m_bufferLease)
+                {
+                    throw std::runtime_error("WebGPU context is unavailable for SDF prebaking");
+                }
+                if (!request.bounds.isValid() || request.shaderSource.empty())
+                {
+                    throw std::invalid_argument("Invalid WebGPU SDF prebake request");
+                }
+
+                WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
+                auto const & device = m_context->getDevice();
+                auto const & queue = m_context->getQueue();
+
+                m_precomputedSdf->invalidate(queue);
+                m_precomputedSdf->ensureInitialized(device, queue, m_gridSize);
+                {
+                    std::scoped_lock lock{m_precomputedSdf->mutex};
+                    m_epoch = m_precomputedSdf->generationEpoch;
+                }
+
+                float const spanX = std::max(request.bounds.max[0] - request.bounds.min[0], 1.0f);
+                float const spanY = std::max(request.bounds.max[1] - request.bounds.min[1], 1.0f);
+                float const spanZ = std::max(request.bounds.max[2] - request.bounds.min[2], 1.0f);
+                float const margin = std::max({spanX, spanY, spanZ}) * 0.05f + 2.0f;
+                std::array<float, 3> const paddedMin{request.bounds.min[0] - margin,
+                                                     request.bounds.min[1] - margin,
+                                                     request.bounds.min[2] - margin};
+                std::array<float, 3> const paddedMax{request.bounds.max[0] + margin,
+                                                     request.bounds.max[1] + margin,
+                                                     request.bounds.max[2] + margin};
+                float const voxelX = (paddedMax[0] - paddedMin[0]) / static_cast<float>(m_gridSize - 1u);
+                float const voxelY = (paddedMax[1] - paddedMin[1]) / static_cast<float>(m_gridSize - 1u);
+                float const voxelZ = (paddedMax[2] - paddedMin[2]) / static_cast<float>(m_gridSize - 1u);
+                float const tolerance = std::max({voxelX, voxelY, voxelZ}) * 2.5f;
+
+                m_uniforms.bboxMinAndTolerance = {paddedMin[0], paddedMin[1], paddedMin[2], tolerance};
+                m_uniforms.bboxMaxAndValid = {paddedMax[0], paddedMax[1], paddedMax[2], 1.0f};
+                m_uniforms.gridDims = {m_gridSize, m_gridSize, m_gridSize, 0u};
+
+                PrecomputedSdfUniforms prebakeDispatchUniforms = m_uniforms;
+                prebakeDispatchUniforms.bboxMaxAndValid[3] = 0.0f;
+                queue.WriteBuffer(m_precomputedSdf->uniformBuffer,
+                                  0u,
+                                  &prebakeDispatchUniforms,
+                                  sizeof(prebakeDispatchUniforms));
+
+                m_bufferLease->resize(device, 1u, 1u, request.parameters.size());
+                m_bufferLease->writeParameters(queue, request.parameters);
+                m_bufferLease->setMeshPayloads(device, queue, request.meshPayloads);
+                m_bufferLease->setBeamPayloads(device, queue, request.beamPayloads);
+                m_bufferLease->setImagePayloads(device, queue, request.imagePayloads);
+
+                wgpu::ShaderSourceWGSL wgsl;
+                wgsl.code = {request.shaderSource.data(), request.shaderSource.size()};
+                wgpu::ShaderModuleDescriptor shaderDescriptor;
+                shaderDescriptor.nextInChain = &wgsl;
+                auto const shader = device.CreateShaderModule(&shaderDescriptor);
+
+                wgpu::BindGroupLayoutEntry bindings[9]{};
+                bindings[0].binding = 0u;
+                bindings[0].visibility = wgpu::ShaderStage::Compute;
+                bindings[0].buffer.type = wgpu::BufferBindingType::Uniform;
+                bindings[0].buffer.minBindingSize = sizeof(PrecomputedSdfUniforms);
+                bindings[1].binding = 1u;
+                bindings[1].visibility = wgpu::ShaderStage::Compute;
+                bindings[1].storageTexture.access = wgpu::StorageTextureAccess::WriteOnly;
+                bindings[1].storageTexture.format = wgpu::TextureFormat::R32Float;
+                bindings[1].storageTexture.viewDimension = wgpu::TextureViewDimension::e3D;
+                bindings[2].binding = 2u;
+                bindings[2].visibility = wgpu::ShaderStage::Compute;
+                bindings[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                bindings[2].buffer.minBindingSize = sizeof(float);
+                std::size_t bindingCount = 3u;
+                if (m_bufferLease->hasMeshPayloads())
+                {
+                    bindings[bindingCount].binding = 4u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = sizeof(float);
+                    ++bindingCount;
+                    bindings[bindingCount].binding = 5u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                    ++bindingCount;
+                }
+                if (m_bufferLease->hasBeamPayloads())
+                {
+                    bindings[bindingCount].binding = 6u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = sizeof(float);
+                    ++bindingCount;
+                    bindings[bindingCount].binding = 7u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                    ++bindingCount;
+                }
+                if (m_bufferLease->hasImagePayloads())
+                {
+                    bindings[bindingCount].binding = 8u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = sizeof(float);
+                    ++bindingCount;
+                    bindings[bindingCount].binding = 9u;
+                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                    bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                    ++bindingCount;
+                }
+
+                wgpu::BindGroupLayoutDescriptor layoutDescriptor;
+                layoutDescriptor.entryCount = bindingCount;
+                layoutDescriptor.entries = bindings;
+                auto const bindGroupLayout = device.CreateBindGroupLayout(&layoutDescriptor);
+
+                wgpu::BindGroupEntry entries[9]{};
+                entries[0].binding = 0u;
+                entries[0].buffer = m_precomputedSdf->uniformBuffer;
+                entries[0].size = sizeof(PrecomputedSdfUniforms);
+                entries[1].binding = 1u;
+                entries[1].textureView = m_precomputedSdf->textureView;
+                entries[2].binding = 2u;
+                entries[2].buffer = m_bufferLease->getParameterBuffer();
+                entries[2].size = m_bufferLease->getParameterSizeBytes();
+                std::size_t entryCount = 3u;
+                if (m_bufferLease->hasMeshPayloads())
+                {
+                    entries[entryCount].binding = 4u;
+                    entries[entryCount].buffer = m_bufferLease->getMeshPayloadBuffer();
+                    entries[entryCount].size = m_bufferLease->getMeshPayloadBuffer().GetSize();
+                    ++entryCount;
+                    entries[entryCount].binding = 5u;
+                    entries[entryCount].buffer = m_bufferLease->getMeshOffsetTableBuffer();
+                    entries[entryCount].size = m_bufferLease->getMeshOffsetTableBuffer().GetSize();
+                    ++entryCount;
+                }
+                if (m_bufferLease->hasBeamPayloads())
+                {
+                    entries[entryCount].binding = 6u;
+                    entries[entryCount].buffer = m_bufferLease->getBeamPayloadBuffer();
+                    entries[entryCount].size = m_bufferLease->getBeamPayloadBuffer().GetSize();
+                    ++entryCount;
+                    entries[entryCount].binding = 7u;
+                    entries[entryCount].buffer = m_bufferLease->getBeamOffsetTableBuffer();
+                    entries[entryCount].size = m_bufferLease->getBeamOffsetTableBuffer().GetSize();
+                    ++entryCount;
+                }
+                if (m_bufferLease->hasImagePayloads())
+                {
+                    entries[entryCount].binding = 8u;
+                    entries[entryCount].buffer = m_bufferLease->getImagePayloadBuffer();
+                    entries[entryCount].size = m_bufferLease->getImagePayloadBuffer().GetSize();
+                    ++entryCount;
+                    entries[entryCount].binding = 9u;
+                    entries[entryCount].buffer = m_bufferLease->getImageOffsetTableBuffer();
+                    entries[entryCount].size = m_bufferLease->getImageOffsetTableBuffer().GetSize();
+                    ++entryCount;
+                }
+
+                wgpu::BindGroupDescriptor bindGroupDescriptor;
+                bindGroupDescriptor.layout = bindGroupLayout;
+                bindGroupDescriptor.entryCount = entryCount;
+                bindGroupDescriptor.entries = entries;
+                m_bindGroup = device.CreateBindGroup(&bindGroupDescriptor);
+
+                wgpu::PipelineLayoutDescriptor pipelineLayoutDescriptor;
+                pipelineLayoutDescriptor.bindGroupLayoutCount = 1u;
+                pipelineLayoutDescriptor.bindGroupLayouts = &bindGroupLayout;
+                auto const pipelineLayout = device.CreatePipelineLayout(&pipelineLayoutDescriptor);
+
+                wgpu::ComputePipelineDescriptor pipelineDescriptor;
+                pipelineDescriptor.layout = pipelineLayout;
+                pipelineDescriptor.compute.module = shader;
+                pipelineDescriptor.compute.entryPoint = "main";
+
+                auto pipelineState = std::make_shared<WebGPUFramePipelineCache::Pipeline>();
+                m_pipeline = pipelineState;
+#ifdef __EMSCRIPTEN__
+                auto const callbackMode = wgpu::CallbackMode::AllowSpontaneous;
+#else
+                auto const callbackMode = wgpu::CallbackMode::AllowProcessEvents;
+#endif
+                (void) device.CreateComputePipelineAsync(
+                  &pipelineDescriptor,
+                  callbackMode,
+                  [pipelineState](wgpu::CreatePipelineAsyncStatus const status,
+                                  wgpu::ComputePipeline computePipeline,
+                                  wgpu::StringView const message)
+                  { pipelineState->complete(status, std::move(computePipeline), message); });
+
+                submitIfPipelineReady();
+            }
+
+            void submitIfPipelineReady()
+            {
+                if (m_submitted || !m_pipeline)
+                {
+                    return;
+                }
+                auto const handles = m_pipeline->getReadyHandles();
+                if (!handles.has_value())
+                {
+                    if (m_pipeline->getStatus() == WebGPUFramePipelineCache::Pipeline::Status::Failed)
+                    {
+                        throw std::runtime_error(m_pipeline->getErrorMessage());
+                    }
+                    return;
+                }
+
+                {
+                    std::scoped_lock lock{m_precomputedSdf->mutex};
+                    if (m_precomputedSdf->generationEpoch != m_epoch)
+                    {
+                        std::scoped_lock stateLock{m_state->mutex};
+                        m_state->status = compute::RenderSubmissionStatus::Cancelled;
+                        return;
+                    }
+                }
+
+                WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
+                auto const encoder = m_context->getDevice().CreateCommandEncoder();
+                auto const pass = encoder.BeginComputePass();
+                pass.SetPipeline(handles->computePipeline);
+                pass.SetBindGroup(0u, m_bindGroup);
+                auto const groups = (m_gridSize + 3u) / 4u;
+                pass.DispatchWorkgroups(groups, groups, groups);
+                pass.End();
+                auto const commands = encoder.Finish();
+                auto const & queue = m_context->getQueue();
+                m_submitted = true;
+
+                auto const state = m_state;
+                auto const precomputedSdf = m_precomputedSdf;
+                auto const context = m_context;
+                auto const epoch = m_epoch;
+                auto const uniforms = m_uniforms;
+#ifdef __EMSCRIPTEN__
+                auto const callbackMode = wgpu::CallbackMode::AllowSpontaneous;
+#else
+                auto const callbackMode = wgpu::CallbackMode::AllowProcessEvents;
+#endif
+                queue.OnSubmittedWorkDone(
+                  callbackMode,
+                  [state, precomputedSdf, context, epoch, uniforms](
+                    wgpu::QueueWorkDoneStatus const status,
+                    wgpu::StringView const message)
+                  {
+                      if (status == wgpu::QueueWorkDoneStatus::Success)
+                      {
+                          {
+                              std::scoped_lock sdfLock{precomputedSdf->mutex};
+                              if (precomputedSdf->generationEpoch == epoch && context && context->isValid())
+                              {
+                                  precomputedSdf->valid = true;
+                                  context->getQueue().WriteBuffer(
+                                    precomputedSdf->uniformBuffer, 0u, &uniforms, sizeof(uniforms));
+                              }
+                          }
+                          std::scoped_lock lock{state->mutex};
+                          if (state->status == compute::RenderSubmissionStatus::Pending)
+                          {
+                              state->status = compute::RenderSubmissionStatus::Succeeded;
+                          }
+                      }
+                      else
+                      {
+                          std::scoped_lock lock{state->mutex};
+                          if (state->status == compute::RenderSubmissionStatus::Pending)
+                          {
+                              state->status = compute::RenderSubmissionStatus::Failed;
+                              state->errorMessage =
+                                "WebGPU SDF prebake failed: " + toString(message);
+                          }
+                      }
+                  });
+                queue.Submit(1u, &commands);
+            }
+
+            std::shared_ptr<WebGPUComputeContext> m_context;
+            std::shared_ptr<PrecomputedSdfState> m_precomputedSdf;
+            std::shared_ptr<WebGPUFrameBufferSet> m_bufferLease;
+            std::shared_ptr<WebGPUFramePipelineCache::Pipeline> m_pipeline;
+            wgpu::BindGroup m_bindGroup;
+            PrecomputedSdfUniforms m_uniforms{};
+            std::uint32_t m_gridSize{128u};
+            std::uint64_t m_epoch{0u};
+            bool m_submitted{false};
+            std::shared_ptr<PrebakeStatusState> m_state;
         };
     }
 
@@ -1297,6 +1827,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
         : m_context(context ? std::move(context) : std::make_shared<WebGPUComputeContext>())
         , m_frameBufferPool(std::make_shared<FrameBufferPool>())
         , m_framePipelineCache(std::make_shared<WebGPUFramePipelineCache>())
+        , m_precomputedSdf(std::make_shared<PrecomputedSdfState>())
     {
     }
 
@@ -1317,6 +1848,35 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     m_context,
                     std::move(request),
                     m_frameBufferPool->acquire(),
-                    m_framePipelineCache);
+                    m_framePipelineCache,
+                    m_precomputedSdf);
+    }
+
+    std::unique_ptr<compute::IRenderSubmission>
+    WebGPUComputeBackend::submitSdfPrecomputation(SdfPrebakeRequest request)
+    {
+        return std::make_unique<WebGPUSdfPrebakeSubmission>(
+          m_context,
+          std::move(request),
+          m_frameBufferPool->acquire(),
+          m_precomputedSdf);
+    }
+
+    void WebGPUComputeBackend::invalidatePrecomputedSdf() noexcept
+    {
+        if (m_precomputedSdf && m_context && m_context->isValid())
+        {
+            m_precomputedSdf->invalidate(m_context->getQueue());
+        }
+    }
+
+    bool WebGPUComputeBackend::hasValidPrecomputedSdf() const noexcept
+    {
+        if (!m_precomputedSdf)
+        {
+            return false;
+        }
+        std::scoped_lock lock{m_precomputedSdf->mutex};
+        return m_precomputedSdf->valid;
     }
 }

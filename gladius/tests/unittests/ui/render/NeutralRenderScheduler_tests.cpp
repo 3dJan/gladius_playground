@@ -309,33 +309,48 @@ namespace gladius::ui::async_rendering::tests
         task.startLine = 0u;
         task.lineCount = task.height;
 
-                auto const rowsPerChunk = NeutralRenderScheduler::MAX_PROGRESSIVE_CHUNK_PIXELS / task.width;
-                auto const expectedChunkCount =
-                    (static_cast<std::size_t>(task.height) + rowsPerChunk - 1u) / rowsPerChunk;
-                std::uint32_t completedRow{};
-                std::size_t chunkCount{};
-                while (completedRow < task.height)
+        std::uint32_t completedRow{};
+        std::size_t chunkCount{};
+        while (completedRow < task.height)
         {
             ASSERT_TRUE(scheduler.submit(task, renderer));
             auto result = scheduler.poll();
             ASSERT_EQ(result.acceptedFrames.size(), 1u);
             ASSERT_EQ(result.completions.size(), 1u);
             auto const & frame = result.acceptedFrames.front().frame;
-                        auto const expectedEndRow = static_cast<std::uint32_t>(std::min<std::size_t>(
-                            static_cast<std::size_t>(completedRow) + rowsPerChunk, task.height));
-                        EXPECT_EQ(frame.firstRow, completedRow);
-                        EXPECT_EQ(frame.endRow, expectedEndRow);
-                        EXPECT_LE(static_cast<std::size_t>(frame.endRow - frame.firstRow), rowsPerChunk);
+            EXPECT_EQ(frame.firstRow, completedRow);
+            EXPECT_GT(frame.endRow, frame.firstRow);
+            EXPECT_LE(frame.endRow, task.height);
+            EXPECT_LE(static_cast<std::size_t>(frame.endRow - frame.firstRow) * task.width,
+                      NeutralRenderScheduler::MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS);
             EXPECT_EQ(result.completions.front().taskResult.completedFrame,
                       frame.endRow == task.height);
             completedRow = frame.endRow;
-                        EXPECT_TRUE(scheduler.workflow().presentCandidate(result.acceptedFrames.front().candidate));
-                        ++task.requestId;
-                        ++chunkCount;
-                }
+            EXPECT_TRUE(scheduler.workflow().presentCandidate(result.acceptedFrames.front().candidate));
+            ++task.requestId;
+            ++chunkCount;
+        }
 
-                EXPECT_EQ(chunkCount, expectedChunkCount);
+        EXPECT_GT(chunkCount, 1u);
         EXPECT_TRUE(scheduler.workflow().isHighQualityFrameCurrent());
+    }
+
+    TEST(NeutralRenderScheduler, AdaptiveProgressiveBudget_GrowsWhenFastAndShrinksWhenSlow)
+    {
+        NeutralRenderScheduler scheduler{makeRequest};
+        auto const initialBudget = scheduler.currentProgressiveChunkPixels();
+        EXPECT_EQ(initialBudget, NeutralRenderScheduler::MAX_PROGRESSIVE_CHUNK_PIXELS);
+
+        // Fast chunk (1 ms << 20 ms target) should double up to the adaptive cap.
+        scheduler.adaptProgressiveChunkBudget(1'000'000ull);
+        EXPECT_GT(scheduler.currentProgressiveChunkPixels(), initialBudget);
+
+        // Very slow chunk (200 ms >> 20 ms target) should halve down toward the minimum.
+        auto const grownBudget = scheduler.currentProgressiveChunkPixels();
+        scheduler.adaptProgressiveChunkBudget(200'000'000ull);
+        EXPECT_LT(scheduler.currentProgressiveChunkPixels(), grownBudget);
+        EXPECT_GE(scheduler.currentProgressiveChunkPixels(),
+                  NeutralRenderScheduler::MIN_PROGRESSIVE_CHUNK_PIXELS);
     }
 
     TEST(NeutralRenderScheduler, SubmitAndPoll_WithLowResolutionTask_ReturnsAcceptedFrame)

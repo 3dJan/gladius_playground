@@ -517,6 +517,33 @@ namespace gladius::ui
             queueRenderDecision(workflow.configureViewport(width, height));
         }
 
+        if (m_neutralSdfPrebakeSubmission)
+        {
+            m_neutralSdfPrebakeSubmission->progress();
+            auto const status = m_neutralSdfPrebakeSubmission->getStatus();
+            if (status != compute::RenderSubmissionStatus::Pending)
+            {
+                auto const completedTask = m_neutralSdfPrebakeTask;
+                m_neutralSdfPrebakeSubmission.reset();
+                m_neutralSdfPrebakeTask.reset();
+                if (completedTask.has_value())
+                {
+                    auto const mappedStatus =
+                      status == compute::RenderSubmissionStatus::Succeeded
+                        ? async_rendering::RenderTaskStatus::Completed
+                        : (status == compute::RenderSubmissionStatus::Cancelled
+                             ? async_rendering::RenderTaskStatus::Cancelled
+                             : async_rendering::RenderTaskStatus::Failed);
+                    queueRenderDecision(workflow.completeTask(
+                      async_rendering::RenderTaskResult{.requestId = completedTask->requestId,
+                                                        .type = completedTask->type,
+                                                        .stamp = completedTask->stamp,
+                                                        .status = mappedStatus},
+                      true));
+                }
+            }
+        }
+
         auto pollResult = [&]()
         {
             UiFpsBenchmarkStageTimer schedulerPollTimer{
@@ -568,8 +595,7 @@ namespace gladius::ui
 
             bool const presented = workflow.presentCandidate(
               accepted.candidate, workflow.latestStamp(), accepted.candidate.presentationMask);
-            if (!presented || workflow.interactionState() ==
-                                async_rendering::RenderInteractionState::Static)
+            if (!presented)
             {
                 continue;
             }
@@ -580,29 +606,57 @@ namespace gladius::ui
               [&accepted](async_rendering::NeutralFrameSubmissionResult const & item)
               { return item.taskResult.requestId == accepted.candidate.frameId; });
             if (completion == pollResult.completions.end() ||
-                completion->taskResult.type != async_rendering::RenderTaskType::LowResolutionPreview ||
                 completion->taskResult.status != async_rendering::RenderTaskStatus::Completed ||
                 !completion->taskResult.producedDisplayFrame || completion->taskResult.durationNs == 0u)
             {
                 continue;
             }
 
-            constexpr float targetFrameTimeMs = 25.0f;
-            constexpr float minPreviewQuality = 0.02f;
-            constexpr float maxPreviewQuality = 0.5f;
-            constexpr float resizeThresholdPercent = 5.0f;
             float const observedFrameTimeMs =
               static_cast<float>(completion->taskResult.durationNs) / 1'000'000.0f;
-            float const targetQuality = async_rendering::adaptInteractivePreviewQuality(
-              workflow.interactivePreviewQualityTarget(),
-              targetFrameTimeMs,
-              observedFrameTimeMs,
-              minPreviewQuality,
-              maxPreviewQuality);
-            (void) workflow.updateInteractivePreviewQuality(targetQuality,
-                                                            minPreviewQuality,
-                                                            maxPreviewQuality,
-                                                            resizeThresholdPercent);
+            async_rendering::RealtimeRaymarchSample const sample{
+              .durationMs = observedFrameTimeMs,
+              .width = accepted.frame.width,
+              .height = accepted.frame.height,
+              .renderedLines = static_cast<std::size_t>(accepted.frame.endRow -
+                                                        accepted.frame.firstRow),
+              .totalLines = static_cast<std::size_t>(accepted.frame.height),
+              .completedFrame = completion->taskResult.completedFrame,
+              .cancelled = false};
+
+            switch (completion->taskResult.type)
+            {
+            case async_rendering::RenderTaskType::ProgressiveHighQualityChunk:
+                workflow.recordStaticProgressiveSample(sample);
+                break;
+            case async_rendering::RenderTaskType::StaticFullFrameProbe:
+                workflow.recordStaticFullFrameSample(sample);
+                break;
+            case async_rendering::RenderTaskType::RealtimeFullFrame:
+                workflow.recordInteractiveRealtimeSample(sample);
+                break;
+            case async_rendering::RenderTaskType::LowResolutionPreview:
+                if (workflow.interactionState() != async_rendering::RenderInteractionState::Static)
+                {
+                    constexpr float targetFrameTimeMs = 25.0f;
+                    constexpr float minPreviewQuality = 0.02f;
+                    constexpr float maxPreviewQuality = 0.5f;
+                    constexpr float resizeThresholdPercent = 5.0f;
+                    float const targetQuality = async_rendering::adaptInteractivePreviewQuality(
+                      workflow.interactivePreviewQualityTarget(),
+                      targetFrameTimeMs,
+                      observedFrameTimeMs,
+                      minPreviewQuality,
+                      maxPreviewQuality);
+                    (void) workflow.updateInteractivePreviewQuality(targetQuality,
+                                                                    minPreviewQuality,
+                                                                    maxPreviewQuality,
+                                                                    resizeThresholdPercent);
+                }
+                break;
+            default:
+                break;
+            }
         }
         queueRenderDecision(async_rendering::RenderWorkflowDecision{
           .commands = std::move(pollResult.commands)});
@@ -701,6 +755,34 @@ namespace gladius::ui
                     .stamp = command.task.stamp,
                     .status = updated ? async_rendering::RenderTaskStatus::Completed
                                       : async_rendering::RenderTaskStatus::Failed},
+                  true));
+            }
+            else if (command.task.type == async_rendering::RenderTaskType::SdfPrecomputation)
+            {
+                if (m_neutralSdfPrebakeSubmission)
+                {
+                    retainPendingCommands(commandIndex);
+                    return true;
+                }
+                auto const bounds = getNeutralModelBounds();
+                if (bounds.has_value() && bounds->isValid())
+                {
+                    std::uint32_t const gridSize =
+                      workflow.interactivePreviewQualityTarget() < 0.25f ? 64u : 128u;
+                    m_neutralSdfPrebakeSubmission = session->submitSdfPrecomputation(
+                      *bounds, gridSize, command.task.stamp.parameterEpoch);
+                }
+                if (m_neutralSdfPrebakeSubmission)
+                {
+                    m_neutralSdfPrebakeTask = command.task;
+                    retainPendingCommands(commandIndex + 1u);
+                    return true;
+                }
+                queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+                  async_rendering::RenderTaskResult{.requestId = command.task.requestId,
+                                                    .type = command.task.type,
+                                                    .stamp = command.task.stamp,
+                                                    .status = async_rendering::RenderTaskStatus::Completed},
                   true));
             }
             else
@@ -898,7 +980,16 @@ namespace gladius::ui
 
     RenderWindow::HqProgressiveRenderProgress RenderWindow::hqProgressiveRenderProgress() const
     {
-        return {};
+        auto const progress = m_neutralRenderScheduler.progressiveProgress();
+        if (!progress.active || progress.totalRows == 0u)
+        {
+            return {};
+        }
+        float const fraction = std::clamp(
+          static_cast<float>(progress.nextRow) / static_cast<float>(progress.totalRows),
+          0.0f,
+          1.0f);
+        return HqProgressiveRenderProgress{.active = true, .fraction = fraction};
     }
 
     void RenderWindow::invalidateView()
@@ -926,6 +1017,12 @@ namespace gladius::ui
         m_dirty = true;
         queueRenderDecision(m_neutralRenderScheduler.workflow().notifyParameterChanged(true));
         m_neutralRenderScheduler.requestCancellationForStale();
+        if (m_neutralSdfPrebakeSubmission)
+        {
+            m_neutralSdfPrebakeSubmission->requestCancellation();
+            m_neutralSdfPrebakeSubmission.reset();
+            m_neutralSdfPrebakeTask.reset();
+        }
                 m_neutralParameterInteractionPolicy.notifyParameterChanged(
                     async_rendering::ParameterInteractionPolicy::Clock::now());
                 if (m_view != nullptr)

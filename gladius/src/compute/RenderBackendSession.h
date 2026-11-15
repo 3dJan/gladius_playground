@@ -52,6 +52,12 @@ namespace gladius::compute
         /// @brief Submit a frame against the active materialized scene.
         [[nodiscard]] std::unique_ptr<IRenderSubmission> submitFrame(RenderRequest request);
 
+        /// @brief Submit an async 3D SDF precomputation pass for the active materialized scene.
+        [[nodiscard]] std::unique_ptr<IRenderSubmission>
+        submitSdfPrecomputation(RenderBounds const & bounds,
+                                std::uint32_t gridSize,
+                                std::uint64_t parameterGeneration);
+
       private:
         std::unique_ptr<IComputeRenderer> m_renderer;
         std::unique_ptr<IRenderScene> m_scene;

@@ -118,6 +118,7 @@ namespace gladius::compute
             m_snapshot = std::move(sharedSnapshot);
             m_parameterSnapshot = std::move(parameterSnapshot);
             m_scene = std::move(scene);
+            m_renderer->invalidatePrecomputedSdf();
             m_errorMessage.clear();
             return true;
         }
@@ -198,6 +199,7 @@ namespace gladius::compute
                 m_boundsService->setParameterSnapshot(parameterSnapshot);
             }
             m_parameterSnapshot = std::move(parameterSnapshot);
+            m_renderer->invalidatePrecomputedSdf();
             m_errorMessage.clear();
             return true;
         }
@@ -225,5 +227,17 @@ namespace gladius::compute
         }
 
         return m_renderer->submitFrame(*m_scene, std::move(request));
+    }
+
+    std::unique_ptr<IRenderSubmission> RenderBackendSession::submitSdfPrecomputation(
+      RenderBounds const & bounds,
+      std::uint32_t const gridSize,
+      std::uint64_t const parameterGeneration)
+    {
+        if (!m_scene || !m_renderer->isAvailable())
+        {
+            return nullptr;
+        }
+        return m_renderer->submitSdfPrecomputation(*m_scene, bounds, gridSize, parameterGeneration);
     }
 }

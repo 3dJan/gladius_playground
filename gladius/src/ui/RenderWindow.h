@@ -562,8 +562,9 @@ namespace gladius::ui
                   auto const eye = m_camera.getEyePosition();
                   auto const & matrix = m_camera.computeModelViewPerspectiveMatrix();
                   auto const modelBounds = getNeutralModelBounds();
-                  auto settings = m_neutralRenderSettings;
-                  settings.flags |= async_rendering::chooseFrameAccelerationFlags(task.type);
+                  auto settings = async_rendering::applyFrameAccelerationSettings(
+                    m_neutralRenderSettings,
+                    task.type);
                   // A missing model bound is not the build-volume bound. The fallback cutoff
                   // plane would otherwise clip every object above z=0, including a freshly
                   // imported model, until the backend can provide authoritative bounds.
@@ -639,6 +640,8 @@ namespace gladius::ui
         bool m_uiFpsBenchmarkStageTimingEnabled{false};
         UiFpsBenchmarkStageTimings m_uiFpsBenchmarkStageTimings{};
         std::unique_ptr<compute::IBoundsSubmission> m_neutralBoundsSubmission;
+        std::unique_ptr<compute::IRenderSubmission> m_neutralSdfPrebakeSubmission;
+        std::optional<async_rendering::RenderTaskRequest> m_neutralSdfPrebakeTask;
         std::optional<compute::RenderBounds> m_neutralModelBounds;
         std::optional<float> m_neutralBoundsErrorBound{};
         compute::RenderFreshnessStamp m_neutralBoundsFreshness{};

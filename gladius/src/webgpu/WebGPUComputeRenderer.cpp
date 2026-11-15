@@ -388,4 +388,63 @@ namespace gladius::webgpu
     {
         throw std::runtime_error("WebGPU renderer requires a materialized scene");
     }
+
+    std::unique_ptr<compute::IRenderSubmission> WebGPUComputeRenderer::submitSdfPrecomputation(
+      compute::IRenderScene const & scene,
+      compute::RenderBounds const & bounds,
+      std::uint32_t const gridSize,
+      std::uint64_t const parameterGeneration)
+    {
+        if (!m_backend || !m_backend->isAvailable() || !bounds.isValid())
+        {
+            return nullptr;
+        }
+        auto const * analyticScene = dynamic_cast<WebGPUAnalyticRenderScene const *>(&scene);
+        if (analyticScene == nullptr || analyticScene->getBackendKind() != getBackendKind())
+        {
+            return nullptr;
+        }
+        auto const parameterSnapshot = analyticScene->getParameterSnapshot();
+        if (!parameterSnapshot || !parameterSnapshot->isValid())
+        {
+            return nullptr;
+        }
+        auto const & snapshot = analyticScene->getSnapshot();
+        bool const hasMeshes = !snapshot.meshResources.empty();
+        bool const hasBeams = !snapshot.beamLatticeResources.empty();
+        bool const hasImages = !snapshot.imageResources.empty();
+
+        SdfPrebakeRequest request{};
+        request.shaderSource = WebGPUFrameShaderComposer::composeSdfPrebake(
+          snapshot.analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+        request.parameters = parameterSnapshot->values;
+        request.meshPayloads.reserve(snapshot.meshResources.size());
+        for (auto const & mesh : snapshot.meshResources)
+        {
+            request.meshPayloads.push_back(mesh.data);
+        }
+        request.beamPayloads.reserve(snapshot.beamLatticeResources.size());
+        for (auto const & beam : snapshot.beamLatticeResources)
+        {
+            request.beamPayloads.push_back(beam.data);
+        }
+        request.imagePayloads.reserve(snapshot.imageResources.size());
+        for (auto const & image : snapshot.imageResources)
+        {
+            request.imagePayloads.push_back(image.data);
+        }
+        request.bounds = bounds;
+        request.gridSize = gridSize;
+        request.sceneGeneration = snapshot.sceneGeneration;
+        request.parameterGeneration = parameterGeneration;
+        return m_backend->submitSdfPrecomputation(std::move(request));
+    }
+
+    void WebGPUComputeRenderer::invalidatePrecomputedSdf() noexcept
+    {
+        if (m_backend)
+        {
+            m_backend->invalidatePrecomputedSdf();
+        }
+    }
 }

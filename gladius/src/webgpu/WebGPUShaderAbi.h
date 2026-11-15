@@ -80,4 +80,21 @@ namespace gladius::webgpu
     /// FrameUniforms::flagsModeReserved.x bit that coarsens surface hit refinement.
     /// Mirrors RF_COARSE_REFINEMENT in src/kernel/types.h and frame_compute.wgsl.
     inline constexpr std::uint32_t RF_COARSE_REFINEMENT = 512u;
+
+    /// FrameUniforms::flagsModeReserved.x bit that enables prebaked 3D SDF empty-space skipping.
+    /// Mirrors RF_USE_PRECOMPUTED_SDF in src/kernel/types.h and frame_compute.wgsl.
+    inline constexpr std::uint32_t RF_USE_PRECOMPUTED_SDF = 1024u;
+
+    /**
+     * @brief Metadata for the optional prebaked 3D SDF texture (frame binding 11, prebake binding 0).
+     */
+    struct alignas(16) PrecomputedSdfUniforms
+    {
+        std::array<float, 4> bboxMinAndTolerance{};
+        std::array<float, 4> bboxMaxAndValid{};
+        std::array<std::uint32_t, 4> gridDims{};
+    };
+
+    static_assert(alignof(PrecomputedSdfUniforms) == 16u);
+    static_assert(sizeof(PrecomputedSdfUniforms) == 48u);
 }

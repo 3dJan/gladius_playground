@@ -37,6 +37,13 @@ namespace gladius::ui::async_rendering
         std::vector<RenderCommand> commands;
     };
 
+    struct ProgressiveRenderProgress
+    {
+        bool active{false};
+        std::uint32_t nextRow{0u};
+        std::uint32_t totalRows{0u};
+    };
+
     /**
      * @brief Connects coordinator display tasks to an IComputeRenderer without owning UI policy.
      *
@@ -48,7 +55,10 @@ namespace gladius::ui::async_rendering
     class NeutralRenderScheduler
     {
       public:
-        static constexpr std::size_t MAX_PROGRESSIVE_CHUNK_PIXELS = 2u * 1024u;
+        static constexpr std::size_t MIN_PROGRESSIVE_CHUNK_PIXELS = 2u * 1024u;
+        static constexpr std::size_t MAX_PROGRESSIVE_CHUNK_PIXELS = 16u * 1024u;
+        static constexpr std::size_t MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS = 256u * 1024u;
+        static constexpr float TARGET_PROGRESSIVE_CHUNK_MS = 20.0f;
 
         using RequestFactory = std::function<std::optional<compute::RenderRequest>(RenderTaskRequest const &)>;
 
@@ -71,6 +81,9 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] RenderWorkflowController const & workflow() const noexcept;
         [[nodiscard]] bool hasCurrentInFlightSubmission() const noexcept;
         [[nodiscard]] bool hasInFlightSubmissions() const noexcept;
+        [[nodiscard]] ProgressiveRenderProgress progressiveProgress() const noexcept;
+        [[nodiscard]] std::size_t currentProgressiveChunkPixels() const noexcept;
+        void adaptProgressiveChunkBudget(std::uint64_t durationNs) noexcept;
 
       private:
         [[nodiscard]] static bool isSupportedDisplayTask(RenderTaskType type) noexcept;
@@ -88,5 +101,6 @@ namespace gladius::ui::async_rendering
         std::uint32_t m_progressiveHeight{};
         std::uint32_t m_progressiveNextRow{};
         bool m_progressiveSequenceActive{false};
+        std::size_t m_progressiveChunkPixels{MAX_PROGRESSIVE_CHUNK_PIXELS};
     };
 }

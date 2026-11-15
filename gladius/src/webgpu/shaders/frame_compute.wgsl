@@ -42,6 +42,7 @@ const RF_FAST_SHADOW: u32 = 64u;
 const RF_FAST_AO: u32 = 128u;
 const RF_TILE_CULLING: u32 = 256u;
 const RF_COARSE_REFINEMENT: u32 = 512u;
+const RF_USE_PRECOMPUTED_SDF: u32 = 1024u;
 const RF_DISABLE_ADAPTIVE_OMEGA: u32 = 16384u;
 const RF_DEBUG_METRICS: u32 = 32768u;
 const RF_DISABLE_SHADOWS: u32 = 65536u;
@@ -52,6 +53,18 @@ const RF_ENABLE_TRANSLUCENCY: u32 = 1048576u;
 /// RF_DEBUG_METRICS rendering flag is set. Indices 0..8 mirror the struct fields.
 @group(0) @binding(10)
 var<storage, read_write> metrics: array<atomic<u32>>;
+
+struct PrecomputedSdfUniforms {
+    bbox_min_and_tolerance: vec4<f32>,
+    bbox_max_and_valid: vec4<f32>,
+    grid_dims: vec4<u32>,
+};
+
+@group(0) @binding(11)
+var<uniform> precomputed_sdf_info: PrecomputedSdfUniforms;
+
+@group(0) @binding(12)
+var precomputed_sdf: texture_3d<f32>;
 
 fn recordMetric(index: u32, value: u32) {
     if ((frame.flags_mode_reserved.x & RF_DEBUG_METRICS) == 0u || value == 0u) {
@@ -319,8 +332,58 @@ fn tile_misses_bounds(global_id: vec3<u32>, width: u32, row_count: u32) -> bool 
     return boxes_disjoint(tile_reach_bounds(global_id, width, row_count), background_skip_bounds());
 }
 
+fn sample_precomputed_sdf(position: vec3<f32>) -> f32 {
+    let bbox_min = precomputed_sdf_info.bbox_min_and_tolerance.xyz;
+    let bbox_max = precomputed_sdf_info.bbox_max_and_valid.xyz;
+    let dims = precomputed_sdf_info.grid_dims.xyz;
+    let span = max(bbox_max - bbox_min, vec3<f32>(1.0e-5f));
+    let uvw = clamp((position - bbox_min) / span, vec3<f32>(0.0f), vec3<f32>(1.0f));
+    let max_coord = vec3<i32>(dims) - vec3<i32>(1);
+    let coord = uvw * vec3<f32>(max_coord);
+    let i0 = clamp(vec3<i32>(floor(coord)), vec3<i32>(0), max_coord);
+    let i1 = min(i0 + vec3<i32>(1), max_coord);
+    let f = coord - vec3<f32>(i0);
+
+    let c000 = textureLoad(precomputed_sdf, vec3<i32>(i0.x, i0.y, i0.z), 0).r;
+    let c100 = textureLoad(precomputed_sdf, vec3<i32>(i1.x, i0.y, i0.z), 0).r;
+    let c010 = textureLoad(precomputed_sdf, vec3<i32>(i0.x, i1.y, i0.z), 0).r;
+    let c110 = textureLoad(precomputed_sdf, vec3<i32>(i1.x, i1.y, i0.z), 0).r;
+    let c001 = textureLoad(precomputed_sdf, vec3<i32>(i0.x, i0.y, i1.z), 0).r;
+    let c101 = textureLoad(precomputed_sdf, vec3<i32>(i1.x, i0.y, i1.z), 0).r;
+    let c011 = textureLoad(precomputed_sdf, vec3<i32>(i0.x, i1.y, i1.z), 0).r;
+    let c111 = textureLoad(precomputed_sdf, vec3<i32>(i1.x, i1.y, i1.z), 0).r;
+
+    let c00 = mix(c000, c100, f.x);
+    let c10 = mix(c010, c110, f.x);
+    let c01 = mix(c001, c101, f.x);
+    let c11 = mix(c011, c111, f.x);
+    let c0 = mix(c00, c10, f.y);
+    let c1 = mix(c01, c11, f.y);
+    return mix(c0, c1, f.z);
+}
+
+fn evaluate_model_cached(position: vec3<f32>) -> vec4<f32> {
+    let flags = frame.flags_mode_reserved.x;
+    if ((flags & RF_USE_PRECOMPUTED_SDF) != 0u &&
+        (flags & (RF_SHOW_FIELD | RF_SHOW_STACK)) == 0u &&
+        precomputed_sdf_info.bbox_max_and_valid.w > 0.5f) {
+        let bbox_min = precomputed_sdf_info.bbox_min_and_tolerance.xyz;
+        let bbox_max = precomputed_sdf_info.bbox_max_and_valid.xyz;
+        let tolerance = precomputed_sdf_info.bbox_min_and_tolerance.w;
+        let outside_dist = bounding_box_distance(position, bbox_min, bbox_max);
+        if (outside_dist > tolerance) {
+            return vec4<f32>(0.5f, 0.5f, 0.5f, outside_dist);
+        }
+        let cached_distance = sample_precomputed_sdf(position);
+        if (abs(cached_distance) > tolerance) {
+            return vec4<f32>(0.5f, 0.5f, 0.5f, cached_distance);
+        }
+    }
+    return evaluateModel(position);
+}
+
 fn evaluate_surface(position: vec3<f32>) -> SceneSample {
-    let model =  evaluateModel(position);
+    let model = evaluate_model_cached(position);
     var sample = SceneSample(model.w, model.xyz, 1.0f);
     let flags = frame.flags_mode_reserved.x;
     let slice_height = frame.time_slice_quality_normal.y;

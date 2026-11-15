@@ -1,10 +1,12 @@
 #if defined(GLADIUS_ENABLE_WEBGPU)
 
 #include "WebGPUQualityReferences.h"
+#include "ui/render/WebGPUFrameAccelerationPolicy.h"
 
 #include "gtest/gtest.h"
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -263,6 +265,96 @@ namespace gladius::tests::quality
             EXPECT_GE(histogramOverlap, 0.90) << entry.model << " @" << entry.resolution
                                              << " histogram overlap " << histogramOverlap;
         }
+    }
+
+    TEST(WebGPUPrecomputedSdf, PrebakedGrid_MatchesExactHqAndAcceleratesVoronoi)
+    {
+        std::string skipReason;
+        auto context = tryCreateContext(skipReason);
+        if (context == nullptr)
+        {
+            GTEST_SKIP() << skipReason;
+        }
+
+        auto const voronoiPath = []() -> std::filesystem::path
+        {
+            auto dir = std::filesystem::current_path();
+            for (int i = 0; i < 6; ++i)
+            {
+                auto candidate = dir / "examples" / "beam_lattice" / "variable_voronoi.3mf";
+                if (std::filesystem::exists(candidate))
+                {
+                    return candidate;
+                }
+                if (!dir.has_parent_path())
+                {
+                    break;
+                }
+                dir = dir.parent_path();
+            }
+            return {};
+        }();
+        if (voronoiPath.empty() || !std::filesystem::exists(voronoiPath))
+        {
+            GTEST_SKIP() << "Missing variable_voronoi.3mf";
+        }
+
+        auto scene = bench::createScene(voronoiPath, context);
+        ASSERT_TRUE(scene->getModelBounds().isValid());
+
+        auto const hqExactSettings = bench::createHqSettings();
+        // Warmup + timed HQ exact
+        (void) renderImage(*scene, 512u, hqExactSettings);
+        auto const exactStart = std::chrono::steady_clock::now();
+        auto const exactHq = renderImage(*scene, 512u, hqExactSettings);
+        auto const exactMs = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - exactStart)
+                               .count();
+
+        // Prebake 128^3 3D SDF
+        auto const bakeStart = std::chrono::steady_clock::now();
+        auto prebakeSubmission =
+          scene->getSession().submitSdfPrecomputation(scene->getModelBounds(), 128u, 0u);
+        ASSERT_NE(prebakeSubmission, nullptr);
+        prebakeSubmission->wait();
+        auto const bakeMs = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - bakeStart)
+                              .count();
+        ASSERT_EQ(prebakeSubmission->getStatus(), compute::RenderSubmissionStatus::Succeeded)
+          << prebakeSubmission->getErrorMessage();
+
+        // Warmup + timed HQ with prebaked 3D SDF
+        auto hqCachedSettings = hqExactSettings;
+        hqCachedSettings.flags |= RF_USE_PRECOMPUTED_SDF;
+        (void) renderImage(*scene, 512u, hqCachedSettings);
+        auto const cachedStart = std::chrono::steady_clock::now();
+        auto const cachedHq = renderImage(*scene, 512u, hqCachedSettings);
+        auto const cachedMs = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - cachedStart)
+                                .count();
+
+        auto const psnr = qa::computePsnrRgb(cachedHq, exactHq);
+        auto const ssim = qa::computeSsim(cachedHq, exactHq);
+        EXPECT_EQ(qa::countInvalidPixels(cachedHq), 0u);
+        EXPECT_GE(psnr, 40.0) << "Prebaked SDF HQ PSNR " << psnr;
+        EXPECT_GE(ssim, 0.98) << "Prebaked SDF HQ SSIM " << ssim;
+
+        // Interactive preview profile (256x256, shadows/AO/translucency disabled, maxRaySteps=192)
+        auto const previewSettings = ui::async_rendering::applyFrameAccelerationSettings(
+          hqExactSettings, ui::async_rendering::RenderTaskType::LowResolutionPreview);
+        (void) renderImage(*scene, 256u, previewSettings);
+        auto const previewStart = std::chrono::steady_clock::now();
+        auto const previewImg = renderImage(*scene, 256u, previewSettings);
+        auto const previewMs = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - previewStart)
+                                 .count();
+        EXPECT_EQ(qa::countInvalidPixels(previewImg), 0u);
+
+        std::cout << "variable_voronoi.3mf: exact HQ 512=" << exactMs
+                  << " ms, prebake 128^3=" << bakeMs
+                  << " ms, cached HQ 512=" << cachedMs
+                  << " ms (PSNR=" << psnr << " dB, SSIM=" << ssim
+                  << "), preview 256=" << previewMs << " ms\n";
     }
 }
 

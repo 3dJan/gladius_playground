@@ -88,16 +88,13 @@ namespace gladius::ui::async_rendering
                                       *m_previewSeedCandidate,
                                       frame,
                                       candidate);
-            if (startsProgressiveFrame &&
-                (!hasCompatibleSeed ||
-                 !resampleCompleteFrameToBuffer(*m_previewSeedFrame,
-                                                frame.width,
-                                                frame.height,
-                                                m_clearData.data(),
-                                                alignedBytesPerRow / sizeof(std::uint32_t))))
+            if (hasCompatibleSeed)
             {
-                std::cerr << "[WebGPUFramePresenter] Progressive frame requires a current low-resolution preview\n";
-                return false;
+                (void) resampleCompleteFrameToBuffer(*m_previewSeedFrame,
+                                                     frame.width,
+                                                     frame.height,
+                                                     m_clearData.data(),
+                                                     alignedBytesPerRow / sizeof(std::uint32_t));
             }
         }
 

@@ -176,6 +176,7 @@ namespace gladius::ui::async_rendering
                         completion.taskResult.type == RenderTaskType::ProgressiveHighQualityChunk)
                     {
                         m_progressiveNextRow = completion.frame->endRow;
+                        adaptProgressiveChunkBudget(completion.taskResult.durationNs);
                         if (completion.taskResult.completedFrame)
                         {
                             resetProgressiveSequence();
@@ -213,6 +214,7 @@ namespace gladius::ui::async_rendering
         }
         m_workflow = RenderWorkflowController{};
         m_workflow.configureRealtime(config);
+        m_progressiveChunkPixels = MAX_PROGRESSIVE_CHUNK_PIXELS;
         resetProgressiveSequence();
     }
 
@@ -246,10 +248,42 @@ namespace gladius::ui::async_rendering
         auto const remainingRows = task.height - m_progressiveNextRow;
         auto const rowsPerChunk = std::max<std::size_t>(
           1u,
-          MAX_PROGRESSIVE_CHUNK_PIXELS / static_cast<std::size_t>(task.width));
+          m_progressiveChunkPixels / static_cast<std::size_t>(task.width));
         submissionTask.startLine = m_progressiveNextRow;
         submissionTask.lineCount = std::min<std::size_t>(remainingRows, rowsPerChunk);
         return submissionTask;
+    }
+
+    void NeutralRenderScheduler::adaptProgressiveChunkBudget(std::uint64_t const durationNs) noexcept
+    {
+        if (durationNs == 0u)
+        {
+            return;
+        }
+        double const observedMs = static_cast<double>(durationNs) / 1'000'000.0;
+        if (observedMs <= 0.0)
+        {
+            return;
+        }
+        double const ratio = std::clamp(static_cast<double>(TARGET_PROGRESSIVE_CHUNK_MS) / observedMs,
+                                        0.5,
+                                        2.0);
+        auto const scaled = static_cast<std::size_t>(static_cast<double>(m_progressiveChunkPixels) * ratio);
+        m_progressiveChunkPixels = std::clamp(scaled,
+                                              MIN_PROGRESSIVE_CHUNK_PIXELS,
+                                              MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS);
+    }
+
+    ProgressiveRenderProgress NeutralRenderScheduler::progressiveProgress() const noexcept
+    {
+        return ProgressiveRenderProgress{.active = m_progressiveSequenceActive,
+                                         .nextRow = m_progressiveNextRow,
+                                         .totalRows = m_progressiveHeight};
+    }
+
+    std::size_t NeutralRenderScheduler::currentProgressiveChunkPixels() const noexcept
+    {
+        return m_progressiveChunkPixels;
     }
 
     void NeutralRenderScheduler::resetProgressiveSequence() noexcept

@@ -137,6 +137,11 @@ namespace gladius::tests::bench
             return m_modelBounds;
         }
 
+        [[nodiscard]] compute::RenderBackendSession & getSession() noexcept
+        {
+            return *m_session;
+        }
+
         [[nodiscard]] std::uint64_t getSceneGeneration() const noexcept
         {
             return m_session->getSceneGeneration();

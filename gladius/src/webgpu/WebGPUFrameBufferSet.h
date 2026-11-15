@@ -104,6 +104,30 @@ namespace gladius::webgpu
             return m_timestampStagingBuffer;
         }
 
+        /// Ensure the 3D precomputed SDF texture and uniform buffer exist (at least 1x1x1).
+        void ensurePrecomputedSdfResources(wgpu::Device const & device,
+                                         wgpu::Queue const & queue,
+                                         std::uint32_t gridSize);
+        void writePrecomputedSdfUniforms(wgpu::Queue const & queue,
+                                         PrecomputedSdfUniforms const & uniforms) const;
+        void invalidatePrecomputedSdf(wgpu::Queue const & queue);
+        [[nodiscard]] bool hasPrecomputedSdfResources() const noexcept
+        {
+            return m_precomputedSdfUniformBuffer != nullptr && m_precomputedSdfTextureView != nullptr;
+        }
+        [[nodiscard]] std::uint32_t getPrecomputedSdfGridSize() const noexcept
+        {
+            return m_precomputedSdfGridSize;
+        }
+        [[nodiscard]] wgpu::Buffer const & getPrecomputedSdfUniformBuffer() const noexcept
+        {
+            return m_precomputedSdfUniformBuffer;
+        }
+        [[nodiscard]] wgpu::TextureView const & getPrecomputedSdfTextureView() const noexcept
+        {
+            return m_precomputedSdfTextureView;
+        }
+
       private:
         std::uint32_t m_width{};
         std::uint32_t m_height{};
@@ -129,5 +153,9 @@ namespace gladius::webgpu
         wgpu::QuerySet m_querySet;
         wgpu::Buffer m_timestampResolveBuffer;
         wgpu::Buffer m_timestampStagingBuffer;
+        wgpu::Buffer m_precomputedSdfUniformBuffer;
+        wgpu::Texture m_precomputedSdfTexture;
+        wgpu::TextureView m_precomputedSdfTextureView;
+        std::uint32_t m_precomputedSdfGridSize{0u};
     };
 }

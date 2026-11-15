@@ -220,9 +220,14 @@ settings inside the `RenderWindow` async scheduler:
 
 | Task type | Flags applied | Why |
 |-----------|---------------|-----|
-| `LowResolutionPreview` | background-skip, tile-culling, fast shadow, fast AO, coarse refinement | preview output may be approximate |
-| `RealtimeFullFrame`, `StaticFullFrameProbe`, `ProgressiveHighQualityChunk` | background-skip, tile-culling only | these feed the high-quality frame stamp and must stay bit-exact |
+| `LowResolutionPreview` | background-skip, tile-culling, precomputed SDF, coarse refinement, disable shadows, disable AO (and translucency disabled, `maxRaySteps <= 192`, `normalOffset >= 0.0015`) | preview output may be approximate and must stay realtime during parameter/camera edits |
+| `RealtimeFullFrame`, `StaticFullFrameProbe`, `ProgressiveHighQualityChunk` | background-skip, tile-culling, precomputed SDF | these feed the high-quality frame stamp; precomputed SDF skips empty space (`> 2.5 * voxelSize`) while evaluating exact `evaluateModel` near surfaces |
 | `StreamingPreview` and non-frame tasks | none | OpenCL-only / not a frame dispatch |
+
+Background HQ catch-up uses adaptive progressive chunk sizing in
+`NeutralRenderScheduler` (2K–256K pixels/chunk targeting ~20 ms per chunk) and async
+`RenderTaskType::SdfPrecomputation` (`128³` or `64³` `R32Float` 3D texture prebake in
+`WebGPUComputeBackend`, invalidated on scene/parameter edits).
 
 Background-skip and tile-culling are bounds guards that never change pixel output, so they
 are safe on the high-quality path. Tile-culling is what makes far-camera frames cheap
