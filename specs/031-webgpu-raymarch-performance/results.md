@@ -414,3 +414,64 @@ WGSL source greps) and
 (rays and hits identical, refinementTaps ≤ 2/3 of the precise path).
 
 **Full regression:** 1738 passed, 8 skipped, 0 failed.
+
+## COMBINE — Accepted knobs together, plus the workgroup-shape decision
+
+All measurements below are same-binary A/B runs on the committed HEAD (`c787372`), each
+config repeated 2–3 times and reduced by per-sample medians. Wall medians are divided by the
+wall median of the same baseline config, GPU medians by the GPU median of that same config —
+mixing the two baselines produced invalid GPU ratios in an earlier pass and those numbers are
+superseded here. Machine load average was ~9 throughout (`strata-host` at ~813 % CPU), so
+per-config median spread across repeats is 1.02–1.13; anything inside that band is noise.
+
+**HQ shape sweep** (flags 0, 3 repeats, 18 samples, geomean vs 16x16):
+
+| Shape | Wall ratio | Speedup | GPU ratio | Speedup | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `2x128` | 0.937 | **1.067x** | 0.930 | **1.075x** | every one of 18 samples faster (per-sample wall 0.877–0.987) |
+| `1x256` | 0.936 | 1.068x | 0.920 | 1.087x | `RadialRadiator.3mf@256` is 1.024 **slower** (per-sample 0.887–1.024) |
+
+HQ output stays bit-exact for both shapes and counters are identical to the stored baseline,
+so the shape change is purely a dispatch-layout change.
+
+**LQ shape sweep** (flags `120`, 2 repeats, 18 samples, geomean vs 16x16):
+
+| Shape | Wall ratio | GPU ratio |
+| --- | --- | --- |
+| `8x32` | 1.020 (slower) | 1.017 |
+| `4x64` | 1.011 (slower) | 1.018 |
+| `2x128` | 1.009 (slower) | 1.006 |
+| `1x256` | **0.940 (slower)** | 0.977 |
+
+`1x256` hurts `RadialRadiator.3mf` (1.155–1.163) and `lampbase.3mf` (1.167–1.199) — a net
+LQ loss. No shape beats 16x16 in the LQ path.
+
+**Flag isolation** (LQ, default shape, vs flags 0): skip-only wall 1.008x, tile-only wall
+0.994x / GPU 1.018x, skip+tile wall 1.008x — all inside the noise band. LQ `1x256` flags
+`120` vs `0` over 3 repeats: wall 1.007, GPU 1.006 (noise). Note that `createLqSettings()`
+always ORs `RF_FAST_SHADOW | RF_FAST_AO | RF_COARSE_REFINEMENT`, so `GLADIUS_BENCH_FLAGS=0`
+in the LQ path still carries the coarse knobs; the matrix can isolate skip/tile/shape only.
+
+**HQ flags `120` vs `0`** (default shape): wall 0.997, GPU 1.009 → timing neutral. Counter
+deltas: `totalRays`, `totalHits`, `shadowTaps`, `aoTaps` identical; `totalSteps` −1,771..−20,500
+(−0.05..0.5 %), `refinementTaps` −528..−8,892. Pixel parity remains bit-exact, and
+`WebGPURayMarchPerf_tests.cpp` asserts only `totalRays == resolution * resolution` and
+`totalHits > 0`, so the counter deltas do not fail the bench.
+
+**Ranked speed × quality summary (LQ path unless noted):**
+
+| Technique | Wall | GPU | Quality verdict |
+| --- | --- | --- | --- |
+| QK coarse refinement | **1.444x** | **1.662x** | LQ gate PASS on all 12 samples |
+| HQ workgroup `2x128` | 1.067x | 1.075x | bit-exact, counters unchanged |
+| HQ workgroup `1x256` | 1.068x | 1.087x | bit-exact, but one HQ sample regresses |
+| E7 tile culling | ~1.00x steady-state | ~1.02x | bit-exact; real value is the far-camera probe (5.56 ms → 0.67 ms ≈ 8.3x) |
+| E2 skip background rays | ~1.01x | ~1.01x | bit-exact; ~0.05 % steps in the bench corpus |
+| E3 fast shadow/AO | −0.8 % wall | −2.0 % GPU | LQ gate PASS |
+| E1/E5/E6/E8 | — | — | rejected (see their sections) |
+
+**Decision:** ship `2x128` as the WebGPU default frame workgroup shape. It wins on both wall
+and GPU in HQ with every sample faster, is neutral-to-positive in LQ, stays bit-exact, and
+changes no counters. `1x256` is rejected: its GPU-only HQ win comes with a `RadialRadiator@256`
+regression and a 0.940x net LQ loss. The coarse refinement flag stays flag-gated (never set by
+app-side flag assembly), so HQ remains bit-exact.

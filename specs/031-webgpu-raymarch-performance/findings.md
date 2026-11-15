@@ -205,3 +205,27 @@ empty space above/around the model) the potential is much larger.
   `translucencyInteriorStepSize = 4.0f` inflated the measured speedup ceiling (interior march
   dominated wall time). Always A/B control and variant from the *same* harness settings, and
   re-measure after restoring any accidentally deleted line.
+
+## Combine — what actually ships
+
+- **Workgroup shape is the only HQ win.** `2x128` gives **1.067x wall / 1.075x GPU** geomean
+  over the 18-sample HQ corpus with *every* sample faster, bit-exact output and identical
+  counters. `1x256` looks better on GPU alone (1.087x) but `RadialRadiator.3mf@256` is 1.024
+  slower, so it is rejected. In the LQ path no shape beats 16x16 (`1x256` is a 0.940x net
+  loss, hurting `RadialRadiator` and `lampbase`), so the shape default is chosen for HQ.
+- **The coarse refinement knob is the only real LQ win** (1.444x wall / 1.662x GPU). Skip,
+  tile culling and fast shadow/AO are individually inside the ±1.13 measurement-noise band in
+  steady-state benches; their value is *conditional*, not average: tile culling turns a
+  far-camera frame from 5.56 ms to 0.67 ms (~8.3x).
+- **Analysis rule that fixed earlier numbers:** divide GPU medians by the *GPU* median of the
+  same baseline config and wall medians by the *wall* median. Mixing baselines produced bogus
+  GPU ratios (the earlier "1.074x/1.085x" LQ shape figures are superseded).
+- **Missing JSON runs are transient device failures under load, not a harness bug.** Suppressing
+  stderr (`>/dev/null 2>&1`) hid the error; re-run without suppression to see it.
+- **Counter deltas vs gates:** flags `120` shifts `totalSteps` (−0.05..0.5 %) and
+  `refinementTaps` (−0.3..0.6 %) while rays/hits/shadowTaps/aoTaps stay identical. Pixel parity
+  stays bit-exact and the bench asserts only rays == pixels and hits > 0, so counter deltas are
+  safe. Do not add counter assertions for flag-gated paths.
+- **LQ isolation limit:** `createLqSettings()` always ORs the coarse knobs, so
+  `GLADIUS_BENCH_FLAGS=0` in the LQ path still runs coarse refinement/shadow/AO. Only
+  skip/tile/shape can be isolated there.
