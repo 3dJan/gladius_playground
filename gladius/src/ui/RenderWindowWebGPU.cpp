@@ -757,6 +757,21 @@ namespace gladius::ui
                                       : async_rendering::RenderTaskStatus::Failed},
                   true));
             }
+            else if (command.task.type == async_rendering::RenderTaskType::BoundingBoxUpdate)
+            {
+                if (m_neutralBoundsSubmission && !m_neutralBoundsFailed &&
+                    !getNeutralModelBounds().has_value())
+                {
+                    retainPendingCommands(commandIndex);
+                    return true;
+                }
+                queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+                  async_rendering::RenderTaskResult{.requestId = command.task.requestId,
+                                                    .type = command.task.type,
+                                                    .stamp = command.task.stamp,
+                                                    .status = async_rendering::RenderTaskStatus::Completed},
+                  true));
+            }
             else if (command.task.type == async_rendering::RenderTaskType::SdfPrecomputation)
             {
                 if (m_neutralSdfPrebakeSubmission)

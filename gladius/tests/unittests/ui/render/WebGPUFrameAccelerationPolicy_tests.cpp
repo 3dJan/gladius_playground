@@ -37,7 +37,7 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_EQ(preview.flags & RF_ENABLE_TRANSLUCENCY, 0u);
         EXPECT_EQ(preview.flags & (RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM),
                   RF_SHOW_BUILDPLATE | RF_SHOW_COORDINATE_SYSTEM);
-        EXPECT_LE(preview.maxRaySteps, 192u);
+        EXPECT_LE(preview.maxRaySteps, 300u);
         EXPECT_GE(preview.normalOffset, 0.0015f);
         EXPECT_LE(preview.quality, 0.5f);
 

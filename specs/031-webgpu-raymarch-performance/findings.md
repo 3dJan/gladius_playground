@@ -267,6 +267,12 @@ empty space above/around the model) the potential is much larger.
   - Exact HQ 512: **1310.4 ms**
   - Prebake `128³`: **19.5 ms** (91.9 ms cold pipeline)
   - Cached HQ 512: **7.1 ms** (**~185x speedup**, PSNR **74.78 dB**, SSIM **0.999983**)
-  - Unbaked preview 256 (`maxRaySteps = 96`, vs `883 ms` at `192` steps): **61.1 ms** (**14.5x speedup** on parameter edits before prebake)
-  - Cached preview 256: **0.46 ms**
+  - Unbaked preview 256 (`maxRaySteps = 300`, vs `883 ms` at `192`? Note: `300` preserves grazing/cavity convergence on general models): **72.1 ms**
+  - Cached preview 256: **0.63 ms**
+- **`BoundingBoxUpdate` barrier fix:** `tryRenderWithNeutralBackend()` in both `RenderWindow.cpp`
+  and `RenderWindowWebGPU.cpp` previously completed `BoundingBoxUpdate` immediately even while
+  `m_neutralBoundsSubmission` was still pending, causing `SdfPrecomputation` to see missing
+  bounds and skip baking. Holding `BoundingBoxUpdate` until `m_neutralModelBounds` is ready
+  ensures `SdfPrecomputation` runs before `StaticFullFrameProbe` / `ProgressiveHighQualityChunk`,
+  so HQ rendering also gets the ~160x–185x prebaked SDF speedup.
 - **`RenderWindow.cpp` parity (`linux-releaseWithDebug`):** `linux-releaseWithDebug` builds `RenderWindow.cpp` (`GLADIUS_UI_BACKEND=OPENGL` + optional `--compute-backend=webgpu`), whereas `linux-webgpu-releaseWithDebug` builds `RenderWindowWebGPU.cpp`. Wired `SdfPrecomputation`, `adaptInteractivePreviewQuality`, `RealtimeRaymarchController` sample feedback, and `hqProgressiveRenderProgress()` into `RenderWindow.cpp` as well.

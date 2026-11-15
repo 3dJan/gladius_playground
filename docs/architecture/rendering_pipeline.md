@@ -220,7 +220,7 @@ settings inside the `RenderWindow` async scheduler:
 
 | Task type | Flags applied | Why |
 |-----------|---------------|-----|
-| `LowResolutionPreview` | background-skip, tile-culling, precomputed SDF, coarse refinement, disable shadows, disable AO (and translucency disabled, `maxRaySteps <= 192`, `normalOffset >= 0.0015`) | preview output may be approximate and must stay realtime during parameter/camera edits |
+| `LowResolutionPreview` | background-skip, tile-culling, precomputed SDF, coarse refinement, disable shadows, disable AO (and translucency disabled, `maxRaySteps <= 300`, `normalOffset >= 0.0015`) | preview output may be approximate and must stay realtime during parameter/camera edits |
 | `RealtimeFullFrame`, `StaticFullFrameProbe`, `ProgressiveHighQualityChunk` | background-skip, tile-culling, precomputed SDF | these feed the high-quality frame stamp; precomputed SDF skips empty space (`> 2.5 * voxelSize`) while evaluating exact `evaluateModel` near surfaces |
 | `StreamingPreview` and non-frame tasks | none | OpenCL-only / not a frame dispatch |
 
