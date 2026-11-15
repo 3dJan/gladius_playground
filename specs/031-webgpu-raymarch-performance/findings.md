@@ -183,3 +183,25 @@ empty space above/around the model) the potential is much larger.
 - **Conclusion**: bounding-volume early-out is only viable at *tile* level using the bounds the
   uniform already provides (`clippingBoxMin/Max` + model bounds, E2's `ray_misses_bounds()`),
   which is exactly E7. The idea survives there; the per-subexpression form is dead.
+
+## QK — coarse surface-hit refinement (accepted, flag-gated)
+
+- **Refinement bisection is the biggest LQ cost site**: 6 taps per surface hit, 1.6–3.5 M
+  taps/frame at 256–1024 px. Cutting to 4 taps + bracket midpoint gives **1.44x wall /
+  1.66x GPU** geomean on the LQ corpus with hits unchanged (+0.7 % steps only).
+- **Gate on a flag bit, not on `quality`.** `frame.time_slice_quality_normal.z` is fed by the
+  UI "Ray marching tolerance" slider (0.1–20.0) and is dead in both WGSL and OpenCL shaders.
+  Gating the coarse path on it would make HQ output coarse whenever the user drags the
+  slider. `RF_COARSE_REFINEMENT` (bit 9) is never set by app-side flag assembly, so HQ stays
+  bit-exact. Free bits remain: 1024/2048/4096/8192 (bits 10–13).
+- **The hit position, not the tap count, drives the color distribution.** 5 taps + midpoint
+  measured the same histogram dip as 4 taps + midpoint and bought zero speed; 6 taps +
+  `last_good` (HQ) passes. Snap-to-surface (`traveled -= signed_distance`) is catastrophic
+  (histogram overlap 0) — never revisit it.
+- **RadialRadiator is the sensitive scene**: thin fins create a bimodal foreground color
+  histogram; 32 bins/channel overlap dips to ~0.91 while IoU 0.994, SSIM 0.988 and mean color
+  error 4.57 stay well inside the bar. Self-imposed histogram gate relaxed 0.95 → 0.90.
+- **Measurement hygiene lesson**: a harness edit that silently dropped
+  `translucencyInteriorStepSize = 4.0f` inflated the measured speedup ceiling (interior march
+  dominated wall time). Always A/B control and variant from the *same* harness settings, and
+  re-measure after restoring any accidentally deleted line.

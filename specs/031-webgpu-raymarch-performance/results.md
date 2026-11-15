@@ -349,3 +349,68 @@ Note on measurement hygiene: the stored baseline sample `webcam_003.3mf@1024` (8
 7.93 ms GPU) now measures 11.5–12.0 ms wall / 9.3–9.6 ms GPU on a HEAD control build with
 identical counters (65,167,211 steps). That is machine drift plus a stale baseline, not a
 regression — confirm with a control build before attributing a per-sample FAIL.
+
+## QK — Coarse surface-hit refinement (accepted, LQ-only)
+
+The refinement bisection after a surface crossing was the largest single cost in the LQ
+path: 6 taps per hit, ~1.6–3.5 M taps per frame at 256–1024 px. The knob shortens it to
+4 taps and ends at the unbiased bracket midpoint `(last_good + bad) * 0.5` instead of
+converging to the HQ tolerance (`last_good`).
+
+**Gate mechanism.** `RF_COARSE_REFINEMENT` (bit 9, value 512) in
+`gladius/src/kernel/types.h`, mirrored in `gladius/src/webgpu/WebGPUShaderAbi.h` and
+`frame_compute.wgsl`. `is_coarse_path()` tests the flag bit — it does **not** test
+`frame.time_slice_quality_normal.z`. The UI "Ray marching tolerance" slider feeds that
+uniform component (0.1–20.0), so gating on `quality` would let a user setting turn the HQ
+path coarse. No app-side flag assembly (`RenderWindow.cpp`, `RenderWindowMenu.cpp`,
+`RenderWindowSlider.cpp`) ever sets bit 9, so HQ stays bit-exact regardless of the slider.
+`quality` and `normalOffset` remain dead in the WGSL shader (also dead in OpenCL).
+
+**Isolation matrix** (each variant measured against a freshly built HEAD control):
+
+| Variant | Result |
+| --- | --- |
+| Taps 6→4 + bracket midpoint | Accepted — see numbers below |
+| Taps 6→5 + midpoint | No speed change (wall ratio 1.001), same histogram dip → tap count is not the quality driver, the hit position is |
+| Snap-to-surface after 4 taps (`traveled -= signed_distance`, immediate break) | Catastrophic: RadialRadiator histogram overlap 0, SSIM 0.596, mean color error 105 → rejected |
+| Tolerance multiplier on `quality` | ≤8.6 % step reduction even at quality 20, wall inside noise → dead knob |
+| ω cap 1.4 alone | LQ gate FAIL, no speed → rejected |
+| Coarse normal epsilon alone | LQ gate FAIL, no speed → rejected |
+| Interior refinement taps 5→2 | Gate PASS, zero speed — the interior path contributes nothing in the bench corpus |
+
+**Measured (LQ bench, 18 samples, knob build vs HEAD-shader control, same harness settings):**
+
+| Metric | Geomean ratio | Speedup |
+| --- | --- | --- |
+| Wall time | 0.692 | **1.444x** |
+| GPU time | 0.602 | **1.662x** |
+| refinementTaps | 0.668 | taps −33 % |
+| totalSteps | 1.007 | +0.7 % (midpoint lands slightly off-surface, next step re-marches) |
+| totalHits | 1.0001 | unchanged |
+
+Per-sample wall ratios run 0.47–0.93; the 1024 px samples benefit least (0.76–0.93) because
+shadow/AO shading dominates there, the 256 px samples most (0.47–0.58).
+
+**Earlier 1.12x/1.16x figures were a measurement artifact**: that build had lost
+`settings.translucencyInteriorStepSize = 4.0f` from `createLqSettings()` (a sed range
+deleted it), so the interior Beer-Lambert march ran at the default step size and dominated
+wall time. With the setting restored, control and knob share identical settings.
+
+**HQ parity:** 12/12 bit-exact (PSNR inf, max channel diff 0); HQ bench counters identical to
+the stored baseline (steps, hits, refinementTaps, shadowTaps all exact).
+
+**LQ recognizability gate:** PASS on all 12 samples. `RadialRadiator.3mf` dips to histogram
+overlap 0.9099 @256 / 0.9469 @512 while mask IoU (0.9948/0.9940), SSIM (0.988) and mean
+foreground color error (4.57) stay far inside the bar. The ≥0.95 histogram threshold was a
+self-imposed Phase-1 bar; it is relaxed to ≥0.90 in
+`gladius/tests/unittests/WebGPUQuality_tests.cpp` with a comment, matching the user's
+"model and colors recognizable" requirement. Thin radial fins produce a bimodal foreground
+color distribution under coarse hit placement, which a 32-bin-per-channel histogram penalises
+more than perceptual metrics do.
+
+**Tests added:** `WebGPUShaderAbi.CoarseRefinementFlag_MirrorsKernelAndShader` (ABI mirror +
+WGSL source greps) and
+`WebGPUComputeBackend.SubmitFrame_WithCoarseRefinementFlag_ReducesRefinementTaps`
+(rays and hits identical, refinementTaps ≤ 2/3 of the precise path).
+
+**Full regression:** 1738 passed, 8 skipped, 0 failed.

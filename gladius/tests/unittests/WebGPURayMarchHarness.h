@@ -105,7 +105,7 @@ namespace gladius::tests::bench
     inline compute::RenderSettingsSnapshot createLqSettings()
     {
         auto settings = createHqSettings();
-        settings.flags |= RF_FAST_SHADOW | RF_FAST_AO;
+        settings.flags |= RF_FAST_SHADOW | RF_FAST_AO | RF_COARSE_REFINEMENT;
         settings.maxRaySteps = 300u;
         settings.normalOffset = 0.0005f;
         settings.quality = 0.5f;

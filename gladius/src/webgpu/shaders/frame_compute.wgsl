@@ -41,6 +41,7 @@ const RF_SKIP_BACKGROUND_RAYS: u32 = 32u;
 const RF_FAST_SHADOW: u32 = 64u;
 const RF_FAST_AO: u32 = 128u;
 const RF_TILE_CULLING: u32 = 256u;
+const RF_COARSE_REFINEMENT: u32 = 512u;
 const RF_DISABLE_ADAPTIVE_OMEGA: u32 = 16384u;
 const RF_DEBUG_METRICS: u32 = 32768u;
 const RF_DISABLE_SHADOWS: u32 = 65536u;
@@ -386,6 +387,16 @@ fn evaluate_surface(position: vec3<f32>) -> SceneSample {
     return sample;
 }
 
+/// True when the frame requests the low-quality surface-hit refinement path.
+fn is_coarse_path() -> bool {
+    return (frame.flags_mode_reserved.x & RF_COARSE_REFINEMENT) != 0u;
+}
+
+/// Bisect taps used to localize a surface crossing.
+fn surface_refinement_taps() -> u32 {
+    return select(6u, 4u, is_coarse_path());
+}
+
 fn estimate_normal(position: vec3<f32>) -> vec3<f32> {
     let epsilon = 0.0001f;
     var normal = vec3<f32>(0.0);
@@ -657,7 +668,7 @@ fn march_surface(eye: vec3<f32>, ray_direction: vec3<f32>, start_distance: f32, 
         if (distance_sign_changed || slope_sign_changed || close_to_surface) {
             var last_good_distance = traveled - abs(previous_signed_distance);
             var bad_distance = traveled;
-            for (var refinement = 0u; refinement < 6u; refinement++) {
+            for (var refinement = 0u; refinement < surface_refinement_taps(); refinement++) {
                 refinementTaps = refinementTaps + 1u;
                 let middle_distance = (last_good_distance + bad_distance) * 0.5f;
                 let middle_sample = evaluate_surface(eye + ray_direction * middle_distance);
@@ -670,7 +681,11 @@ fn march_surface(eye: vec3<f32>, ray_direction: vec3<f32>, start_distance: f32, 
                     last_good_distance = middle_distance;
                 }
             }
-            traveled = last_good_distance;
+            // Coarse path stops bisecting after 4 taps and takes the unbiased
+            // bracket midpoint instead of converging to the HQ tolerance.
+            traveled = select(last_good_distance,
+                              (last_good_distance + bad_distance) * 0.5f,
+                              is_coarse_path());
             position = eye + ray_direction * traveled;
             model = evaluate_surface(position);
             signed_distance = model.distance;

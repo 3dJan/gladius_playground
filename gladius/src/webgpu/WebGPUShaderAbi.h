@@ -76,4 +76,8 @@ namespace gladius::webgpu
     /// frustum box provably misses the scene bounds. Mirrors RF_TILE_CULLING in
     /// src/kernel/types.h and frame_compute.wgsl.
     inline constexpr std::uint32_t RF_TILE_CULLING = 256u;
+
+    /// FrameUniforms::flagsModeReserved.x bit that coarsens surface hit refinement.
+    /// Mirrors RF_COARSE_REFINEMENT in src/kernel/types.h and frame_compute.wgsl.
+    inline constexpr std::uint32_t RF_COARSE_REFINEMENT = 512u;
 }

@@ -418,6 +418,19 @@ namespace gladius::compute::tests
                   std::string::npos);
     }
 
+    TEST(WebGPUShaderAbi, CoarseRefinementFlag_MirrorsKernelAndShader)
+    {
+        EXPECT_EQ(webgpu::RF_COARSE_REFINEMENT, RF_COARSE_REFINEMENT);
+        EXPECT_EQ(webgpu::RF_COARSE_REFINEMENT, 512u);
+
+        auto const source = loadFrameShaderSource();
+        ASSERT_FALSE(source.empty());
+        EXPECT_NE(source.find("const RF_COARSE_REFINEMENT: u32 = 512u;"), std::string::npos);
+        EXPECT_NE(source.find("RF_COARSE_REFINEMENT) != 0u"), std::string::npos);
+        EXPECT_NE(source.find("fn surface_refinement_taps()"), std::string::npos);
+        EXPECT_NE(source.find("refinement < surface_refinement_taps()"), std::string::npos);
+    }
+
 #if defined(GLADIUS_ENABLE_WEBGPU)
     TEST(WebGPUComputeBackend, SubmitSlice_WithHeadlessDevice_ReturnsReadbackPixels)
     {
@@ -667,6 +680,53 @@ namespace gladius::compute::tests
         ASSERT_TRUE(nearCulledMetrics.has_value());
         EXPECT_EQ(nearCulledMetrics->totalRays, farCulledMetrics->totalRays);
         EXPECT_GT(nearCulledMetrics->totalSteps, 0u);
+    }
+
+    TEST(WebGPUComputeBackend, SubmitFrame_WithCoarseRefinementFlag_ReducesRefinementTaps)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        std::unique_ptr<webgpu::WebGPUComputeBackend> backend;
+        try
+        {
+            backend = std::make_unique<webgpu::WebGPUComputeBackend>();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        auto const run = [&](std::uint32_t const flags)
+          -> std::optional<FrameMetrics>
+        {
+            auto submission = backend->submitFrame(
+              FrameRequest{.width = 33u,
+                           .height = 33u,
+                           .eyePosition = {0.0f, 0.0f, 2.0f},
+                           .maxTravelDistance = 10.0f,
+                           .renderingFlags = flags,
+                           .collectMetrics = true});
+            submission->wait();
+            EXPECT_EQ(submission->getStatus(), ComputeCompletionStatus::Succeeded)
+              << submission->getErrorMessage();
+            return submission->getFrameMetrics();
+        };
+
+        auto const precise = run(0u);
+        auto const coarse = run(RF_COARSE_REFINEMENT);
+        ASSERT_TRUE(precise.has_value());
+        ASSERT_TRUE(coarse.has_value());
+
+        // The coarse path bisects the same crossings, so hits and marching are unchanged;
+        // only the refinement bisection becomes shorter (4 taps instead of 6).
+        EXPECT_EQ(coarse->totalRays, precise->totalRays);
+        EXPECT_EQ(coarse->totalHits, precise->totalHits);
+        EXPECT_GT(precise->refinementTaps, 0u);
+        EXPECT_LT(coarse->refinementTaps, precise->refinementTaps);
+        EXPECT_LE(coarse->refinementTaps * 3u, precise->refinementTaps * 2u);
     }
 
     TEST(WebGPUComputeBackend, E7BackgroundHeavyProbe_FarCameraTileCullingSpeed)
