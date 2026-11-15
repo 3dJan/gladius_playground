@@ -61,7 +61,7 @@ namespace gladius::ui::async_rendering
         settings.flags |= chooseFrameAccelerationFlags(type);
         if (type == RenderTaskType::LowResolutionPreview)
         {
-            constexpr std::uint32_t previewMaxRaySteps = 192u;
+            constexpr std::uint32_t previewMaxRaySteps = 96u;
             constexpr float previewMinNormalOffset = 0.0015f;
             constexpr float previewMaxQuality = 0.5f;
 

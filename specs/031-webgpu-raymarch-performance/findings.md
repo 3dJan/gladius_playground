@@ -264,7 +264,9 @@ empty space above/around the model) the potential is much larger.
   while evaluating exact `evaluateModel` near the surface. Invalidated automatically on
   `replaceScene` and `updateParameterValues`.
 - **Beam-lattice benchmark (`variable_voronoi.3mf`, 1291 beams, 512x512):**
-  - Exact HQ 512: **1313.8 ms**
-  - Prebake `128³`: **13.7 ms** (91.9 ms cold pipeline)
-  - Cached HQ 512: **7.0 ms** (**~187x speedup**, PSNR **74.78 dB**, SSIM **0.999983**)
-  - Interactive preview 256: **0.47 ms**
+  - Exact HQ 512: **1310.4 ms**
+  - Prebake `128³`: **19.5 ms** (91.9 ms cold pipeline)
+  - Cached HQ 512: **7.1 ms** (**~185x speedup**, PSNR **74.78 dB**, SSIM **0.999983**)
+  - Unbaked preview 256 (`maxRaySteps = 96`, vs `883 ms` at `192` steps): **61.1 ms** (**14.5x speedup** on parameter edits before prebake)
+  - Cached preview 256: **0.46 ms**
+- **`RenderWindow.cpp` parity (`linux-releaseWithDebug`):** `linux-releaseWithDebug` builds `RenderWindow.cpp` (`GLADIUS_UI_BACKEND=OPENGL` + optional `--compute-backend=webgpu`), whereas `linux-webgpu-releaseWithDebug` builds `RenderWindowWebGPU.cpp`. Wired `SdfPrecomputation`, `adaptInteractivePreviewQuality`, `RealtimeRaymarchController` sample feedback, and `hqProgressiveRenderProgress()` into `RenderWindow.cpp` as well.

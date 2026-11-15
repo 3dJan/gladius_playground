@@ -303,6 +303,17 @@ namespace gladius::tests::quality
         ASSERT_TRUE(scene->getModelBounds().isValid());
 
         auto const hqExactSettings = bench::createHqSettings();
+        // Interactive preview profile BEFORE prebake (parameter-edit case)
+        auto const previewSettings = ui::async_rendering::applyFrameAccelerationSettings(
+          hqExactSettings, ui::async_rendering::RenderTaskType::LowResolutionPreview);
+        (void) renderImage(*scene, 256u, previewSettings);
+        auto const unbakedPreviewStart = std::chrono::steady_clock::now();
+        auto const unbakedPreviewImg = renderImage(*scene, 256u, previewSettings);
+        auto const unbakedPreviewMs = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - unbakedPreviewStart)
+                                        .count();
+        EXPECT_EQ(qa::countInvalidPixels(unbakedPreviewImg), 0u);
+
         // Warmup + timed HQ exact
         (void) renderImage(*scene, 512u, hqExactSettings);
         auto const exactStart = std::chrono::steady_clock::now();
@@ -339,9 +350,7 @@ namespace gladius::tests::quality
         EXPECT_GE(psnr, 40.0) << "Prebaked SDF HQ PSNR " << psnr;
         EXPECT_GE(ssim, 0.98) << "Prebaked SDF HQ SSIM " << ssim;
 
-        // Interactive preview profile (256x256, shadows/AO/translucency disabled, maxRaySteps=192)
-        auto const previewSettings = ui::async_rendering::applyFrameAccelerationSettings(
-          hqExactSettings, ui::async_rendering::RenderTaskType::LowResolutionPreview);
+        // Interactive preview profile AFTER prebake (camera-orbit case)
         (void) renderImage(*scene, 256u, previewSettings);
         auto const previewStart = std::chrono::steady_clock::now();
         auto const previewImg = renderImage(*scene, 256u, previewSettings);
@@ -354,7 +363,8 @@ namespace gladius::tests::quality
                   << " ms, prebake 128^3=" << bakeMs
                   << " ms, cached HQ 512=" << cachedMs
                   << " ms (PSNR=" << psnr << " dB, SSIM=" << ssim
-                  << "), preview 256=" << previewMs << " ms\n";
+                  << "), unbaked preview 256=" << unbakedPreviewMs
+                  << " ms, cached preview 256=" << previewMs << " ms\n";
     }
 }
 

@@ -328,6 +328,12 @@ namespace gladius::ui
             m_neutralBoundsSubmission->wait();
             m_neutralBoundsSubmission.reset();
         }
+        if (m_neutralSdfPrebakeSubmission)
+        {
+            m_neutralSdfPrebakeSubmission->requestCancellation();
+            m_neutralSdfPrebakeSubmission.reset();
+            m_neutralSdfPrebakeTask.reset();
+        }
         m_neutralModelBounds.reset();
         m_neutralBoundsErrorBound.reset();
         m_neutralBoundsFreshness = {};
@@ -357,6 +363,12 @@ namespace gladius::ui
         if (m_neutralBoundsSubmission)
         {
             m_neutralBoundsSubmission->requestCancellation();
+        }
+        if (m_neutralSdfPrebakeSubmission)
+        {
+            m_neutralSdfPrebakeSubmission->requestCancellation();
+            m_neutralSdfPrebakeSubmission.reset();
+            m_neutralSdfPrebakeTask.reset();
         }
         m_neutralModelBounds.reset();
         m_neutralBoundsErrorBound.reset();
@@ -602,6 +614,35 @@ namespace gladius::ui
             queueRenderDecision(m_neutralRenderScheduler.workflow().configureViewport(width, height));
         }
 
+        auto & workflow = m_neutralRenderScheduler.workflow();
+        workflow.setInteractivePreviewDimensionLimits(4096u, 10u * 1024u * 1024u);
+        if (m_neutralSdfPrebakeSubmission)
+        {
+            m_neutralSdfPrebakeSubmission->progress();
+            auto const status = m_neutralSdfPrebakeSubmission->getStatus();
+            if (status != compute::RenderSubmissionStatus::Pending)
+            {
+                auto const completedTask = m_neutralSdfPrebakeTask;
+                m_neutralSdfPrebakeSubmission.reset();
+                m_neutralSdfPrebakeTask.reset();
+                if (completedTask.has_value())
+                {
+                    auto const mappedStatus =
+                      status == compute::RenderSubmissionStatus::Succeeded
+                        ? async_rendering::RenderTaskStatus::Completed
+                        : (status == compute::RenderSubmissionStatus::Cancelled
+                             ? async_rendering::RenderTaskStatus::Cancelled
+                             : async_rendering::RenderTaskStatus::Failed);
+                    queueRenderDecision(workflow.completeTask(
+                      async_rendering::RenderTaskResult{.requestId = completedTask->requestId,
+                                                        .type = completedTask->type,
+                                                        .stamp = completedTask->stamp,
+                                                        .status = mappedStatus},
+                      true));
+                }
+            }
+        }
+
         auto pollResult = [&]()
         {
             UiFpsBenchmarkStageTimer schedulerPollTimer{
@@ -632,14 +673,79 @@ namespace gladius::ui
                 }
                 if (framePresented)
                 {
-                    (void) m_neutralRenderScheduler.workflow().presentCandidate(
+                    bool const presented = workflow.presentCandidate(
                       accepted.candidate,
-                      m_neutralRenderScheduler.workflow().latestStamp(),
+                      workflow.latestStamp(),
                       accepted.candidate.presentationMask);
+                    if (!presented)
+                    {
+                        continue;
+                    }
+
+                    auto const completion = std::find_if(
+                      pollResult.completions.begin(),
+                      pollResult.completions.end(),
+                      [&accepted](async_rendering::NeutralFrameSubmissionResult const & item)
+                      { return item.taskResult.requestId == accepted.candidate.frameId; });
+                    if (completion == pollResult.completions.end() ||
+                        completion->taskResult.status != async_rendering::RenderTaskStatus::Completed ||
+                        !completion->taskResult.producedDisplayFrame ||
+                        completion->taskResult.durationNs == 0u)
+                    {
+                        continue;
+                    }
+
+                    float const observedFrameTimeMs =
+                      static_cast<float>(completion->taskResult.durationNs) / 1'000'000.0f;
+                    async_rendering::RealtimeRaymarchSample const sample{
+                      .durationMs = observedFrameTimeMs,
+                      .width = accepted.frame.width,
+                      .height = accepted.frame.height,
+                      .renderedLines = static_cast<std::size_t>(accepted.frame.endRow -
+                                                                accepted.frame.firstRow),
+                      .totalLines = static_cast<std::size_t>(accepted.frame.height),
+                      .completedFrame = completion->taskResult.completedFrame,
+                      .cancelled = false};
+
+                    switch (completion->taskResult.type)
+                    {
+                    case async_rendering::RenderTaskType::ProgressiveHighQualityChunk:
+                        workflow.recordStaticProgressiveSample(sample);
+                        break;
+                    case async_rendering::RenderTaskType::StaticFullFrameProbe:
+                        workflow.recordStaticFullFrameSample(sample);
+                        break;
+                    case async_rendering::RenderTaskType::RealtimeFullFrame:
+                        workflow.recordInteractiveRealtimeSample(sample);
+                        break;
+                    case async_rendering::RenderTaskType::LowResolutionPreview:
+                        if (workflow.interactionState() !=
+                            async_rendering::RenderInteractionState::Static)
+                        {
+                            constexpr float targetFrameTimeMs = 25.0f;
+                            constexpr float minPreviewQuality = 0.02f;
+                            constexpr float maxPreviewQuality = 0.5f;
+                            constexpr float resizeThresholdPercent = 5.0f;
+                            float const targetQuality =
+                              async_rendering::adaptInteractivePreviewQuality(
+                                workflow.interactivePreviewQualityTarget(),
+                                targetFrameTimeMs,
+                                observedFrameTimeMs,
+                                minPreviewQuality,
+                                maxPreviewQuality);
+                            (void) workflow.updateInteractivePreviewQuality(targetQuality,
+                                                                            minPreviewQuality,
+                                                                            maxPreviewQuality,
+                                                                            resizeThresholdPercent);
+                        }
+                        break;
+                    default:
+                        break;
+                    }
                 }
                 else
                 {
-                    queueRenderDecision(m_neutralRenderScheduler.workflow().notifyRenderSettingsChanged());
+                    queueRenderDecision(workflow.notifyRenderSettingsChanged());
                     m_neutralRenderScheduler.requestCancellationForStale();
                 }
             }
@@ -740,6 +846,34 @@ namespace gladius::ui
                     .stamp = command.task.stamp,
                     .status = updated ? async_rendering::RenderTaskStatus::Completed
                                       : async_rendering::RenderTaskStatus::Failed},
+                  true));
+            }
+            else if (command.task.type == async_rendering::RenderTaskType::SdfPrecomputation)
+            {
+                if (m_neutralSdfPrebakeSubmission)
+                {
+                    retainPendingCommands(commandIndex);
+                    return true;
+                }
+                auto const bounds = getNeutralModelBounds();
+                if (bounds.has_value() && bounds->isValid())
+                {
+                    std::uint32_t const gridSize =
+                      workflow.interactivePreviewQualityTarget() < 0.25f ? 64u : 128u;
+                    m_neutralSdfPrebakeSubmission = renderBackendSession->submitSdfPrecomputation(
+                      *bounds, gridSize, command.task.stamp.parameterEpoch);
+                }
+                if (m_neutralSdfPrebakeSubmission)
+                {
+                    m_neutralSdfPrebakeTask = command.task;
+                    retainPendingCommands(commandIndex + 1u);
+                    return true;
+                }
+                queueRenderDecision(m_neutralRenderScheduler.workflow().completeTask(
+                  async_rendering::RenderTaskResult{.requestId = command.task.requestId,
+                                                    .type = command.task.type,
+                                                    .stamp = command.task.stamp,
+                                                    .status = async_rendering::RenderTaskStatus::Completed},
                   true));
             }
             else
@@ -2009,6 +2143,21 @@ namespace gladius::ui
 
     RenderWindow::HqProgressiveRenderProgress RenderWindow::hqProgressiveRenderProgress() const
     {
+        if (m_neutralBackendActive)
+        {
+            auto const neutralProgress = m_neutralRenderScheduler.progressiveProgress();
+            if (!neutralProgress.active || neutralProgress.totalRows == 0u)
+            {
+                return {};
+            }
+            float const fraction = std::clamp(
+              static_cast<float>(neutralProgress.nextRow) /
+                static_cast<float>(neutralProgress.totalRows),
+              0.0f,
+              1.0f);
+            return HqProgressiveRenderProgress{.active = true, .fraction = fraction};
+        }
+
         HqProgressiveRenderProgress progress;
 
         // HQ progressive rendering only advances while the camera is still. While the
@@ -2167,6 +2316,12 @@ namespace gladius::ui
         {
             queueRenderDecision(m_neutralRenderScheduler.workflow().notifyParameterChanged(true));
             m_neutralRenderScheduler.requestCancellationForStale();
+            if (m_neutralSdfPrebakeSubmission)
+            {
+                m_neutralSdfPrebakeSubmission->requestCancellation();
+                m_neutralSdfPrebakeSubmission.reset();
+                m_neutralSdfPrebakeTask.reset();
+            }
             m_neutralParameterInteractionPolicy.notifyParameterChanged(
               async_rendering::ParameterInteractionPolicy::Clock::now());
             if (m_view != nullptr)
