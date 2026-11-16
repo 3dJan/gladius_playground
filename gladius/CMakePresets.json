@@ -279,6 +279,9 @@
             "description": "",
             "displayName": "",
             "configurePreset": "linux-releaseWithDebug",
+            "environment": {
+                "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=65536"
+            },
             "output": {
                 "outputOnFailure": true,
                 "verbosity": "verbose",
@@ -290,6 +293,9 @@
             "description": "Tests without OpenCL requirements",
             "displayName": "RelWithDebInfo Tests (No OpenCL)",
             "configurePreset": "linux-releaseWithDebug-noOpenCL",
+            "environment": {
+                "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=65536"
+            },
             "output": {
                 "outputOnFailure": true,
                 "verbosity": "verbose",
@@ -341,6 +347,9 @@
                     "label": "api"
                 }
             },
+            "environment": {
+                "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=65536"
+            },
             "output": {
                 "outputOnFailure": true,
                 "verbosity": "default",
@@ -353,7 +362,8 @@
             "displayName": "All Tests",
             "configurePreset": "linux-releaseWithDebug",
             "environment": {
-                "GLADIUS_RUN_GPU_TESTS": "1"
+                "GLADIUS_RUN_GPU_TESTS": "1",
+                "GLIBC_TUNABLES": "glibc.rtld.optional_static_tls=65536"
             },
             "output": {
                 "outputOnFailure": true,
