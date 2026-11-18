@@ -199,6 +199,7 @@ namespace gladius
 
         void displayUI();
         void determineUiScale();
+        void determineUiScale(float xscale, float yscale);
         void recomputeTotalScale();
         void processPendingScreenshot();
 

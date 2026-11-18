@@ -212,6 +212,53 @@
             "displayName": "WebAssembly Release",
             "description": "Build the full Gladius application for WebGPU-enabled browsers with Emscripten",
             "inherits": "web-base"
+        },
+        {
+            "name": "macos-base",
+            "displayName": "macOS Base",
+            "description": "Base configuration for macOS builds",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            },
+            "cacheVariables": {
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "value": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
+                    "type": "FILEPATH"
+                },
+                "VCPKG_TARGET_TRIPLET": "arm64-osx",
+                "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-triplets",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "ENABLE_TRACY": "true",
+                "USE_CACHE": "true"
+            }
+        },
+        {
+            "name": "macos-webgpu-releaseWithDebug",
+            "description": "macOS RelWithDebInfo pure WebGPU configuration (no OpenVDB)",
+            "displayName": "macOS RelWithDebInfo (WebGPU only)",
+            "inherits": "macos-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "GLADIUS_ENABLE_OPENCL": "OFF",
+                "GLADIUS_ENABLE_WEBGPU": "ON",
+                "GLADIUS_ENABLE_OPENVDB": "OFF",
+                "GLADIUS_UI_BACKEND": "WEBGPU",
+                "ENABLE_OPENCL_TESTS": "OFF",
+                "CMAKE_THREAD_LIBS_INIT": "-lpthread",
+                "CMAKE_HAVE_PTHREAD_H": "TRUE",
+                "Threads_FOUND": "TRUE",
+                "OpenMP_CXX_FLAGS": "-Xclang -fopenmp",
+                "OpenMP_CXX_LIB_NAMES": "omp",
+                "OpenMP_omp_LIBRARY": "/opt/homebrew/opt/libomp/lib/libomp.dylib",
+                "CMAKE_CXX_FLAGS": "-isystem /opt/homebrew/opt/libomp/include"
+            }
         }
     ],
     "version": 3,
@@ -271,6 +318,11 @@
             "name": "web-release",
             "displayName": "WebAssembly Release",
             "configurePreset": "web-release"
+        },
+        {
+            "name": "macos-webgpu-releaseWithDebug",
+            "displayName": "macOS RelWithDebInfo (WebGPU only)",
+            "configurePreset": "macos-webgpu-releaseWithDebug"
         }
     ],
     "testPresets": [

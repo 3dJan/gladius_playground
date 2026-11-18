@@ -13,8 +13,11 @@ namespace gladius
         std::size_t requiredSize = 0U;
         getenv_s(&requiredSize, nullptr, 0U, name);
         return requiredSize > 0U;
-#else
+#elif __GLIBC__
         char const * const value = ::secure_getenv(name);
+        return value != nullptr && value[0] != '\0';
+#else
+        char const * const value = ::getenv(name);
         return value != nullptr && value[0] != '\0';
 #endif
     }

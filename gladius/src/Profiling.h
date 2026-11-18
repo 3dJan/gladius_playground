@@ -21,6 +21,26 @@
 // Enable debug output for async rendering diagnostics
 //#define ASYNC_DEBUG_OUTPUT
 
+// Fallback for osyncstream on platforms/compilers that don't support it
+#ifdef __cpp_lib_syncstream
+#define GLADIUS_OSYNCSTREAM std::osyncstream
+#else
+struct BasicOsyncstream {
+    std::ostream& stream;
+    BasicOsyncstream(std::ostream& s) : stream(s) {}
+    template<typename T>
+    BasicOsyncstream& operator<<(const T& val) {
+        stream << val;
+        return *this;
+    }
+    BasicOsyncstream& operator<<(std::ostream& (*pf)(std::ostream&)) {
+        pf(stream);
+        return *this;
+    }
+};
+#define GLADIUS_OSYNCSTREAM BasicOsyncstream
+#endif
+
 namespace gladius
 {
     class ScopedProfilingFrame
@@ -103,7 +123,7 @@ namespace gladius
 #ifdef __EMSCRIPTEN__
                         std::clog << "[FWN prep] " << m_name << " took " << duration.count() << " ms" << std::endl;
 #else
-                        std::osyncstream(std::clog)
+                        GLADIUS_OSYNCSTREAM(std::clog)
                             << "[FWN prep] " << m_name << " took " << duration.count() << " ms" << std::endl;
 #endif
         }
@@ -119,7 +139,7 @@ namespace gladius
     #ifdef __EMSCRIPTEN__
         std::clog << "[FWN prep] " << message << std::endl;
     #else
-        std::osyncstream(std::clog) << "[FWN prep] " << message << std::endl;
+        GLADIUS_OSYNCSTREAM(std::clog) << "[FWN prep] " << message << std::endl;
     #endif
     }
 

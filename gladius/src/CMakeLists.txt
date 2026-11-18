@@ -60,6 +60,13 @@ if(GLADIUS_ENABLE_OPENCL AND GLADIUS_ENABLE_OPENVDB)
     )
 endif()
 
+if(APPLE AND GLADIUS_ENABLE_WEBGPU)
+    list(APPEND SOURCES
+        ui/WebGpuSurfaceMac.h
+        ui/WebGpuSurfaceMac.mm
+    )
+endif()
+
 # MCP sources are intentionally NOT part of the core targets (gladius, gladius_lib)
 # They will be added to the dedicated gladiusmcp target below
 file(GLOB MCP_SOURCES LIST_DIRECTORIES true mcp/*.h mcp/*.cpp)
@@ -87,6 +94,13 @@ if (MSVC)
     set_property(TARGET ${BINARY}_lib PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 else()
     add_executable(${BINARY} ${SOURCES} )
+endif()
+
+# Disable PCH for Objective-C++ files on macOS to avoid compilation errors
+if(APPLE AND GLADIUS_ENABLE_WEBGPU)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/ui/WebGpuSurfaceMac.mm
+        PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
