@@ -276,3 +276,12 @@ empty space above/around the model) the potential is much larger.
   ensures `SdfPrecomputation` runs before `StaticFullFrameProbe` / `ProgressiveHighQualityChunk`,
   so HQ rendering also gets the ~160x–185x prebaked SDF speedup.
 - **`RenderWindow.cpp` parity (`linux-releaseWithDebug`):** `linux-releaseWithDebug` builds `RenderWindow.cpp` (`GLADIUS_UI_BACKEND=OPENGL` + optional `--compute-backend=webgpu`), whereas `linux-webgpu-releaseWithDebug` builds `RenderWindowWebGPU.cpp`. Wired `SdfPrecomputation`, `adaptInteractivePreviewQuality`, `RealtimeRaymarchController` sample feedback, and `hqProgressiveRenderProgress()` into `RenderWindow.cpp` as well.
+
+## Progressive time-to-full-quality is chunk-count bound, not submission bound
+
+Measured with `WebGPUProgressivePerf.TimeToFullQuality` (UI-paced, one display submission per
+frame). Splitting the per-chunk cost shows the CPU submit call is 0.08–0.17 ms and the UI pump
+~1.3 ms, while the UI frame interval is 16.7 ms. Time-to-HQ therefore scales almost linearly with
+the chunk count (SimpleGyroid@512: 16 chunks 333 ms, 8 chunks 162 ms, 1 chunk 10 ms) and there is
+no headroom in per-chunk submission overhead. Optimising progressive means reducing chunk count via
+a resolution-aware budget, not reusing buffers/bind groups. See `results.md`, section PR.

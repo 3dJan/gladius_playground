@@ -585,7 +585,11 @@ namespace gladius::ui
                     .viewport = viewport,
                     .freshness = {.sceneGeneration = task.stamp.sceneEpoch,
                                   .viewGeneration = task.stamp.viewEpoch,
-                                  .parameterGeneration = task.stamp.parameterEpoch}};
+                                  .parameterGeneration = task.stamp.parameterEpoch},
+                    // The adaptive progressive controller needs device time, not submit-to-readback
+                    // wall time, to keep chunks inside the per-frame budget.
+                    .collectGpuTiming =
+                      task.type == async_rendering::RenderTaskType::ProgressiveHighQualityChunk};
                   if (request.isValid())
                   {
                       logNeutralRenderRequest(task, request);

@@ -180,6 +180,9 @@ namespace gladius::ui::async_rendering
         RenderStamp stamp{};
         RenderTaskStatus status{RenderTaskStatus::Completed};
         uint64_t durationNs{0};
+        /// GPU pass duration in nanoseconds; only meaningful when gpuTimeAvailable is true.
+        uint64_t gpuDurationNs{0};
+        bool gpuTimeAvailable{false};
         bool producedDisplayFrame{false};
         bool completedFrame{false};
 

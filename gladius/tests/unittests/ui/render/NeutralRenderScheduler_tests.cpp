@@ -206,6 +206,86 @@ namespace gladius::ui::async_rendering::tests
             std::vector<std::shared_ptr<ControlledSubmissionState>> m_submissions;
         };
 
+        /**
+         * @brief Models a callback driven backend (WebGPU/Dawn): completion surfaces only after the
+         * UI thread has pumped the backend once per frame. Blocking in `wait()` is recorded so tests
+         * can prove the progressive loop never blocks the UI thread.
+         */
+        class PumpDrivenSubmission final : public compute::IRenderSubmission
+        {
+          public:
+            PumpDrivenSubmission(compute::RenderRequest request, std::shared_ptr<std::size_t> waitCount)
+                : m_request{std::move(request)}
+                , m_waitCount{std::move(waitCount)}
+            {
+            }
+
+            void progress() noexcept override
+            {
+                m_status = compute::RenderSubmissionStatus::Succeeded;
+            }
+
+            [[nodiscard]] compute::RenderSubmissionStatus getStatus() const noexcept override
+            {
+                return m_status;
+            }
+
+            void requestCancellation() noexcept override
+            {
+            }
+
+            void wait() override
+            {
+                ++(*m_waitCount);
+                m_status = compute::RenderSubmissionStatus::Succeeded;
+            }
+
+            [[nodiscard]] std::optional<compute::RenderFrame> takeFrame() override
+            {
+                if (m_frameTaken)
+                {
+                    return std::nullopt;
+                }
+                m_frameTaken = true;
+                auto const & viewport = m_request.viewport;
+                return compute::RenderFrame{.width = viewport.width,
+                                            .height = viewport.height,
+                                            .firstRow = viewport.firstRow,
+                                            .endRow = viewport.endRow,
+                                            .freshness = m_request.freshness,
+                                            .pixels = std::vector<std::uint32_t>(viewport.pixelCount())};
+            }
+
+            [[nodiscard]] std::string getErrorMessage() const override
+            {
+                return {};
+            }
+
+          private:
+            compute::RenderRequest m_request;
+            std::shared_ptr<std::size_t> m_waitCount;
+            compute::RenderSubmissionStatus m_status{compute::RenderSubmissionStatus::Pending};
+            bool m_frameTaken{};
+        };
+
+        class PumpDrivenRenderer final : public ImmediateRenderer
+        {
+          public:
+            explicit PumpDrivenRenderer(std::shared_ptr<std::size_t> waitCount)
+                : m_waitCount{std::move(waitCount)}
+            {
+            }
+
+            [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
+            submitFrame(compute::RenderRequest request) override
+            {
+                return std::make_unique<PumpDrivenSubmission>(std::move(request), m_waitCount);
+            }
+
+          private:
+            std::shared_ptr<std::size_t> m_waitCount;
+        };
+
         class ImmediateScene final : public compute::IRenderScene
         {
           public:
@@ -335,22 +415,103 @@ namespace gladius::ui::async_rendering::tests
         EXPECT_TRUE(scheduler.workflow().isHighQualityFrameCurrent());
     }
 
-    TEST(NeutralRenderScheduler, AdaptiveProgressiveBudget_GrowsWhenFastAndShrinksWhenSlow)
+    TEST(NeutralRenderScheduler, AdaptiveProgressiveBudget_ShrinksOnSlowChunkAndRecoversOnFastChunk)
     {
         NeutralRenderScheduler scheduler{makeRequest};
         auto const initialBudget = scheduler.currentProgressiveChunkPixels();
-        EXPECT_EQ(initialBudget, NeutralRenderScheduler::MAX_PROGRESSIVE_CHUNK_PIXELS);
+        EXPECT_EQ(initialBudget, NeutralRenderScheduler::MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS);
 
-        // Fast chunk (1 ms << 20 ms target) should double up to the adaptive cap.
-        scheduler.adaptProgressiveChunkBudget(1'000'000ull);
-        EXPECT_GT(scheduler.currentProgressiveChunkPixels(), initialBudget);
+        // Slow chunk (200 ms GPU >> 33 ms ceiling) must shrink the budget.
+        scheduler.adaptProgressiveChunkBudget(RenderTaskResult{
+          .durationNs = 200'000'000ull,
+          .gpuDurationNs = 200'000'000ull,
+          .gpuTimeAvailable = true});
+        auto const shrunkBudget = scheduler.currentProgressiveChunkPixels();
+        EXPECT_LT(shrunkBudget, initialBudget);
+        EXPECT_GE(shrunkBudget, NeutralRenderScheduler::MIN_PROGRESSIVE_CHUNK_PIXELS);
 
-        // Very slow chunk (200 ms >> 20 ms target) should halve down toward the minimum.
-        auto const grownBudget = scheduler.currentProgressiveChunkPixels();
-        scheduler.adaptProgressiveChunkBudget(200'000'000ull);
-        EXPECT_LT(scheduler.currentProgressiveChunkPixels(), grownBudget);
-        EXPECT_GE(scheduler.currentProgressiveChunkPixels(),
-                  NeutralRenderScheduler::MIN_PROGRESSIVE_CHUNK_PIXELS);
+        // Fast chunk must recover towards a whole-frame chunk.
+        scheduler.adaptProgressiveChunkBudget(RenderTaskResult{
+          .durationNs = 1'000'000ull,
+          .gpuDurationNs = 1'000'000ull,
+          .gpuTimeAvailable = true});
+        EXPECT_GT(scheduler.currentProgressiveChunkPixels(), shrunkBudget);
+    }
+
+    TEST(NeutralRenderScheduler, AdaptiveProgressiveBudget_UsesGpuTimeInsteadOfWallTime)
+    {
+        NeutralRenderScheduler scheduler{makeRequest};
+        auto const initialBudget = scheduler.currentProgressiveChunkPixels();
+
+        // Long wall time but a cheap GPU pass must not shrink the budget.
+        scheduler.adaptProgressiveChunkBudget(RenderTaskResult{
+          .durationNs = 200'000'000ull,
+          .gpuDurationNs = 1'000'000ull,
+          .gpuTimeAvailable = true});
+        EXPECT_EQ(scheduler.currentProgressiveChunkPixels(), initialBudget);
+    }
+
+    TEST(NeutralRenderScheduler, FullHeightProgressiveTask_FillsFrameInBoundedChunks)
+    {
+        NeutralRenderScheduler scheduler{makeRequest};
+        ImmediateRenderer renderer;
+        auto task = makeTask();
+        task.width = 1920u;
+        task.height = 1080u;
+        task.startLine = 0u;
+        task.lineCount = task.height;
+
+        std::uint32_t completedRow{};
+        std::size_t chunkCount{};
+        while (completedRow < task.height)
+        {
+            ASSERT_TRUE(scheduler.submit(task, renderer));
+            auto const result = scheduler.poll();
+            ASSERT_EQ(result.acceptedFrames.size(), 1u);
+            completedRow = result.acceptedFrames.front().frame.endRow;
+            EXPECT_TRUE(scheduler.workflow().presentCandidate(result.acceptedFrames.front().candidate));
+            ++task.requestId;
+            ++chunkCount;
+        }
+
+        EXPECT_EQ(chunkCount, NeutralRenderScheduler::TARGET_PROGRESSIVE_CHUNKS);
+    }
+
+    TEST(NeutralRenderScheduler, FullHeightProgressiveTask_WithCallbackDrivenBackend_ReachesHighQualityWithoutBlocking)
+    {
+        auto const waitCount = std::make_shared<std::size_t>();
+        PumpDrivenRenderer renderer{waitCount};
+        NeutralRenderScheduler scheduler{makeRequest};
+        auto task = makeTask();
+        task.width = 512u;
+        task.height = 512u;
+        task.startLine = 0u;
+        task.lineCount = task.height;
+
+        std::size_t uiFrames{};
+        while (!scheduler.workflow().isHighQualityFrameCurrent())
+        {
+            // One UI frame: poll the in-flight submission, then start at most one new task.
+            auto const polled = scheduler.poll(false);
+            for (auto const & accepted : polled.acceptedFrames)
+            {
+                EXPECT_TRUE(scheduler.workflow().presentCandidate(accepted.candidate));
+            }
+            if (scheduler.workflow().isHighQualityFrameCurrent())
+            {
+                break;
+            }
+            ASSERT_FALSE(scheduler.hasInFlightSubmissions());
+            ASSERT_TRUE(scheduler.submit(task, renderer));
+            ++task.requestId;
+            ++uiFrames;
+        }
+
+        EXPECT_TRUE(scheduler.workflow().isHighQualityFrameCurrent());
+        // Reaching full quality never blocked the UI thread on a backend callback.
+        EXPECT_EQ(*waitCount, 0u);
+        // The resolution-aware budget bounds the fill; the adaptive controller may only shorten it.
+        EXPECT_LE(uiFrames, NeutralRenderScheduler::TARGET_PROGRESSIVE_CHUNKS);
     }
 
     TEST(NeutralRenderScheduler, SubmitAndPoll_WithLowResolutionTask_ReturnsAcceptedFrame)

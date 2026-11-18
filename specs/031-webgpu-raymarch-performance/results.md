@@ -508,3 +508,68 @@ settings inside the `RenderWindow` async scheduler. Verified after integration:
 Interactive WASM/WebGPU QA could not be automated here (no browser MCP server configured), so
 the preview-path behaviour is covered by the deterministic quality gates rather than by
 in-browser inspection.
+
+## PR — Progressive HQ chunk policy (time-to-full-quality)
+
+Progressive HQ catch-up is measured by `WebGPUProgressivePerf.TimeToFullQuality`
+(`gladius/tests/unittests/WebGPUProgressivePerf_tests.cpp`, gated by
+`GLADIUS_RUN_WEBGPU_BENCH=1`). The harness drives the real backend row-band by row-band, paces the
+UI at one display submission per frame (`GLADIUS_PROGRESSIVE_BENCH_PACE_MS`, default 16.7 ms), and
+writes `baselines/progressive_performance.json` (schemaVersion 2).
+
+**Cost model.** With one submission in flight and one display submission per UI frame,
+
+$$T_{HQ} \approx n_{chunks} \cdot T_{frame} + \sum_i T^{GPU}_i$$
+
+A chunk-count sweep (SimpleGyroid@512, pace 16.7 ms) confirms the linear term dominates:
+
+| chunks | 16 | 8 | 4 | 2 | 1 |
+| --- | --- | --- | --- | --- | --- |
+| time to HQ (ms) | 332.8 | 162.4 | 72.8 | 30.7 | 10.1 |
+| median chunk GPU (ms) | 0.33 | 0.39 | 1.31 | 8.52 | 9.11 |
+
+Per-chunk CPU cost is *not* the bottleneck: the measured submit call is 0.08–0.17 ms and the UI
+pump 1.3 ms. Fixed submission-cost reduction (buffer/bind-group reuse) therefore has no headroom
+and was dropped; the win is in the number of chunks.
+
+**Change.** `NeutralRenderScheduler::budgetForResolution()` seeds the chunk budget per resolution so
+a settled static view fills in `TARGET_PROGRESSIVE_CHUNKS` (8) chunks, clamped to
+[16K, 256K] pixels. During the sequence the budget adapts to the last chunk's GPU pass time
+(`IRenderSubmission::getFrameTiming()`, requested via `RenderRequest::collectGpuTiming` for
+progressive chunks) against `MAX_PROGRESSIVE_CHUNK_GPU_MS` = 33 ms, falling back to wall time
+(20 ms target) when timestamps are unavailable. Over-budget chunks shrink the budget by at most 4x;
+under-budget chunks double it back towards 256K.
+
+**A/B (median of 3, UI-paced, baseline = fixed 16K budget):**
+
+| model | res | chunks | time to HQ (ms) | delta |
+| --- | --- | --- | --- | --- |
+| SimpleGyroid | 512 | 16 → 8 | 369.7 → 162.5 | -56.0% |
+| ImplicitGyroid | 512 | 16 → 8 | 355.4 → 164.7 | -53.7% |
+| SphereInACage | 512 | 16 → 8 | 347.5 → 164.6 | -52.6% |
+| RadialRadiator | 512 | 16 → 8 | 374.7 → 162.3 | -56.7% |
+| webcam_003 | 512 | 16 → 8 | 413.8 → 167.3 | -59.6% |
+| lampbase | 512 | 16 → 8 | 1839.3 → 405.4 | -78.0% |
+| SimpleGyroid | 256 | 4 → 4 | 77.3 → 79.1 | +2.2% (noise) |
+| ImplicitGyroid | 256 | 4 → 4 | 81.9 → 73.7 | -10.0% |
+| SphereInACage | 256 | 4 → 4 | 85.9 → 76.4 | -11.0% |
+| RadialRadiator | 256 | 4 → 4 | 98.1 → 83.1 | -15.3% |
+| webcam_003 | 256 | 4 → 4 | 101.9 → 74.2 | -27.2% |
+| lampbase | 256 | 4 → 4 | 530.7 → 194.4 | -63.4% |
+
+`bench_compare.py` reports PASS (no wall-time regression). At 256 px the chunk count is unchanged
+(16K floor) but the GPU-time signal stops the wall-time fallback from shrinking chunks, which is
+where most of the 256 px gain comes from (`lampbase` GPU median 9.96 → 7.34 ms).
+
+**UI-thread constraint.** No UI-thread path may block on a backend callback. Verified by
+`NeutralRenderScheduler.FullHeightProgressiveTask_WithCallbackDrivenBackend_ReachesHighQualityWithoutBlocking`:
+a submission that only completes when `progress()` is pumped reaches full quality in
+`TARGET_PROGRESSIVE_CHUNKS` UI frames with zero `wait()` calls. The Emscripten variants of
+`WebGPUFrameSubmission::progress()`/`wait()` keep the same property (no `processEvents()`, `wait()`
+is a no-op); the WASM build was not compiled here (no Emscripten on this host).
+
+**Caveats.** Row-band cost is highly non-uniform (SimpleGyroid@256: rows 0–64 ≈ 0.15 ms,
+rows 192–256 ≈ 11–20 ms GPU), so a fixed pixel budget yields uneven chunks; cost-aware row counts
+are a follow-up. The first chunk of a session pays ~3–6 ms extra CPU because
+`WebGPUFramePipelineCache` compiles pipelines asynchronously. The full-frame baseline
+`baselines/performance.json` predates this machine and is stale (~14.6 ms GPU at 256 px now).
