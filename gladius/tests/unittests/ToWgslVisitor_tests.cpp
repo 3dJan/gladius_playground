@@ -1,5 +1,6 @@
 #include "nodes/Assembly.h"
 #include "nodes/DerivedNodes.h"
+#include "nodes/GraphOptimizer.h"
 #include "nodes/Model.h"
 #include "nodes/ToWgslVisitor.h"
 
@@ -698,5 +699,175 @@ namespace gladius::nodes::tests
         EXPECT_EQ(result->pixels.front(), 0xFF1A1A1Au);
         EXPECT_EQ(result->pixels[(16u * 33u) + 16u], 0xFFFFDB8Cu);
     }
+
+    TEST(WebGPUZeroCopy, SubmitFrame_WithSkipCpuReadback_ReturnsGpuOutputHandleWithoutCpuPixels)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "Set GLADIUS_RUN_WEBGPU_TESTS=1 to run WebGPU runtime tests";
+        }
+
+        Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * length = model.create<Length>();
+        ASSERT_NE(length, nullptr);
+        ASSERT_TRUE(model.addLink(model.getBeginNode()->getOutputs().at(FieldNames::Pos).getId(),
+                                  length->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(model.addLink(length->getOutputs().at(FieldNames::Result).getId(),
+                                  model.getEndNode()->parameter().at(FieldNames::Shape).getId()));
+
+        auto request = webgpu::WebGPUModelSliceRequestFactory::createFrame(
+          model,
+          compute::FrameRequest{.width = 33u,
+                                .height = 33u,
+                                .eyePosition = {0.0f, 0.0f, 2.0f},
+                                .maxTravelDistance = 10.0f,
+                                .skipCpuReadback = true});
+
+        std::unique_ptr<webgpu::WebGPUComputeBackend> backend;
+        try
+        {
+            backend = std::make_unique<webgpu::WebGPUComputeBackend>();
+        }
+        catch (std::exception const & exception)
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << exception.what();
+        }
+
+        auto submission = backend->submitFrame(std::move(request));
+        submission->wait();
+        ASSERT_EQ(submission->getStatus(), compute::ComputeCompletionStatus::Succeeded)
+          << submission->getErrorMessage();
+        auto result = submission->takeResult();
+        ASSERT_TRUE(result.has_value());
+        EXPECT_TRUE(result->pixels.empty());
+        EXPECT_NE(result->gpuOutputHandle, nullptr);
+    }
 #endif
+
+    TEST(GraphOptimizer, CommutativeCseAndDce_DeduplicatesAndPrunesDeadNodes)
+    {
+        Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * begin = model.getBeginNode();
+        auto * end = model.getEndNode();
+        auto * len = model.create<Length>();
+        auto * mul1 = model.create<Multiplication>();
+        auto * mul2 = model.create<Multiplication>();
+        auto * sum = model.create<Addition>();
+        auto * deadNode = model.create<Sine>();
+
+        ASSERT_TRUE(model.addLink(begin->getOutputs().at(FieldNames::Pos).getId(),
+                                  len->parameter().at(FieldNames::A).getId()));
+        // mul1 = len * 2.0; mul2 = 2.0 * len (commutative duplicate)
+        mul1->parameter().at(FieldNames::B).setValue(2.0f);
+        mul1->parameter().at(FieldNames::B).setModifiable(false);
+        mul2->parameter().at(FieldNames::A).setValue(2.0f);
+        mul2->parameter().at(FieldNames::A).setModifiable(false);
+        ASSERT_TRUE(model.addLink(len->getOutputs().at(FieldNames::Result).getId(),
+                                  mul1->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(model.addLink(len->getOutputs().at(FieldNames::Result).getId(),
+                                  mul2->parameter().at(FieldNames::B).getId()));
+        ASSERT_TRUE(model.addLink(mul1->getOutputs().at(FieldNames::Result).getId(),
+                                  sum->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(model.addLink(mul2->getOutputs().at(FieldNames::Result).getId(),
+                                  sum->parameter().at(FieldNames::B).getId()));
+        ASSERT_TRUE(model.addLink(sum->getOutputs().at(FieldNames::Result).getId(),
+                                  end->parameter().at(FieldNames::Shape).getId()));
+        deadNode->parameter().at(FieldNames::A).setValue(1.0f);
+        deadNode->parameter().at(FieldNames::A).setModifiable(false);
+
+        auto const stats = GraphOptimizer::optimize(model);
+        EXPECT_GE(stats.deduplicatedNodes, 1u);
+        EXPECT_GE(stats.prunedDeadNodes, 2u); // mul2 + deadNode
+        EXPECT_LT(stats.finalNodeCount, stats.initialNodeCount);
+    }
+
+    TEST(GraphOptimizer, PeepholeRewrites_FoldsIdentityAndPowTwo)
+    {
+        Model model;
+        model.createBeginEndWithDefaultInAndOuts();
+        auto * begin = model.getBeginNode();
+        auto * end = model.getEndNode();
+        auto * len = model.create<Length>();
+        auto * sq = model.create<Pow>();
+        auto * addZero = model.create<Addition>();
+
+        ASSERT_TRUE(model.addLink(begin->getOutputs().at(FieldNames::Pos).getId(),
+                                  len->parameter().at(FieldNames::A).getId()));
+        sq->parameter().at(FieldNames::Exponent).setValue(2.0f);
+        sq->parameter().at(FieldNames::Exponent).setModifiable(false);
+        addZero->parameter().at(FieldNames::B).setValue(0.0f);
+        addZero->parameter().at(FieldNames::B).setModifiable(false);
+        ASSERT_TRUE(model.addLink(len->getOutputs().at(FieldNames::Result).getId(),
+                                  sq->parameter().at(FieldNames::Base).getId()));
+        ASSERT_TRUE(model.addLink(sq->getOutputs().at(FieldNames::Value).getId(),
+                                  addZero->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(model.addLink(addZero->getOutputs().at(FieldNames::Result).getId(),
+                                  end->parameter().at(FieldNames::Shape).getId()));
+
+        auto const stats = GraphOptimizer::optimize(model);
+        EXPECT_EQ(stats.peepholeRewrites, 2u);
+
+        ToWgslVisitor visitor;
+        model.visitNodes(visitor);
+        std::ostringstream wgsl;
+        visitor.write(wgsl);
+        EXPECT_EQ(wgsl.str().find("pow("), std::string::npos);
+    }
+
+    TEST(ToWgslVisitor, WithFunctionCallAndAssembly_EmitsReusableWgslHelperOnce)
+    {
+        Assembly assembly;
+        auto const helperId = static_cast<ResourceId>(42u);
+        assembly.addModelIfNotExisting(helperId);
+        auto helperModel = assembly.findModel(helperId);
+        ASSERT_NE(helperModel, nullptr);
+        helperModel->createBeginEnd();
+        helperModel->addArgument(FieldNames::Pos, VariantParameter(float3{0.0f, 0.0f, 0.0f}));
+        helperModel->addFunctionOutput(FieldNames::Shape, VariantParameter(0.0f));
+        auto * helperLen = helperModel->create<Length>();
+        ASSERT_TRUE(helperModel->addLink(
+          helperModel->getBeginNode()->getOutputs().at(FieldNames::Pos).getId(),
+          helperLen->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(helperModel->addLink(
+          helperLen->getOutputs().at(FieldNames::Result).getId(),
+          helperModel->getEndNode()->parameter().at(FieldNames::Shape).getId()));
+
+        auto mainModel = assembly.assemblyModel();
+        ASSERT_NE(mainModel, nullptr);
+        mainModel->createBeginEndWithDefaultInAndOuts();
+        auto * call1 = mainModel->create<FunctionCall>();
+        auto * call2 = mainModel->create<FunctionCall>();
+        auto * minNode = mainModel->create<Min>();
+        call1->setFunctionId(helperId);
+        call2->setFunctionId(helperId);
+        call1->updateInputsAndOutputs(*helperModel);
+        call2->updateInputsAndOutputs(*helperModel);
+
+        auto const posPortId = mainModel->getBeginNode()->getOutputs().at(FieldNames::Pos).getId();
+        ASSERT_TRUE(mainModel->addLink(posPortId, call1->parameter().at(FieldNames::Pos).getId()));
+        ASSERT_TRUE(mainModel->addLink(posPortId, call2->parameter().at(FieldNames::Pos).getId()));
+        ASSERT_TRUE(mainModel->addLink(call1->getOutputs().at(FieldNames::Shape).getId(),
+                                       minNode->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(mainModel->addLink(call2->getOutputs().at(FieldNames::Shape).getId(),
+                                       minNode->parameter().at(FieldNames::B).getId()));
+        ASSERT_TRUE(mainModel->addLink(minNode->getOutputs().at(FieldNames::Result).getId(),
+                                       mainModel->getEndNode()->parameter().at(FieldNames::Shape).getId()));
+
+        ToWgslVisitor visitor;
+        visitor.setAssembly(&assembly);
+        ASSERT_NO_THROW(mainModel->visitNodes(visitor));
+
+        std::ostringstream wgsl;
+        visitor.write(wgsl);
+        auto const code = wgsl.str();
+
+        auto const firstDef = code.find("fn gladius_fn_42(");
+        ASSERT_NE(firstDef, std::string::npos);
+        EXPECT_EQ(code.find("fn gladius_fn_42(", firstDef + 1u), std::string::npos);
+        auto const firstCall = code.find("gladius_fn_42(", firstDef + 16u);
+        ASSERT_NE(firstCall, std::string::npos);
+        EXPECT_NE(code.find("gladius_fn_42(", firstCall + 1u), std::string::npos);
+    }
 }
