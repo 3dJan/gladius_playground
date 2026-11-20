@@ -1,5 +1,6 @@
 #include "ExpressionToGraphConverter.h"
 #include "ExpressionParser.h"
+#include "ProgramSnippetApplier.h"
 #include "FunctionArgument.h"
 #include "nodes/DerivedNodes.h"
 #include "nodes/Model.h"
@@ -134,6 +135,23 @@ namespace gladius
 
     // Assembly context for resolving cross-function calls during snippet→graph conversion
     thread_local nodes::Assembly * ExpressionToGraphConverter::s_assemblyContext = nullptr;
+
+    /// Build the error message for a call that could not be resolved to a function.
+    /// Returns an empty string when the name does not look like a function call at all.
+    static std::string describeUnresolvedCall(std::string const & functionName,
+                                              nodes::Assembly & assembly)
+    {
+        for (auto const & [resourceId, model] : assembly.getFunctions())
+        {
+            if (model && model->getDisplayName().value_or("") == functionName)
+            {
+                return "Call to '" + functionName + "' must be qualified as '" + functionName +
+                  "_" + std::to_string(resourceId) + "' (function ID " + std::to_string(resourceId) +
+                  ").";
+            }
+        }
+        return "";
+    }
 
     nodes::NodeId ExpressionToGraphConverter::createTwoInputNode(
       std::string const & nodeTypeName,
@@ -1467,6 +1485,17 @@ namespace gladius
                                 return fc->getId();
                             }
                         }
+                    }
+                }
+
+                // Cross-function calls must carry the called function's resource ID.
+                // Explain that instead of reporting an opaque unsupported call.
+                if (s_assemblyContext != nullptr)
+                {
+                    auto const hint = describeUnresolvedCall(functionName, *s_assemblyContext);
+                    if (!hint.empty())
+                    {
+                        throw std::runtime_error(hint);
                     }
                 }
 
@@ -3858,356 +3887,7 @@ namespace gladius
                                                        nodes::Assembly & assembly,
                                                        ExpressionParser & parser)
     {
-        // Parse function blocks from the program listing.
-        // Expected format:
-        //   // Function: displayName (ID: resourceId)
-        //   float uniqueName(vec3 pos) {
-        //     body...
-        //   }
-        struct FunctionBlock
-        {
-            std::string displayName;
-            nodes::ResourceId resourceId{0};
-            std::string body;
-            std::vector<FunctionArgument> args;
-            std::vector<FunctionOutput> outputs;
-        };
-
-        std::vector<FunctionBlock> blocks;
-        std::regex headerRegex(R"(//\s*Function:\s*(.+?)\s*\(ID:\s*(\d+)\))");
-        std::regex sigArgRegex(R"((vec3|float|mat4)\s+(\w+))");
-        std::istringstream stream(program);
-        std::string line;
-
-        FunctionBlock current;
-        bool inFunction = false;
-        int braceDepth = 0;
-        std::string bodyAccum;
-
-        while (std::getline(stream, line))
-        {
-            std::smatch match;
-            if (std::regex_search(line, match, headerRegex))
-            {
-                current.displayName = match[1].str();
-                current.resourceId =
-                  static_cast<nodes::ResourceId>(std::stoul(match[2].str()));
-                current.args.clear();
-                inFunction = false;
-                braceDepth = 0;
-                bodyAccum.clear();
-                continue;
-            }
-
-            if (current.resourceId != 0 && !inFunction)
-            {
-                // Look for opening brace of function signature
-                auto bracePos = line.find('{');
-                if (bracePos != std::string::npos)
-                {
-                    // Detect return type from signature line
-                    auto trimmedLine = line;
-                    auto firstNonSpace = trimmedLine.find_first_not_of(" \t");
-                    if (firstNonSpace != std::string::npos)
-                    {
-                        trimmedLine = trimmedLine.substr(firstNonSpace);
-                    }
-
-                    if (trimmedLine.front() == '(')
-                    {
-                        // Multi-return type: (float shape, vec3 color) funcName(...)
-                        auto closeParen = trimmedLine.find(')');
-                        if (closeParen != std::string::npos)
-                        {
-                            auto retStr = trimmedLine.substr(1, closeParen - 1);
-                            std::regex retArgRegex(R"((vec3|float|mat4)\s+(\w+))");
-                            auto retBegin = std::sregex_iterator(
-                              retStr.begin(), retStr.end(), retArgRegex);
-                            auto retEnd = std::sregex_iterator();
-                            for (auto it = retBegin; it != retEnd; ++it)
-                            {
-                                FunctionOutput out;
-                                auto const typeStr = (*it)[1].str();
-                                out.type = typeStr == "vec3"  ? ArgumentType::Vector
-                                         : typeStr == "mat4" ? ArgumentType::Matrix
-                                                              : ArgumentType::Scalar;
-                                out.name = (*it)[2].str();
-                                current.outputs.push_back(out);
-                            }
-                        }
-                    }
-                    else if (trimmedLine.substr(0, 4) == "vec3")
-                    {
-                        FunctionOutput out;
-                        out.type = ArgumentType::Vector;
-                        out.name = FunctionOutput::defaultOutput().name;
-                        current.outputs.push_back(out);
-                    }
-                    else if (trimmedLine.substr(0, 4) == "mat4")
-                    {
-                        FunctionOutput out;
-                        out.type = ArgumentType::Matrix;
-                        out.name = FunctionOutput::defaultOutput().name;
-                        current.outputs.push_back(out);
-                    }
-                    else
-                    {
-                        current.outputs.push_back(FunctionOutput::defaultOutput());
-                    }
-
-                    // Parse arguments from signature: float name(vec3 pos, float b) {
-                    // For multi-output functions like "(float a, vec3 b) name(vec3 pos) {"
-                    // the first (...) is the return type list, so skip to the second pair.
-                    auto parenOpen = line.find('(');
-                    auto parenClose = line.find(')');
-                    if (trimmedLine.front() == '(' && parenClose != std::string::npos)
-                    {
-                        parenOpen = line.find('(', parenClose + 1);
-                        if (parenOpen != std::string::npos)
-                        {
-                            parenClose = line.find(')', parenOpen + 1);
-                        }
-                    }
-                    if (parenOpen != std::string::npos && parenClose != std::string::npos &&
-                        parenClose > parenOpen)
-                    {
-                        auto argStr =
-                          line.substr(parenOpen + 1, parenClose - parenOpen - 1);
-                        auto argBegin =
-                          std::sregex_iterator(argStr.begin(), argStr.end(), sigArgRegex);
-                        auto argEnd = std::sregex_iterator();
-                        for (auto it = argBegin; it != argEnd; ++it)
-                        {
-                            auto const typeStr = (*it)[1].str();
-                            auto type = typeStr == "vec3"  ? ArgumentType::Vector
-                                      : typeStr == "mat4" ? ArgumentType::Matrix
-                                                           : ArgumentType::Scalar;
-                            current.args.emplace_back((*it)[2].str(), type);
-                        }
-                    }
-                    if (current.args.empty())
-                    {
-                        current.args.emplace_back("pos", ArgumentType::Vector);
-                    }
-
-                    inFunction = true;
-                    braceDepth = 1;
-
-                    // Process any body content after the opening '{' on the same line
-                    // to support single-line function bodies like: float foo(vec3 p) { return 1.0; }
-                    auto afterBrace = line.substr(bracePos + 1);
-                    for (char c : afterBrace)
-                    {
-                        if (c == '{') ++braceDepth;
-                        if (c == '}') --braceDepth;
-                    }
-                    if (braceDepth <= 0)
-                    {
-                        // Entire body was on the signature line — strip trailing '}'
-                        auto bodyEnd = afterBrace.rfind('}');
-                        if (bodyEnd != std::string::npos)
-                        {
-                            afterBrace = afterBrace.substr(0, bodyEnd);
-                        }
-                        // Trim whitespace
-                        auto first = afterBrace.find_first_not_of(" \t");
-                        auto last = afterBrace.find_last_not_of(" \t");
-                        current.body = (first != std::string::npos)
-                                         ? afterBrace.substr(first, last - first + 1)
-                                         : "";
-                        blocks.push_back(current);
-                        current = {};
-                        inFunction = false;
-                    }
-                    else
-                    {
-                        // Body continues on subsequent lines; accumulate what we have
-                        auto first = afterBrace.find_first_not_of(" \t");
-                        if (first != std::string::npos)
-                        {
-                            bodyAccum = afterBrace.substr(first);
-                        }
-                    }
-                    continue;
-                }
-            }
-
-            if (inFunction)
-            {
-                for (char c : line)
-                {
-                    if (c == '{') ++braceDepth;
-                    if (c == '}') --braceDepth;
-                }
-
-                if (braceDepth <= 0)
-                {
-                    // End of function body
-                    current.body = bodyAccum;
-                    blocks.push_back(current);
-                    current = {};
-                    inFunction = false;
-                }
-                else
-                {
-                    // Strip leading 2-space indent if present
-                    if (line.size() >= 2 && line[0] == ' ' && line[1] == ' ')
-                    {
-                        line = line.substr(2);
-                    }
-                    if (!bodyAccum.empty())
-                    {
-                        bodyAccum += "\n";
-                    }
-                    bodyAccum += line;
-                }
-            }
-        }
-
-        if (blocks.empty())
-        {
-            throw std::runtime_error("No function blocks found in program snippet");
-        }
-
-        // Remove functions with unsupported nodes — they cannot be roundtripped
-        blocks.erase(
-          std::remove_if(blocks.begin(),
-                         blocks.end(),
-                         [](FunctionBlock const & b)
-                         {
-                             return b.body.find(UNSUPPORTED_NODE_MARKER) != std::string::npos;
-                         }),
-          blocks.end());
-
-        // Collect all defined ResourceIds
-        std::set<nodes::ResourceId> definedIds;
-        for (auto const & block : blocks)
-        {
-            definedIds.insert(block.resourceId);
-        }
-
-        // First pass: create all functions in the assembly
-        for (auto const & block : blocks)
-        {
-            assembly.addModelIfNotExisting(block.resourceId);
-            auto model = assembly.findModel(block.resourceId);
-            model->setDisplayName(block.displayName);
-        }
-
-        // Second pass: parse and build each function's graph
-        size_t parseSuccessCount = 0;
-        std::string lastParseError;
-
-        for (auto const & block : blocks)
-        {
-            auto model = assembly.findModel(block.resourceId);
-
-            // If the parsed block only has default output names ("result"),
-            // preserve the existing model's output names (e.g. "shape") so
-            // that references like levelset channels keep working.
-            // Only preserve when output count and types match to avoid
-            // silently changing a vec3 function to scalar (or vice versa).
-            auto effectiveOutputs = block.outputs;
-            bool const hasOnlyDefaultNames = std::all_of(
-              effectiveOutputs.begin(),
-              effectiveOutputs.end(),
-              [](auto const & out) { return out.name == FunctionOutput::defaultOutput().name; });
-            if (hasOnlyDefaultNames)
-            {
-                std::vector<FunctionOutput> existingOutputs;
-                if (auto * endNode = model->getEndNode())
-                {
-                    for (auto const & [name, param] : endNode->constParameter())
-                    {
-                        if (param.getConstSource().has_value())
-                        {
-                            auto typeIdx = param.getConstSource()->type;
-                            existingOutputs.emplace_back(
-                              name,
-                              typeIdx == nodes::ParameterTypeIndex::Float3
-                                ? ArgumentType::Vector
-                              : typeIdx == nodes::ParameterTypeIndex::Matrix4
-                                ? ArgumentType::Matrix
-                                : ArgumentType::Scalar);
-                        }
-                    }
-                }
-                bool const typesMatch =
-                  existingOutputs.size() == effectiveOutputs.size() &&
-                  std::equal(
-                    existingOutputs.begin(),
-                    existingOutputs.end(),
-                    effectiveOutputs.begin(),
-                    [](auto const & a, auto const & b) { return a.type == b.type; });
-                if (!existingOutputs.empty() && typesMatch)
-                {
-                    effectiveOutputs = existingOutputs;
-                }
-            }
-
-            model->clear();
-            model->createBeginEnd();
-
-            nodes::NodeId nodeId = 0;
-            try
-            {
-                nodeId = convertSnippetToGraph(
-                  block.body, *model, parser, block.args, effectiveOutputs, &assembly);
-            }
-            catch (std::exception const & e)
-            {
-                lastParseError = "Failed to parse function '" + block.displayName +
-                  "' (ID: " + std::to_string(block.resourceId) + "): " + e.what();
-                continue;
-            }
-
-            if (nodeId == 0)
-            {
-                lastParseError = "Failed to parse function body for '" + block.displayName +
-                  "' (ID: " + std::to_string(block.resourceId) + "): convertSnippetToGraph returned 0";
-                continue;
-            }
-
-            ++parseSuccessCount;
-
-            model->updateGraphAndOrderIfNeeded();
-
-            // Check for dangling references: any FunctionCall referencing undefined IDs
-            for (auto & [nId, nodePtr] : *model)
-            {
-                nodes::ResourceId calledId = 0;
-                if (auto * fc = dynamic_cast<nodes::FunctionCall *>(nodePtr.get()))
-                {
-                    fc->resolveFunctionId();
-                    calledId = fc->getFunctionId();
-                }
-                else if (auto * fg = dynamic_cast<nodes::FunctionGradient *>(nodePtr.get()))
-                {
-                    fg->resolveFunctionId();
-                    calledId = fg->getFunctionId();
-                }
-                else if (auto * ndf =
-                           dynamic_cast<nodes::NormalizeDistanceField *>(nodePtr.get()))
-                {
-                    ndf->resolveFunctionId();
-                    calledId = ndf->getFunctionId();
-                }
-
-                if (calledId != 0 && definedIds.count(calledId) == 0 &&
-                    !assembly.findModel(calledId))
-                {
-                    throw std::runtime_error(
-                      "Function '" + block.displayName +
-                      "' references undefined function ID " + std::to_string(calledId));
-                }
-            }
-        }
-
-        // If no functions were successfully parsed, treat as a fatal error
-        if (parseSuccessCount == 0 && !blocks.empty())
-        {
-            throw std::runtime_error(lastParseError);
-        }
+        ProgramSnippetApplier::applyOrThrow(program, assembly, parser);
     }
 
 } // namespace gladius

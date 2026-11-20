@@ -2424,4 +2424,73 @@ namespace gladius::tests
         EXPECT_GT(fcCount, 0) << "Main model should call the helper function";
     }
 
+    TEST_F(SnippetToGraphTest, SetProgramSnippet_SecondFunctionInvalid_OtherFunctionKeepsGraph)
+    {
+        std::string const validProgram =
+          "// Function: sphere (ID: 10)\n"
+          "float sphere_10(vec3 pos) {\n"
+          "  return length(in_pos) - 5.0;\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) {\n"
+          "  return sphere_10(in_pos);\n"
+          "}\n";
+
+        nodes::Assembly assembly;
+        ExpressionToGraphConverter::setProgramSnippet(validProgram, assembly, *m_parser);
+
+        auto mainModel = assembly.findModel(3);
+        ASSERT_NE(mainModel, nullptr);
+        auto const callsBefore =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::FunctionCall>(*mainModel);
+        ASSERT_GT(callsBefore, 0) << "main should call sphere_10 before the failing update";
+
+        std::string const brokenProgram =
+          "// Function: sphere (ID: 10)\n"
+          "float sphere_10(vec3 pos) {\n"
+          "  return length(in_pos) - 7.0;\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) {\n"
+          "  return sphere_10(pos.y +;\n"
+          "}\n";
+
+        EXPECT_THROW(ExpressionToGraphConverter::setProgramSnippet(brokenProgram, assembly, *m_parser),
+                     std::runtime_error);
+
+        auto const callsAfter =
+          gladius_tests::helper::countNumberOfNodesOfType<nodes::FunctionCall>(*mainModel);
+        EXPECT_EQ(callsAfter, callsBefore)
+          << "A function that fails to convert must keep its previous graph";
+    }
+
+    TEST_F(SnippetToGraphTest, SetProgramSnippet_UnqualifiedCall_ThrowsQualifiedFormHint)
+    {
+        std::string const program =
+          "// Function: sphere (ID: 10)\n"
+          "float sphere_10(vec3 pos) {\n"
+          "  return length(in_pos) - 5.0;\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3) [root]\n"
+          "float main_3(vec3 pos) {\n"
+          "  return sphere(in_pos);\n"
+          "}\n";
+
+        nodes::Assembly assembly;
+        try
+        {
+            ExpressionToGraphConverter::setProgramSnippet(program, assembly, *m_parser);
+            FAIL() << "Expected an exception for the unqualified cross function call";
+        }
+        catch (std::runtime_error const & e)
+        {
+            std::string const message = e.what();
+            EXPECT_NE(message.find("sphere_10"), std::string::npos)
+              << "Error must name the qualified call form, got: " << message;
+        }
+    }
+
 } // namespace gladius::tests

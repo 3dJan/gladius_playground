@@ -1169,6 +1169,11 @@ namespace gladius::nodes
         m_logger = logger;
     }
 
+    events::SharedLogger Model::getLogger() const
+    {
+        return m_logger;
+    }
+
     void Model::setResourceId(ResourceId resourceId)
     {
         m_resourceId = resourceId;
