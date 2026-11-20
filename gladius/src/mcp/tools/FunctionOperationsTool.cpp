@@ -12,6 +12,7 @@
 #include "../../FunctionArgument.h"
 #include "../../io/3mf/ResourceIdUtil.h"
 #include "../../nodes/DerivedNodes.h"
+#include "../../nodes/GraphOptimizer.h"
 #include "../../nodes/NodeFactory.h"
 #include "../../nodes/Parameter.h"
 #include "../../nodes/Port.h"
@@ -19,6 +20,7 @@
 #include "../FunctionGraphDeserializer.h"
 #include "../FunctionGraphSerializer.h"
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
@@ -1664,14 +1666,60 @@ namespace gladius
                     return out;
                 }
 
+                auto const compileStart = std::chrono::steady_clock::now();
                 ExpressionParser parser;
                 ExpressionToGraphConverter::setProgramSnippet(snippet, *assembly, parser);
+
+                std::size_t totalDeduplicated = 0u;
+                std::size_t totalPrunedDead = 0u;
+                std::size_t totalPeephole = 0u;
+                std::size_t mainGraphNodes = 0u;
+                std::size_t subgraphCount = 0u;
+                nlohmann::json warnings = nlohmann::json::array();
+                constexpr std::size_t kModularityWarningThreshold = 150u;
+
+                auto const assemblyModelId = assembly->getAssemblyModelId();
+                for (auto & [funcId, funcModel] : assembly->getFunctions())
+                {
+                    if (!funcModel)
+                    {
+                        continue;
+                    }
+                    auto const optStats = nodes::GraphOptimizer::optimize(*funcModel);
+                    totalDeduplicated += optStats.deduplicatedNodes;
+                    totalPrunedDead += optStats.prunedDeadNodes;
+                    totalPeephole += optStats.peepholeRewrites;
+
+                    auto const nodeCount = funcModel->getSize();
+                    if (funcId == assemblyModelId)
+                    {
+                        mainGraphNodes = nodeCount;
+                    }
+                    else
+                    {
+                        ++subgraphCount;
+                    }
+                    if (nodeCount > kModularityWarningThreshold)
+                    {
+                        warnings.push_back(fmt::format(
+                          "Function '{}' (ID: {}) exceeds {} nodes (currently {}). "
+                          "Extract repeated SDF primitives into helper functions to keep the 3MF "
+                          "function graph modular and shader compilation fast.",
+                          funcModel->getDisplayName().value_or("unnamed"),
+                          funcId,
+                          kModularityWarningThreshold,
+                          nodeCount));
+                    }
+                }
 
                 // Sync changes to 3MF model so flattening/compilation works
                 document->update3mfModel();
 
                 // Rebuild resource dependency graph to reflect any changed function references
                 document->rebuildResourceDependencyGraph();
+                auto const compileMs = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - compileStart)
+                                         .count();
 
                 // Return the normalized program
                 auto normalized =
@@ -1680,6 +1728,16 @@ namespace gladius
                 out["success"] = true;
                 out["snippet"] = normalized;
                 out["function_count"] = functions.size();
+                out["stats"] = {{"main_graph_nodes", mainGraphNodes},
+                                {"subgraph_count", subgraphCount},
+                                {"deduplicated_nodes", totalDeduplicated},
+                                {"pruned_dead_nodes", totalPrunedDead},
+                                {"peephole_rewrites", totalPeephole},
+                                {"compile_ms", compileMs}};
+                if (!warnings.empty())
+                {
+                    out["warnings"] = std::move(warnings);
+                }
             }
             catch (std::runtime_error const & e)
             {

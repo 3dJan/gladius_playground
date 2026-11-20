@@ -11,6 +11,7 @@
 #include "SpatialMeshResource.h"
 #include "nodes/Assembly.h"
 #include "nodes/GraphFlattener.h"
+#include "nodes/GraphOptimizer.h"
 #include "nodes/LowerFunctionGradient.h"
 #include "nodes/LowerNormalizeDistanceField.h"
 #include "nodes/Model.h"
@@ -480,6 +481,7 @@ namespace gladius::compute
         {
             throw std::runtime_error("Analytic render scene could not obtain a flattened assembly model");
         }
+        (void) nodes::GraphOptimizer::optimize(*flattenedModel);
 
         if (resourceManager != nullptr)
         {
@@ -525,6 +527,7 @@ namespace gladius::compute
         {
             throw std::runtime_error("Runtime render scene has no assembly model");
         }
+        (void) nodes::GraphOptimizer::optimize(*model);
         return resourceManager ? createModel(*model, sceneGeneration, *resourceManager, true)
                                : createModel(*model, sceneGeneration, true);
     }

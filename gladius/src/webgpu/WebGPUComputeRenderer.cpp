@@ -1,23 +1,38 @@
 #include "webgpu/WebGPUComputeRenderer.h"
 
 #include "kernel/types.h"
+#include "webgpu/WebGPUFrameBufferSet.h"
 #include "webgpu/WebGPUFrameShaderComposer.h"
 
 #include <atomic>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace gladius::webgpu
 {
     namespace
     {
+        [[nodiscard]] std::uint64_t hashWgsl(std::string_view const source) noexcept
+        {
+            std::uint64_t hash = 14695981039346656037ull;
+            for (unsigned char const byte : source)
+            {
+                hash ^= static_cast<std::uint64_t>(byte);
+                hash *= 1099511628211ull;
+            }
+            return hash == 0u ? 1u : hash;
+        }
+
         class WebGPUAnalyticRenderScene final : public compute::IRenderScene
         {
           public:
             explicit WebGPUAnalyticRenderScene(
-              std::shared_ptr<const compute::RenderSceneSnapshot> snapshot)
+              std::shared_ptr<const compute::RenderSceneSnapshot> snapshot,
+              std::shared_ptr<WebGPUScenePayloadBuffers const> scenePayloads)
                 : m_snapshot{std::move(snapshot)}
+                , m_scenePayloads{std::move(scenePayloads)}
             {
                                 bool const hasMeshes = !m_snapshot->meshResources.empty();
                                 bool const hasBeams = !m_snapshot->beamLatticeResources.empty();
@@ -36,6 +51,7 @@ namespace gladius::webgpu
                                         m_composedShader = WebGPUFrameShaderComposer::compose(
                                             m_snapshot->analyticEvaluatorWgsl, m_snapshot->translucencyEvaluatorWgsl);
                 }
+                                m_composedShaderHash = hashWgsl(m_composedShader);
                                 m_parameterSnapshot = std::make_shared<const compute::RenderParameterSnapshot>(
                                     compute::RenderParameterSnapshot{.sceneGeneration = m_snapshot->sceneGeneration,
                                                                                                      .parameterGeneration = 0u,
@@ -95,11 +111,42 @@ namespace gladius::webgpu
                 return m_composedShader;
             }
 
+            [[nodiscard]] std::uint64_t getComposedShaderHash() const noexcept
+            {
+                return m_composedShaderHash;
+            }
+
+            [[nodiscard]] std::shared_ptr<WebGPUScenePayloadBuffers const>
+            getScenePayloads() const noexcept
+            {
+                return m_scenePayloads;
+            }
+
+            [[nodiscard]] std::pair<std::string, std::uint64_t> getPrebakeShader() const
+            {
+                std::scoped_lock lock{m_prebakeMutex};
+                if (m_prebakeShader.empty())
+                {
+                    bool const hasMeshes = !m_snapshot->meshResources.empty();
+                    bool const hasBeams = !m_snapshot->beamLatticeResources.empty();
+                    bool const hasImages = !m_snapshot->imageResources.empty();
+                    m_prebakeShader = WebGPUFrameShaderComposer::composeSdfPrebake(
+                      m_snapshot->analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+                    m_prebakeShaderHash = hashWgsl(m_prebakeShader);
+                }
+                return {m_prebakeShader, m_prebakeShaderHash};
+            }
+
           private:
             std::shared_ptr<const compute::RenderSceneSnapshot> m_snapshot;
+            std::shared_ptr<WebGPUScenePayloadBuffers const> m_scenePayloads;
             mutable std::mutex m_parameterMutex;
             std::shared_ptr<const compute::RenderParameterSnapshot> m_parameterSnapshot;
             std::string m_composedShader;
+            std::uint64_t m_composedShaderHash{0u};
+            mutable std::mutex m_prebakeMutex;
+            mutable std::string m_prebakeShader;
+            mutable std::uint64_t m_prebakeShaderHash{0u};
         };
 
         class WebGPUFrameRenderSubmission final : public compute::IRenderSubmission
@@ -180,7 +227,8 @@ namespace gladius::webgpu
                                             .firstRow = m_request.viewport.firstRow,
                                             .endRow = m_request.viewport.endRow,
                                             .freshness = m_request.freshness,
-                                            .pixels = std::move(result->pixels)};
+                                            .pixels = std::move(result->pixels),
+                                            .gpuOutputHandle = std::move(result->gpuOutputHandle)};
             }
 
             [[nodiscard]] std::string getErrorMessage() const override
@@ -244,45 +292,35 @@ namespace gladius::webgpu
                     .boundsErrorBound = request.boundsErrorBound,
                     .collectGpuTiming = request.collectGpuTiming,
                     .collectMetrics = request.collectMetrics,
+                    .skipCpuReadback = request.skipCpuReadback,
                     .workgroupShape = request.settings.workgroupShape,
                     .shaderSource = composedShader,
-                    .parameterValues = parameters.values,
-                    .meshPayloadTable = scene.meshResources.size() > 0u
-                                          ? ([&]()
-                                             {
-                                                 std::vector<std::vector<float>> table;
-                                                 table.reserve(scene.meshResources.size());
-                                                 for (auto const & mesh : scene.meshResources)
-                                                 {
-                                                     table.push_back(mesh.data);
-                                                 }
-                                                 return table;
-                                             })()
-                                          : std::vector<std::vector<float>>{},
-                    .beamPayloadTable = scene.beamLatticeResources.size() > 0u
-                                          ? ([&]()
-                                             {
-                                                 std::vector<std::vector<float>> table;
-                                                 table.reserve(scene.beamLatticeResources.size());
-                                                 for (auto const & beam : scene.beamLatticeResources)
-                                                 {
-                                                     table.push_back(beam.data);
-                                                 }
-                                                 return table;
-                                             })()
-                                          : std::vector<std::vector<float>>{},
-                    .imagePayloadTable = scene.imageResources.size() > 0u
-                                           ? ([&]()
-                                              {
-                                                  std::vector<std::vector<std::uint32_t>> table;
-                                                  table.reserve(scene.imageResources.size());
-                                                  for (auto const & image : scene.imageResources)
-                                                  {
-                                                      table.push_back(image.data);
-                                                  }
-                                                  return table;
-                                              })()
-                                               : std::vector<std::vector<std::uint32_t>>{}};
+                    .parameterValues = parameters.values};
+        }
+
+        [[nodiscard]] std::shared_ptr<WebGPUScenePayloadBuffers>
+        uploadScenePayloads(WebGPUComputeBackend & backend,
+                            compute::RenderSceneSnapshot const & snapshot)
+        {
+            std::vector<std::vector<float>> meshTable;
+            meshTable.reserve(snapshot.meshResources.size());
+            for (auto const & mesh : snapshot.meshResources)
+            {
+                meshTable.push_back(mesh.data);
+            }
+            std::vector<std::vector<float>> beamTable;
+            beamTable.reserve(snapshot.beamLatticeResources.size());
+            for (auto const & beam : snapshot.beamLatticeResources)
+            {
+                beamTable.push_back(beam.data);
+            }
+            std::vector<std::vector<std::uint32_t>> imageTable;
+            imageTable.reserve(snapshot.imageResources.size());
+            for (auto const & image : snapshot.imageResources)
+            {
+                imageTable.push_back(image.data);
+            }
+            return backend.createScenePayloadBuffers(meshTable, beamTable, imageTable);
         }
     }
 
@@ -329,8 +367,11 @@ namespace gladius::webgpu
             throw std::invalid_argument("WebGPU renderer does not support the scene capabilities");
         }
 
-        return std::make_unique<WebGPUAnalyticRenderScene>(
-          std::make_shared<const compute::RenderSceneSnapshot>(std::move(snapshot)));
+        auto sharedSnapshot =
+          std::make_shared<const compute::RenderSceneSnapshot>(std::move(snapshot));
+        auto scenePayloads = uploadScenePayloads(*m_backend, *sharedSnapshot);
+        return std::make_unique<WebGPUAnalyticRenderScene>(std::move(sharedSnapshot),
+                                                           std::move(scenePayloads));
     }
 
     std::unique_ptr<compute::IRenderScene>
@@ -350,7 +391,9 @@ namespace gladius::webgpu
             throw std::invalid_argument("WebGPU renderer does not support the scene capabilities");
         }
 
-        return std::make_unique<WebGPUAnalyticRenderScene>(std::move(snapshot));
+        auto scenePayloads = uploadScenePayloads(*m_backend, *snapshot);
+        return std::make_unique<WebGPUAnalyticRenderScene>(std::move(snapshot),
+                                                           std::move(scenePayloads));
     }
 
     std::unique_ptr<compute::IRenderSubmission>
@@ -377,7 +420,14 @@ namespace gladius::webgpu
                                                *parameterSnapshot,
                                                analyticScene->getComposedShader(),
                                                request);
-        auto frameSubmission = m_backend->submitFrame(std::move(frameRequest));
+        auto scenePayloads = analyticScene->getScenePayloads();
+        WebGPUFrameSubmissionOptions options{
+          .scenePayloads = scenePayloads,
+          .sceneResourceId = scenePayloads ? std::optional<std::uint64_t>{scenePayloads->resourceId}
+                                           : std::nullopt,
+          .parameterGeneration = parameterSnapshot->parameterGeneration,
+          .shaderHash = analyticScene->getComposedShaderHash()};
+        auto frameSubmission = m_backend->submitFrame(std::move(frameRequest), std::move(options));
         return std::make_unique<WebGPUFrameRenderSubmission>(std::move(frameSubmission),
                                                              std::move(request),
                                                              analyticScene->getSharedSnapshot(),
@@ -410,29 +460,13 @@ namespace gladius::webgpu
             return nullptr;
         }
         auto const & snapshot = analyticScene->getSnapshot();
-        bool const hasMeshes = !snapshot.meshResources.empty();
-        bool const hasBeams = !snapshot.beamLatticeResources.empty();
-        bool const hasImages = !snapshot.imageResources.empty();
+        auto [prebakeShader, prebakeShaderHash] = analyticScene->getPrebakeShader();
 
         SdfPrebakeRequest request{};
-        request.shaderSource = WebGPUFrameShaderComposer::composeSdfPrebake(
-          snapshot.analyticEvaluatorWgsl, hasMeshes, hasBeams, hasImages);
+        request.shaderSource = std::move(prebakeShader);
+        request.shaderHash = prebakeShaderHash;
         request.parameters = parameterSnapshot->values;
-        request.meshPayloads.reserve(snapshot.meshResources.size());
-        for (auto const & mesh : snapshot.meshResources)
-        {
-            request.meshPayloads.push_back(mesh.data);
-        }
-        request.beamPayloads.reserve(snapshot.beamLatticeResources.size());
-        for (auto const & beam : snapshot.beamLatticeResources)
-        {
-            request.beamPayloads.push_back(beam.data);
-        }
-        request.imagePayloads.reserve(snapshot.imageResources.size());
-        for (auto const & image : snapshot.imageResources)
-        {
-            request.imagePayloads.push_back(image.data);
-        }
+        request.scenePayloads = analyticScene->getScenePayloads();
         request.bounds = bounds;
         request.gridSize = gridSize;
         request.sceneGeneration = snapshot.sceneGeneration;

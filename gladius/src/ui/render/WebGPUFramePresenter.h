@@ -36,6 +36,7 @@ namespace gladius::ui::async_rendering
 
         [[nodiscard]] bool present(compute::RenderFrame const & frame,
                  FramePresentationCandidate const & candidate) override;
+        [[nodiscard]] bool supportsGpuDirectPresentation() const noexcept override;
         void release() noexcept override;
         [[nodiscard]] std::uintptr_t getTextureId() const noexcept override;
         [[nodiscard]] std::uint32_t getWidth() const noexcept override;

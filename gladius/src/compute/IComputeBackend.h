@@ -83,6 +83,9 @@ namespace gladius::compute
         /// composed with the metrics module). Off by default; never enable together with
         /// timing measurements because the counters perturb what they measure.
         bool collectMetrics{false};
+        /// When true, skip staging-buffer CPU readback and return a GPU output handle in
+        /// `FrameResult::gpuOutputHandle` for zero-copy GPU texture presentation.
+        bool skipCpuReadback{false};
         /// Compute workgroup tile shape used for the frame dispatch. The shader source must
         /// declare the same workgroup size, otherwise the dispatch would not cover the frame.
         compute::WorkgroupShape workgroupShape{};
@@ -107,6 +110,7 @@ namespace gladius::compute
         std::uint32_t width{};
         std::uint32_t height{};
         std::vector<std::uint32_t> pixels;
+        std::shared_ptr<void> gpuOutputHandle;
     };
 
     /**

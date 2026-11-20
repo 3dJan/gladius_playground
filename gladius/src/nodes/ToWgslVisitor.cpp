@@ -1,5 +1,6 @@
 #include "ToWgslVisitor.h"
 
+#include "Assembly.h"
 #include "DerivedNodes.h"
 #include "Model.h"
 #include "Parameter.h"
@@ -24,8 +25,12 @@ namespace gladius::nodes
             {
                 return "vec3<f32>";
             }
+            if (typeIndex == ParameterTypeIndex::Matrix4)
+            {
+                return "mat4x4<f32>";
+            }
 
-            throw std::runtime_error("WGSL evaluator supports only scalar and vec3 graph values");
+            throw std::runtime_error("WGSL evaluator supports only scalar, vec3, and mat4x4 graph values");
         }
 
         std::string formatFloat(float const value)
@@ -42,15 +47,30 @@ namespace gladius::nodes
     void ToWgslVisitor::setModel(Model * const model)
     {
         Visitor::setModel(model);
+        m_helperDefinitions.str({});
+        m_helperDefinitions.clear();
         m_definition.str({});
         m_definition.clear();
         m_visitedNodes.clear();
+        m_emittedHelpers.clear();
         m_referenceAnalysisPerformed = false;
         m_inlineExpressions.clear();
         m_requiredParameterCount = 0u;
         m_requiredParameterIds.clear();
         m_functionClosed = false;
         m_channelSelector.setModel(model);
+    }
+
+    void ToWgslVisitor::setAssembly(Assembly const * const assembly) noexcept
+    {
+        m_assembly = assembly;
+    }
+
+    void ToWgslVisitor::setHelperMode(std::string functionName,
+                                      HelperSignature const * const signature) noexcept
+    {
+        m_helperFunctionName = std::move(functionName);
+        m_helperSignature = signature;
     }
 
     void ToWgslVisitor::setEvaluatorChannel(EvaluatorChannel const channel)
@@ -69,7 +89,7 @@ namespace gladius::nodes
 
     void ToWgslVisitor::write(std::ostream & out) const
     {
-        out << m_definition.str();
+        out << m_helperDefinitions.str() << m_definition.str();
     }
 
     std::size_t ToWgslVisitor::getRequiredParameterCount() const noexcept
@@ -289,6 +309,36 @@ namespace gladius::nodes
             return;
         }
 
+        if (m_helperSignature != nullptr)
+        {
+            m_definition << fmt::format("fn {}(", m_helperFunctionName);
+            for (std::size_t i = 0u; i < m_helperSignature->inputNames.size(); ++i)
+            {
+                auto const & inputName = m_helperSignature->inputNames[i];
+                auto const & port = beginning.getOutputs().at(inputName);
+                if (i > 0u)
+                {
+                    m_definition << ", ";
+                }
+                m_definition << fmt::format(
+                  "arg_{}: {}", i, typeIndexToWgsl(port.getTypeIndex()));
+            }
+            auto const returnType = m_helperSignature->singleOutput
+                                      ? m_helperSignature->outputWgslTypes.front()
+                                      : m_helperSignature->structName;
+            m_definition << fmt::format(") -> {} {{\n", returnType);
+            for (std::size_t i = 0u; i < m_helperSignature->inputNames.size(); ++i)
+            {
+                auto const & inputName = m_helperSignature->inputNames[i];
+                auto const & port = beginning.getOutputs().at(inputName);
+                m_definition << fmt::format("let {}: {} = arg_{};\n",
+                                            port.getUniqueName(),
+                                            typeIndexToWgsl(port.getTypeIndex()),
+                                            i);
+            }
+            return;
+        }
+
         if (!m_channelSelector.providesSelectedChannel())
         {
             // The model does not provide the selected channel - emit no evaluator at all.
@@ -312,6 +362,32 @@ namespace gladius::nodes
     {
         if (!beginNode(ending))
         {
+            return;
+        }
+
+        if (m_helperSignature != nullptr)
+        {
+            if (m_helperSignature->singleOutput)
+            {
+                m_definition << fmt::format(
+                  "return {};\n}}\n",
+                  resolveParameter(ending.parameter().at(m_helperSignature->outputNames.front())));
+            }
+            else
+            {
+                m_definition << fmt::format("return {}(", m_helperSignature->structName);
+                for (std::size_t i = 0u; i < m_helperSignature->outputNames.size(); ++i)
+                {
+                    if (i > 0u)
+                    {
+                        m_definition << ", ";
+                    }
+                    m_definition << resolveParameter(
+                      ending.parameter().at(m_helperSignature->outputNames[i]));
+                }
+                m_definition << ");\n}\n";
+            }
+            m_functionClosed = true;
             return;
         }
 
@@ -998,5 +1074,143 @@ namespace gladius::nodes
                   fmt::format("gladiusSignedDistanceToBeamLattice({}, {}u)",
                               resolveParameter(signedDistanceToBeamLattice.parameter().at(FieldNames::Pos)),
                               resourceId));
+    }
+
+    void ToWgslVisitor::emitHelperFunction(ResourceId const functionId, Model & callee)
+    {
+        if (m_emittedHelpers.contains(functionId))
+        {
+            return;
+        }
+
+        auto * const beginNode = callee.getBeginNode();
+        auto * const endNode = callee.getEndNode();
+        if (beginNode == nullptr || endNode == nullptr)
+        {
+            throw std::runtime_error(
+              fmt::format("WGSL helper function {} is missing Begin/End nodes", functionId));
+        }
+
+        HelperSignature signature;
+        signature.functionName = fmt::format("gladius_fn_{}", functionId);
+        signature.structName = fmt::format("GladiusFnOut_{}", functionId);
+
+        for (auto const & [portName, port] : beginNode->getOutputs())
+        {
+            if (port.getTypeIndex() == ParameterTypeIndex::Float ||
+                port.getTypeIndex() == ParameterTypeIndex::Float3 ||
+                port.getTypeIndex() == ParameterTypeIndex::Matrix4)
+            {
+                signature.inputNames.push_back(portName);
+            }
+        }
+
+        for (auto const & [paramName, param] : endNode->constParameter())
+        {
+            if (param.getTypeIndex() == ParameterTypeIndex::Float ||
+                param.getTypeIndex() == ParameterTypeIndex::Float3 ||
+                param.getTypeIndex() == ParameterTypeIndex::Matrix4)
+            {
+                signature.outputNames.push_back(paramName);
+                signature.outputWgslTypes.push_back(typeIndexToWgsl(param.getTypeIndex()));
+            }
+        }
+
+        if (signature.outputNames.empty())
+        {
+            throw std::runtime_error(
+              fmt::format("WGSL helper function {} has no supported outputs", functionId));
+        }
+        signature.singleOutput = (signature.outputNames.size() == 1u);
+
+        auto const [it, inserted] = m_emittedHelpers.emplace(functionId, std::move(signature));
+        (void) inserted;
+        auto const & storedSig = it->second;
+
+        if (!storedSig.singleOutput)
+        {
+            m_helperDefinitions << fmt::format("struct {} {{\n", storedSig.structName);
+            for (std::size_t i = 0u; i < storedSig.outputNames.size(); ++i)
+            {
+                m_helperDefinitions << fmt::format(
+                  "    out_{}: {},\n", i, storedSig.outputWgslTypes[i]);
+            }
+            m_helperDefinitions << "};\n";
+        }
+
+        ToWgslVisitor nested;
+        nested.setAssembly(m_assembly);
+        nested.setBufferNumericLiterals(m_bufferNumericLiterals);
+        nested.setParameterLookupIndices(m_parameterLookupIndices);
+        nested.setHelperMode(storedSig.functionName, &storedSig);
+        callee.visitNodes(nested);
+
+        std::ostringstream nestedCode;
+        nested.write(nestedCode);
+        m_helperDefinitions << nestedCode.str() << "\n";
+        m_requiredParameterCount =
+          std::max(m_requiredParameterCount, nested.getRequiredParameterCount());
+        m_requiredParameterIds.insert(nested.m_requiredParameterIds.begin(),
+                                      nested.m_requiredParameterIds.end());
+    }
+
+    void ToWgslVisitor::visit(FunctionCall & functionCall)
+    {
+        if (!beginNode(functionCall))
+        {
+            return;
+        }
+
+        if (m_assembly == nullptr)
+        {
+            throw std::runtime_error(
+              "WGSL evaluator encountered FunctionCall without an attached Assembly");
+        }
+
+        auto const functionId = functionCall.getFunctionId();
+        auto const callee = const_cast<Assembly *>(m_assembly)->findModel(functionId);
+        if (!callee)
+        {
+            throw std::runtime_error(
+              fmt::format("WGSL evaluator could not resolve FunctionCall target {}", functionId));
+        }
+
+        emitHelperFunction(functionId, *callee);
+        auto const & signature = m_emittedHelpers.at(functionId);
+
+        std::ostringstream callExpr;
+        callExpr << signature.functionName << "(";
+        for (std::size_t i = 0u; i < signature.inputNames.size(); ++i)
+        {
+            if (i > 0u)
+            {
+                callExpr << ", ";
+            }
+            auto const & inputName = signature.inputNames[i];
+            callExpr << resolveParameter(functionCall.parameter().at(inputName));
+        }
+        callExpr << ")";
+
+        if (signature.singleOutput)
+        {
+            auto const & outName = signature.outputNames.front();
+            emitValue(functionCall, outName, signature.outputWgslTypes.front(), callExpr.str());
+            return;
+        }
+
+        auto const resultVar = fmt::format("call_res_{}", functionCall.getId());
+        m_definition << fmt::format(
+          "let {}: {} = {};\n", resultVar, signature.structName, callExpr.str());
+        for (std::size_t i = 0u; i < signature.outputNames.size(); ++i)
+        {
+            auto const & outName = signature.outputNames[i];
+            if (functionCall.getOutputs().contains(outName))
+            {
+                emitValue(functionCall,
+                          outName,
+                          signature.outputWgslTypes[i],
+                          fmt::format("{}.out_{}", resultVar, i));
+            }
+        }
     }
 }

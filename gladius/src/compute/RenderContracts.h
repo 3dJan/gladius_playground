@@ -6,6 +6,7 @@
 #include <compare>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -333,6 +334,9 @@ namespace gladius::compute
         bool collectGpuTiming{false};
         /// Ask the shader to report ray-march step counters. Backends without support ignore it.
         bool collectMetrics{false};
+        /// When true, backends that support direct GPU texture presentation may omit CPU pixel
+        /// readback and populate `RenderFrame::gpuOutputHandle` instead of `RenderFrame::pixels`.
+        bool skipCpuReadback{false};
 
         [[nodiscard]] bool isValid() const noexcept
         {
@@ -352,6 +356,9 @@ namespace gladius::compute
         std::uint32_t endRow{};
         RenderFreshnessStamp freshness{};
         std::vector<std::uint32_t> pixels;
+        /// Optional opaque backend GPU output handle populated when `RenderRequest::skipCpuReadback`
+        /// is honoured, allowing a same-device presenter to copy directly on the GPU.
+        std::shared_ptr<void> gpuOutputHandle;
 
         [[nodiscard]] bool isValid() const noexcept
         {
@@ -359,7 +366,8 @@ namespace gladius::compute
                                           .height = height,
                                           .firstRow = firstRow,
                                           .endRow = endRow};
-            return viewport.isValid() && pixels.size() == viewport.pixelCount();
+            return viewport.isValid() &&
+                   (gpuOutputHandle != nullptr || pixels.size() == viewport.pixelCount());
         }
     };
 }

@@ -27,6 +27,7 @@ namespace gladius::nodes
         using ParameterLookupIndices = std::map<ParameterId, int>;
 
         void setModel(Model * model) override;
+        void setAssembly(Assembly const * assembly) noexcept;
         void write(std::ostream & out) const;
         [[nodiscard]] std::size_t getRequiredParameterCount() const noexcept;
         [[nodiscard]] bool usesParameter(ParameterId parameterId) const noexcept;
@@ -99,8 +100,22 @@ namespace gladius::nodes
         void visit(SignedDistanceToMesh & signedDistanceToMesh) override;
         void visit(UnsignedDistanceToMesh & unsignedDistanceToMesh) override;
         void visit(SignedDistanceToBeamLattice & signedDistanceToBeamLattice) override;
+        void visit(FunctionCall & functionCall) override;
 
       private:
+        struct HelperSignature
+        {
+            std::string functionName;
+            std::string structName;
+            std::vector<std::string> inputNames;
+            std::vector<std::string> outputNames;
+            std::vector<std::string> outputWgslTypes;
+            bool singleOutput{false};
+        };
+
+        void emitHelperFunction(ResourceId functionId, Model & callee);
+        void setHelperMode(std::string functionName, HelperSignature const * signature) noexcept;
+
         [[nodiscard]] bool beginNode(NodeBase const & node);
         [[nodiscard]] bool shouldInlineOutput(NodeBase const & node, std::string const & portName) const;
         [[nodiscard]] std::string resolveParameter(IParameter const & parameter) const;
@@ -113,8 +128,13 @@ namespace gladius::nodes
                        std::string expression);
         [[nodiscard]] static std::string composeMatrixExpression(std::array<std::string, 16> const & values);
 
+        std::stringstream m_helperDefinitions;
         std::stringstream m_definition;
         std::set<NodeId> m_visitedNodes;
+        std::map<ResourceId, HelperSignature> m_emittedHelpers;
+        Assembly const * m_assembly{};
+        std::string m_helperFunctionName;
+        HelperSignature const * m_helperSignature{};
         mutable ChannelDependencySelector m_channelSelector;
         mutable OutputPortReferenceAnalyzer m_referenceAnalyzer;
         mutable bool m_referenceAnalysisPerformed{};

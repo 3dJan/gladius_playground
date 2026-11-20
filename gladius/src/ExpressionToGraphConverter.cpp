@@ -2,6 +2,7 @@
 #include "ExpressionParser.h"
 #include "FunctionArgument.h"
 #include "nodes/DerivedNodes.h"
+#include "nodes/GraphOptimizer.h"
 #include "nodes/Model.h"
 #include "nodes/NodeBase.h"
 #include "nodes/Assembly.h"
@@ -457,6 +458,19 @@ namespace gladius
                       "Failed to connect return value to end node in '" + cleanStmt + "'");
                 }
 
+                (void) nodes::GraphOptimizer::optimize(model);
+                if (!model.getNode(exprNodeId).has_value())
+                {
+                    if (auto * endNode = model.getEndNode(); endNode != nullptr)
+                    {
+                        auto const & endParams = endNode->constParameter();
+                        if (auto const it = endParams.find(singleOutput.name);
+                            it != endParams.end() && it->second.getConstSource().has_value())
+                        {
+                            return it->second.getConstSource()->nodeId;
+                        }
+                    }
+                }
                 return exprNodeId;
             }
             else
@@ -481,6 +495,24 @@ namespace gladius
             }
         }
 
+        if (lastResult != 0)
+        {
+            (void) nodes::GraphOptimizer::optimize(model);
+            if (!model.getNode(lastResult).has_value())
+            {
+                if (auto * endNode = model.getEndNode(); endNode != nullptr)
+                {
+                    for (auto const & [paramName, param] : endNode->constParameter())
+                    {
+                        (void) paramName;
+                        if (param.getConstSource().has_value())
+                        {
+                            return param.getConstSource()->nodeId;
+                        }
+                    }
+                }
+            }
+        }
         return lastResult;
     }
 

@@ -26,6 +26,54 @@ namespace gladius::webgpu
     namespace
     {
         std::string toString(wgpu::StringView value);
+
+        [[nodiscard]] std::uint64_t hashWgslSource(std::string_view const source) noexcept
+        {
+            std::uint64_t hash = 14695981039346656037ull;
+            for (unsigned char const byte : source)
+            {
+                hash ^= static_cast<std::uint64_t>(byte);
+                hash *= 1099511628211ull;
+            }
+            return hash == 0u ? 1u : hash;
+        }
+
+        [[nodiscard]] std::string applyHardwareFilteredPrecomputedSdf(std::string const & source)
+        {
+            constexpr std::string_view beginMarker = "// GLADIUS_PRECOMPUTED_SDF_SAMPLE_BEGIN";
+            constexpr std::string_view endMarker = "// GLADIUS_PRECOMPUTED_SDF_SAMPLE_END";
+            auto const beginPos = source.find(beginMarker);
+            if (beginPos == std::string::npos)
+            {
+                return source;
+            }
+            auto const endPos = source.find(endMarker, beginPos + beginMarker.size());
+            if (endPos == std::string::npos)
+            {
+                return source;
+            }
+
+            constexpr std::string_view hardwareSamplerImpl = R"wgsl(
+@group(0) @binding(13)
+var precomputed_sdf_sampler: sampler;
+
+fn sample_precomputed_sdf(position: vec3<f32>) -> f32 {
+    let bbox_min = precomputed_sdf_info.bbox_min_and_tolerance.xyz;
+    let bbox_max = precomputed_sdf_info.bbox_max_and_valid.xyz;
+    let dims = vec3<f32>(precomputed_sdf_info.grid_dims.xyz);
+    let span = max(bbox_max - bbox_min, vec3<f32>(1.0e-5f));
+    let uvw_norm = clamp((position - bbox_min) / span, vec3<f32>(0.0f), vec3<f32>(1.0f));
+    let uvw = (uvw_norm * (dims - vec3<f32>(1.0f)) + vec3<f32>(0.5f)) / dims;
+    return textureSampleLevel(precomputed_sdf, precomputed_sdf_sampler, uvw, 0.0f).r;
+}
+)wgsl";
+            std::string rewritten;
+            rewritten.reserve(source.size());
+            rewritten.append(source, 0u, beginPos);
+            rewritten.append(hardwareSamplerImpl);
+            rewritten.append(source, endPos + endMarker.size(), std::string::npos);
+            return rewritten;
+        }
     }
 
     class WebGPUFramePipelineCache
@@ -118,20 +166,29 @@ namespace gladius::webgpu
 
         [[nodiscard]] Result getOrCreate(wgpu::Device const & device,
                                          std::string const & shaderSource,
+                                         std::uint64_t shaderHash,
                                          bool const hasMeshPayloads,
                                          bool const hasBeamPayloads,
-                                         bool const hasImagePayloads)
+                                         bool const hasImagePayloads,
+                                         bool const useHardwareFilteredSdf)
         {
+            if (shaderHash == 0u)
+            {
+                shaderHash = hashWgslSource(shaderSource);
+            }
             std::scoped_lock lock{m_mutex};
             auto const cached = std::find_if(
               m_entries.begin(),
               m_entries.end(),
               [&](Entry const & entry)
               {
-                  return entry.shaderSource == shaderSource &&
+                  return entry.shaderHash == shaderHash &&
                          entry.hasMeshPayloads == hasMeshPayloads &&
                          entry.hasBeamPayloads == hasBeamPayloads &&
-                         entry.hasImagePayloads == hasImagePayloads;
+                         entry.hasImagePayloads == hasImagePayloads &&
+                         entry.useHardwareFilteredSdf == useHardwareFilteredSdf &&
+                         entry.shaderSource.size() == shaderSource.size() &&
+                         entry.shaderSource == shaderSource;
               });
             if (cached != m_entries.end())
             {
@@ -142,13 +199,16 @@ namespace gladius::webgpu
                 m_entries.erase(cached);
             }
 
+            std::string const effectiveShader =
+              useHardwareFilteredSdf ? applyHardwareFilteredPrecomputedSdf(shaderSource) : shaderSource;
+
             wgpu::ShaderSourceWGSL wgsl;
-            wgsl.code = {shaderSource.data(), shaderSource.size()};
+            wgsl.code = {effectiveShader.data(), effectiveShader.size()};
             wgpu::ShaderModuleDescriptor shaderDescriptor;
             shaderDescriptor.nextInChain = &wgsl;
             auto const shader = device.CreateShaderModule(&shaderDescriptor);
 
-            wgpu::BindGroupLayoutEntry bindings[12]{};
+            wgpu::BindGroupLayoutEntry bindings[13]{};
             bindings[0].binding = 0u;
             bindings[0].visibility = wgpu::ShaderStage::Compute;
             bindings[0].buffer.type = wgpu::BufferBindingType::Uniform;
@@ -217,9 +277,19 @@ namespace gladius::webgpu
 
             bindings[bindingCount].binding = 12u;
             bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
-            bindings[bindingCount].texture.sampleType = wgpu::TextureSampleType::UnfilterableFloat;
+            bindings[bindingCount].texture.sampleType =
+              useHardwareFilteredSdf ? wgpu::TextureSampleType::Float
+                                     : wgpu::TextureSampleType::UnfilterableFloat;
             bindings[bindingCount].texture.viewDimension = wgpu::TextureViewDimension::e3D;
             ++bindingCount;
+
+            if (useHardwareFilteredSdf)
+            {
+                bindings[bindingCount].binding = 13u;
+                bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                bindings[bindingCount].sampler.type = wgpu::SamplerBindingType::Filtering;
+                ++bindingCount;
+            }
 
             wgpu::BindGroupLayoutDescriptor layoutDescriptor;
             layoutDescriptor.entryCount = bindingCount;
@@ -256,10 +326,12 @@ namespace gladius::webgpu
             {
                 m_entries.erase(m_entries.begin());
             }
-            m_entries.push_back(Entry{.shaderSource = shaderSource,
+            m_entries.push_back(Entry{.shaderHash = shaderHash,
+                                      .shaderSource = shaderSource,
                                       .hasMeshPayloads = hasMeshPayloads,
                                       .hasBeamPayloads = hasBeamPayloads,
                                       .hasImagePayloads = hasImagePayloads,
+                                      .useHardwareFilteredSdf = useHardwareFilteredSdf,
                                       .pipeline = pipeline});
             return Result{.pipeline = m_entries.back().pipeline};
         }
@@ -267,11 +339,171 @@ namespace gladius::webgpu
       private:
         struct Entry
         {
+            std::uint64_t shaderHash{0u};
             std::string shaderSource;
             bool hasMeshPayloads{false};
             bool hasBeamPayloads{false};
             bool hasImagePayloads{false};
+            bool useHardwareFilteredSdf{false};
             std::shared_ptr<Pipeline> pipeline;
+        };
+
+        std::mutex m_mutex;
+        std::vector<Entry> m_entries;
+    };
+
+    class WebGPUPrebakePipelineCache
+    {
+      public:
+        [[nodiscard]] std::shared_ptr<WebGPUFramePipelineCache::Pipeline>
+        getOrCreate(wgpu::Device const & device,
+                    std::string const & shaderSource,
+                    std::uint64_t shaderHash,
+                    bool const hasMeshPayloads,
+                    bool const hasBeamPayloads,
+                    bool const hasImagePayloads)
+        {
+            if (shaderHash == 0u)
+            {
+                shaderHash = hashWgslSource(shaderSource);
+            }
+            std::scoped_lock lock{m_mutex};
+            auto const cached = std::find_if(
+              m_entries.begin(),
+              m_entries.end(),
+              [&](Entry const & entry)
+              {
+                  return entry.shaderHash == shaderHash &&
+                         entry.hasMeshPayloads == hasMeshPayloads &&
+                         entry.hasBeamPayloads == hasBeamPayloads &&
+                         entry.hasImagePayloads == hasImagePayloads &&
+                         entry.shaderSource.size() == shaderSource.size() &&
+                         entry.shaderSource == shaderSource;
+              });
+            if (cached != m_entries.end())
+            {
+                if (cached->pipeline->getStatus() !=
+                    WebGPUFramePipelineCache::Pipeline::Status::Failed)
+                {
+                    return cached->pipeline;
+                }
+                m_entries.erase(cached);
+            }
+
+            wgpu::ShaderSourceWGSL wgsl;
+            wgsl.code = {shaderSource.data(), shaderSource.size()};
+            wgpu::ShaderModuleDescriptor shaderDescriptor;
+            shaderDescriptor.nextInChain = &wgsl;
+            auto const shader = device.CreateShaderModule(&shaderDescriptor);
+
+            wgpu::BindGroupLayoutEntry bindings[9]{};
+            bindings[0].binding = 0u;
+            bindings[0].visibility = wgpu::ShaderStage::Compute;
+            bindings[0].buffer.type = wgpu::BufferBindingType::Uniform;
+            bindings[0].buffer.minBindingSize = sizeof(PrecomputedSdfUniforms);
+            bindings[1].binding = 1u;
+            bindings[1].visibility = wgpu::ShaderStage::Compute;
+            bindings[1].storageTexture.access = wgpu::StorageTextureAccess::WriteOnly;
+            bindings[1].storageTexture.format = wgpu::TextureFormat::R32Float;
+            bindings[1].storageTexture.viewDimension = wgpu::TextureViewDimension::e3D;
+            bindings[2].binding = 2u;
+            bindings[2].visibility = wgpu::ShaderStage::Compute;
+            bindings[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+            bindings[2].buffer.minBindingSize = sizeof(float);
+            std::size_t bindingCount = 3u;
+            if (hasMeshPayloads)
+            {
+                bindings[bindingCount].binding = 4u;
+                bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                bindings[bindingCount].buffer.minBindingSize = sizeof(float);
+                ++bindingCount;
+                bindings[bindingCount].binding = 5u;
+                bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                ++bindingCount;
+            }
+            if (hasBeamPayloads)
+            {
+                bindings[bindingCount].binding = 6u;
+                bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                bindings[bindingCount].buffer.minBindingSize = sizeof(float);
+                ++bindingCount;
+                bindings[bindingCount].binding = 7u;
+                bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                ++bindingCount;
+            }
+            if (hasImagePayloads)
+            {
+                bindings[bindingCount].binding = 8u;
+                bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                bindings[bindingCount].buffer.minBindingSize = sizeof(float);
+                ++bindingCount;
+                bindings[bindingCount].binding = 9u;
+                bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
+                bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+                bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
+                ++bindingCount;
+            }
+
+            wgpu::BindGroupLayoutDescriptor layoutDescriptor;
+            layoutDescriptor.entryCount = bindingCount;
+            layoutDescriptor.entries = bindings;
+            auto const bindGroupLayout = device.CreateBindGroupLayout(&layoutDescriptor);
+
+            wgpu::PipelineLayoutDescriptor pipelineLayoutDescriptor;
+            pipelineLayoutDescriptor.bindGroupLayoutCount = 1u;
+            pipelineLayoutDescriptor.bindGroupLayouts = &bindGroupLayout;
+            auto const pipelineLayout = device.CreatePipelineLayout(&pipelineLayoutDescriptor);
+
+            wgpu::ComputePipelineDescriptor pipelineDescriptor;
+            pipelineDescriptor.layout = pipelineLayout;
+            pipelineDescriptor.compute.module = shader;
+            pipelineDescriptor.compute.entryPoint = "main";
+
+            auto pipeline = std::make_shared<WebGPUFramePipelineCache::Pipeline>();
+            pipeline->setBindGroupLayout(bindGroupLayout);
+#ifdef __EMSCRIPTEN__
+            auto const callbackMode = wgpu::CallbackMode::AllowSpontaneous;
+#else
+            auto const callbackMode = wgpu::CallbackMode::AllowProcessEvents;
+#endif
+            (void) device.CreateComputePipelineAsync(
+              &pipelineDescriptor,
+              callbackMode,
+              [pipeline](wgpu::CreatePipelineAsyncStatus const status,
+                         wgpu::ComputePipeline computePipeline,
+                         wgpu::StringView const message)
+              { pipeline->complete(status, std::move(computePipeline), message); });
+
+            constexpr std::size_t maxCachedEntries = 4u;
+            if (m_entries.size() == maxCachedEntries)
+            {
+                m_entries.erase(m_entries.begin());
+            }
+            m_entries.push_back(Entry{.shaderHash = shaderHash,
+                                      .shaderSource = shaderSource,
+                                      .hasMeshPayloads = hasMeshPayloads,
+                                      .hasBeamPayloads = hasBeamPayloads,
+                                      .hasImagePayloads = hasImagePayloads,
+                                      .pipeline = pipeline});
+            return pipeline;
+        }
+
+      private:
+        struct Entry
+        {
+            std::uint64_t shaderHash{0u};
+            std::string shaderSource;
+            bool hasMeshPayloads{false};
+            bool hasBeamPayloads{false};
+            bool hasImagePayloads{false};
+            std::shared_ptr<WebGPUFramePipelineCache::Pipeline> pipeline;
         };
 
         std::mutex m_mutex;
@@ -337,16 +569,30 @@ namespace gladius::webgpu
         wgpu::Buffer uniformBuffer;
         wgpu::Texture texture;
         wgpu::TextureView textureView;
+        wgpu::Sampler linearSampler;
         std::uint32_t gridSize{0u};
         std::uint64_t generationEpoch{0u};
         bool valid{false};
 
         void ensureInitialized(wgpu::Device const & device,
                                wgpu::Queue const & queue,
-                               std::uint32_t const targetGridSize)
+                               std::uint32_t const targetGridSize,
+                               bool const createLinearSampler = false)
         {
             std::scoped_lock lock{mutex};
             auto const clampedSize = std::max(targetGridSize, 1u);
+            if (createLinearSampler && !linearSampler)
+            {
+                wgpu::SamplerDescriptor samplerDesc;
+                samplerDesc.label = "Gladius precomputed SDF linear sampler";
+                samplerDesc.addressModeU = wgpu::AddressMode::ClampToEdge;
+                samplerDesc.addressModeV = wgpu::AddressMode::ClampToEdge;
+                samplerDesc.addressModeW = wgpu::AddressMode::ClampToEdge;
+                samplerDesc.magFilter = wgpu::FilterMode::Linear;
+                samplerDesc.minFilter = wgpu::FilterMode::Linear;
+                samplerDesc.mipmapFilter = wgpu::MipmapFilterMode::Nearest;
+                linearSampler = device.CreateSampler(&samplerDesc);
+            }
             if (!uniformBuffer)
             {
                 wgpu::BufferDescriptor uniformDescriptor;
@@ -714,6 +960,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
           public:
             WebGPUFrameSubmission(std::shared_ptr<WebGPUComputeContext> context,
                                   compute::FrameRequest request,
+                                  WebGPUFrameSubmissionOptions options,
                                   std::shared_ptr<WebGPUFrameBufferSet> bufferLease,
                                   std::shared_ptr<WebGPUFramePipelineCache> pipelineCache,
                                   std::shared_ptr<PrecomputedSdfState> precomputedSdf)
@@ -722,11 +969,12 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 , m_height(request.height)
                 , m_pipelineCache(std::move(pipelineCache))
                 , m_precomputedSdf(std::move(precomputedSdf))
+                , m_scenePayloads(std::move(options.scenePayloads))
                 , m_state(std::make_shared<WebGPUFrameSubmissionState>(std::move(bufferLease)))
             {
                 try
                 {
-                    submit(std::move(request));
+                    submit(std::move(request), std::move(options));
                 }
                 catch (std::exception const & exception)
                 {
@@ -954,16 +1202,60 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                0u,
                                                FRAME_METRICS_SIZE_BYTES);
                 }
-                encoder.CopyBufferToBuffer(m_state->buffers.getOutputBuffer(),
-                                           0u,
-                                           m_state->buffers.getStagingBuffer(),
-                                           0u,
-                                           state->buffers.getOutputSizeBytes());
+                if (!m_skipCpuReadback)
+                {
+                    encoder.CopyBufferToBuffer(m_state->buffers.getOutputBuffer(),
+                                               0u,
+                                               m_state->buffers.getStagingBuffer(),
+                                               0u,
+                                               state->buffers.getOutputSizeBytes());
+                }
                 auto const commandBuffer = encoder.Finish();
                 auto const & queue = m_context->getQueue();
                 {
                     std::scoped_lock lock{state->mutex};
                     state->submittedAt = std::chrono::steady_clock::now();
+                }
+                if (m_skipCpuReadback)
+                {
+                    auto const bytesPerRow = m_rowStridePixels * static_cast<std::uint32_t>(sizeof(std::uint32_t));
+                    auto const rowCount = m_rowCount;
+                    auto const width = m_width;
+                    auto const height = m_height;
+                    queue.OnSubmittedWorkDone(
+#ifdef __EMSCRIPTEN__
+                      wgpu::CallbackMode::AllowSpontaneous,
+#else
+                      wgpu::CallbackMode::AllowProcessEvents,
+#endif
+                      [state, width, height, bytesPerRow, rowCount](
+                        wgpu::QueueWorkDoneStatus const workDoneStatus,
+                        wgpu::StringView const message)
+                      {
+                          std::scoped_lock lock{state->mutex};
+                          if (workDoneStatus != wgpu::QueueWorkDoneStatus::Success)
+                          {
+                              state->status = compute::ComputeCompletionStatus::Failed;
+                              state->errorMessage =
+                                "WebGPU zero-copy frame submission failed: " + toString(message);
+                              return;
+                          }
+                          auto gpuHandle = std::make_shared<WebGPUGpuOutputFrame>(
+                            WebGPUGpuOutputFrame{.outputBuffer = state->buffers.getOutputBuffer(),
+                                                 .bytesPerRow = bytesPerRow,
+                                                 .rowCount = rowCount,
+                                                 .bufferLease = state->bufferLease});
+                          state->result = compute::FrameResult{.width = width,
+                                                               .height = height,
+                                                               .gpuOutputHandle = std::move(gpuHandle)};
+                          auto const now = std::chrono::steady_clock::now();
+                          state->workDoneAt = now;
+                          state->readbackAt = now;
+                          state->status = compute::ComputeCompletionStatus::Succeeded;
+                      });
+                    queue.Submit(1u, &commandBuffer);
+                    m_frameSubmitted = true;
+                    return;
                 }
                 if (m_collectGpuTiming)
                 {
@@ -1142,7 +1434,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                   });
             }
 
-            void submit(compute::FrameRequest request)
+            void submit(compute::FrameRequest request, WebGPUFrameSubmissionOptions options)
             {
                 if (!m_context || !m_context->isValid())
                 {
@@ -1202,6 +1494,10 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
                 m_collectGpuTiming = request.collectGpuTiming;
                 m_collectMetrics = request.collectMetrics;
+                m_skipCpuReadback =
+                  request.skipCpuReadback && !m_collectGpuTiming && !m_collectMetrics;
+                m_rowStridePixels =
+                  m_skipCpuReadback ? ((request.width + 63u) & ~63u) : request.width;
                 auto const effectiveRenderingFlags =
                   m_collectMetrics ? request.renderingFlags | RF_DEBUG_METRICS
                                    : request.renderingFlags;
@@ -1230,7 +1526,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                0.0f},
                   .firstRowAndCount = {static_cast<float>(request.firstRow),
                                        static_cast<float>(rowCount),
-                                       0.0f,
+                                       m_skipCpuReadback ? static_cast<float>(m_rowStridePixels)
+                                                         : 0.0f,
                                        0.0f},
                   .timeSliceQualityNormal = {request.timeSeconds,
                                              request.sliceHeight,
@@ -1255,133 +1552,93 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                0.0f};
                 }
 
-                m_state->buffers.resize(
-                  m_context->getDevice(), request.width, rowCount, request.parameterValues.size());
+                m_state->buffers.resize(m_context->getDevice(),
+                                        request.width,
+                                        rowCount,
+                                        request.parameterValues.size(),
+                                        m_rowStridePixels);
                 m_state->buffers.writeUniforms(
                   m_context->getQueue(),
                   uniforms);
-                m_state->buffers.writeParameters(m_context->getQueue(), request.parameterValues);
-                m_state->buffers.setMeshPayloads(m_context->getDevice(),
-                                                 m_context->getQueue(),
-                                                 request.meshPayloadTable);
-                m_state->buffers.setBeamPayloads(m_context->getDevice(),
-                                                 m_context->getQueue(),
-                                                 request.beamPayloadTable);
-                m_state->buffers.setImagePayloads(m_context->getDevice(),
-                                                  m_context->getQueue(),
-                                                  request.imagePayloadTable);
+                m_state->buffers.writeParametersIfChanged(m_context->getQueue(),
+                                                          request.parameterValues,
+                                                          options.sceneResourceId,
+                                                          options.parameterGeneration);
+                if (!m_scenePayloads)
+                {
+                    m_state->buffers.setMeshPayloads(m_context->getDevice(),
+                                                     m_context->getQueue(),
+                                                     request.meshPayloadTable);
+                    m_state->buffers.setBeamPayloads(m_context->getDevice(),
+                                                     m_context->getQueue(),
+                                                     request.beamPayloadTable);
+                    m_state->buffers.setImagePayloads(m_context->getDevice(),
+                                                      m_context->getQueue(),
+                                                      request.imagePayloadTable);
+                }
                 m_state->buffers.ensureMetricsBuffers(m_context->getDevice());
                 if (m_collectGpuTiming && m_context->supportsTimestampQueries())
                 {
                     m_state->buffers.ensureTimestampBuffers(m_context->getDevice());
                 }
 
+                std::uint64_t shaderHash = options.shaderHash;
                 if (request.shaderSource.empty())
                 {
                     request.shaderSource = loadDefaultShader();
+                    shaderHash = 0u;
                 }
-                request.shaderSource =
-                  WebGPUFrameShaderComposer::applyWorkgroupShape(request.shaderSource,
-                                                                 request.workgroupShape);
+                if (request.workgroupShape.width != SLICE_WORKGROUP_WIDTH ||
+                    request.workgroupShape.height != SLICE_WORKGROUP_HEIGHT)
+                {
+                    request.shaderSource =
+                      WebGPUFrameShaderComposer::applyWorkgroupShape(request.shaderSource,
+                                                                     request.workgroupShape);
+                    shaderHash = 0u;
+                }
 
-                bool const hasMeshPayloads = m_state->buffers.hasMeshPayloads();
-                bool const hasBeamPayloads = m_state->buffers.hasBeamPayloads();
-                bool const hasImagePayloads = m_state->buffers.hasImagePayloads();
+                bool const hasMeshPayloads = m_scenePayloads ? m_scenePayloads->hasMeshPayloads()
+                                                             : m_state->buffers.hasMeshPayloads();
+                bool const hasBeamPayloads = m_scenePayloads ? m_scenePayloads->hasBeamPayloads()
+                                                             : m_state->buffers.hasBeamPayloads();
+                bool const hasImagePayloads = m_scenePayloads ? m_scenePayloads->hasImagePayloads()
+                                                              : m_state->buffers.hasImagePayloads();
+                bool const useHardwareFilteredSdf = m_context->supportsFloat32Filterable();
                 auto const pipelineResult = m_pipelineCache->getOrCreate(m_context->getDevice(),
                                                                          request.shaderSource,
+                                                                         shaderHash,
                                                                          hasMeshPayloads,
                                                                          hasBeamPayloads,
-                                                                         hasImagePayloads);
+                                                                         hasImagePayloads,
+                                                                         useHardwareFilteredSdf);
                 m_pipeline = pipelineResult.pipeline;
                 m_rowCount = rowCount;
                 m_workgroupShape = request.workgroupShape;
 
                 m_precomputedSdf->ensureInitialized(m_context->getDevice(),
                                                     m_context->getQueue(),
-                                                    1u);
+                                                    1u,
+                                                    useHardwareFilteredSdf);
                 wgpu::Buffer precomputedUniformBuffer;
                 wgpu::TextureView precomputedTextureView;
+                wgpu::Sampler precomputedSampler;
                 {
                     std::scoped_lock lock{m_precomputedSdf->mutex};
                     precomputedUniformBuffer = m_precomputedSdf->uniformBuffer;
                     precomputedTextureView = m_precomputedSdf->textureView;
+                    if (useHardwareFilteredSdf)
+                    {
+                        precomputedSampler = m_precomputedSdf->linearSampler;
+                    }
                 }
 
-                wgpu::BindGroupEntry bindGroupEntries[12]{};
-                bindGroupEntries[0].binding = 0u;
-                bindGroupEntries[0].buffer = m_state->buffers.getUniformBuffer();
-                bindGroupEntries[0].size = sizeof(FrameUniforms);
-                bindGroupEntries[1].binding = 1u;
-                bindGroupEntries[1].buffer = m_state->buffers.getOutputBuffer();
-                bindGroupEntries[1].size = m_state->buffers.getOutputSizeBytes();
-                bindGroupEntries[2].binding = 2u;
-                bindGroupEntries[2].buffer = m_state->buffers.getParameterBuffer();
-                bindGroupEntries[2].size = m_state->buffers.getParameterSizeBytes();
-                std::size_t bindGroupEntryCount = 3u;
-                if (hasMeshPayloads)
-                {
-                    bindGroupEntries[bindGroupEntryCount].binding = 4u;
-                                        bindGroupEntries[bindGroupEntryCount].buffer =
-                                            m_state->buffers.getMeshPayloadBuffer();
-                    bindGroupEntries[bindGroupEntryCount].size =
-                                            m_state->buffers.getMeshPayloadBuffer().GetSize();
-                    ++bindGroupEntryCount;
-                    bindGroupEntries[bindGroupEntryCount].binding = 5u;
-                                        bindGroupEntries[bindGroupEntryCount].buffer =
-                                            m_state->buffers.getMeshOffsetTableBuffer();
-                    bindGroupEntries[bindGroupEntryCount].size =
-                                            m_state->buffers.getMeshOffsetTableBuffer().GetSize();
-                    ++bindGroupEntryCount;
-                }
-                if (hasBeamPayloads)
-                {
-                    bindGroupEntries[bindGroupEntryCount].binding = 6u;
-                                        bindGroupEntries[bindGroupEntryCount].buffer =
-                                            m_state->buffers.getBeamPayloadBuffer();
-                    bindGroupEntries[bindGroupEntryCount].size =
-                                            m_state->buffers.getBeamPayloadBuffer().GetSize();
-                    ++bindGroupEntryCount;
-                    bindGroupEntries[bindGroupEntryCount].binding = 7u;
-                                        bindGroupEntries[bindGroupEntryCount].buffer =
-                                            m_state->buffers.getBeamOffsetTableBuffer();
-                    bindGroupEntries[bindGroupEntryCount].size =
-                                            m_state->buffers.getBeamOffsetTableBuffer().GetSize();
-                    ++bindGroupEntryCount;
-                }
-                                if (hasImagePayloads)
-                                {
-                                        bindGroupEntries[bindGroupEntryCount].binding = 8u;
-                                        bindGroupEntries[bindGroupEntryCount].buffer =
-                                            m_state->buffers.getImagePayloadBuffer();
-                                        bindGroupEntries[bindGroupEntryCount].size =
-                                            m_state->buffers.getImagePayloadBuffer().GetSize();
-                                        ++bindGroupEntryCount;
-                                        bindGroupEntries[bindGroupEntryCount].binding = 9u;
-                                        bindGroupEntries[bindGroupEntryCount].buffer =
-                                            m_state->buffers.getImageOffsetTableBuffer();
-                                        bindGroupEntries[bindGroupEntryCount].size =
-                                            m_state->buffers.getImageOffsetTableBuffer().GetSize();
-                                        ++bindGroupEntryCount;
-                                }
-                bindGroupEntries[bindGroupEntryCount].binding = 10u;
-                bindGroupEntries[bindGroupEntryCount].buffer = m_state->buffers.getMetricsBuffer();
-                bindGroupEntries[bindGroupEntryCount].size = FRAME_METRICS_SIZE_BYTES;
-                ++bindGroupEntryCount;
-
-                bindGroupEntries[bindGroupEntryCount].binding = 11u;
-                bindGroupEntries[bindGroupEntryCount].buffer = precomputedUniformBuffer;
-                bindGroupEntries[bindGroupEntryCount].size = sizeof(PrecomputedSdfUniforms);
-                ++bindGroupEntryCount;
-
-                bindGroupEntries[bindGroupEntryCount].binding = 12u;
-                bindGroupEntries[bindGroupEntryCount].textureView = precomputedTextureView;
-                ++bindGroupEntryCount;
-
-                wgpu::BindGroupDescriptor bindGroupDescriptor;
-                bindGroupDescriptor.layout = m_pipeline->getBindGroupLayout();
-                bindGroupDescriptor.entryCount = bindGroupEntryCount;
-                bindGroupDescriptor.entries = bindGroupEntries;
-                m_bindGroup = m_context->getDevice().CreateBindGroup(&bindGroupDescriptor);
+                m_bindGroup = m_state->buffers.getOrCreateFrameBindGroup(
+                  m_context->getDevice(),
+                  m_pipeline->getBindGroupLayout(),
+                  m_scenePayloads.get(),
+                  precomputedUniformBuffer,
+                  precomputedTextureView,
+                  precomputedSampler);
                 submitFrameWithPipeline();
             }
 
@@ -1389,14 +1646,17 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             std::uint32_t m_width{};
             std::uint32_t m_height{};
             std::uint32_t m_rowCount{};
+            std::uint32_t m_rowStridePixels{};
             compute::WorkgroupShape m_workgroupShape{};
             std::shared_ptr<WebGPUFramePipelineCache> m_pipelineCache;
             std::shared_ptr<WebGPUFramePipelineCache::Pipeline> m_pipeline;
             std::shared_ptr<PrecomputedSdfState> m_precomputedSdf;
+            std::shared_ptr<WebGPUScenePayloadBuffers const> m_scenePayloads;
             wgpu::BindGroup m_bindGroup;
             bool m_frameSubmitted{false};
             bool m_collectGpuTiming{false};
             bool m_collectMetrics{false};
+            bool m_skipCpuReadback{false};
             std::shared_ptr<WebGPUFrameSubmissionState> m_state;
         };
 
@@ -1407,10 +1667,13 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
               std::shared_ptr<WebGPUComputeContext> context,
               SdfPrebakeRequest request,
               std::shared_ptr<WebGPUFrameBufferSet> bufferLease,
+              std::shared_ptr<WebGPUPrebakePipelineCache> prebakePipelineCache,
               std::shared_ptr<PrecomputedSdfState> precomputedSdf)
                 : m_context(std::move(context))
                 , m_precomputedSdf(std::move(precomputedSdf))
                 , m_bufferLease(std::move(bufferLease))
+                , m_prebakePipelineCache(std::move(prebakePipelineCache))
+                , m_scenePayloads(std::move(request.scenePayloads))
                 , m_gridSize(std::clamp(request.gridSize, 8u, 256u))
                 , m_state(std::make_shared<PrebakeStatusState>())
             {
@@ -1577,75 +1840,22 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
                 m_bufferLease->resize(device, 1u, 1u, request.parameters.size());
                 m_bufferLease->writeParameters(queue, request.parameters);
-                m_bufferLease->setMeshPayloads(device, queue, request.meshPayloads);
-                m_bufferLease->setBeamPayloads(device, queue, request.beamPayloads);
-                m_bufferLease->setImagePayloads(device, queue, request.imagePayloads);
-
-                wgpu::ShaderSourceWGSL wgsl;
-                wgsl.code = {request.shaderSource.data(), request.shaderSource.size()};
-                wgpu::ShaderModuleDescriptor shaderDescriptor;
-                shaderDescriptor.nextInChain = &wgsl;
-                auto const shader = device.CreateShaderModule(&shaderDescriptor);
-
-                wgpu::BindGroupLayoutEntry bindings[9]{};
-                bindings[0].binding = 0u;
-                bindings[0].visibility = wgpu::ShaderStage::Compute;
-                bindings[0].buffer.type = wgpu::BufferBindingType::Uniform;
-                bindings[0].buffer.minBindingSize = sizeof(PrecomputedSdfUniforms);
-                bindings[1].binding = 1u;
-                bindings[1].visibility = wgpu::ShaderStage::Compute;
-                bindings[1].storageTexture.access = wgpu::StorageTextureAccess::WriteOnly;
-                bindings[1].storageTexture.format = wgpu::TextureFormat::R32Float;
-                bindings[1].storageTexture.viewDimension = wgpu::TextureViewDimension::e3D;
-                bindings[2].binding = 2u;
-                bindings[2].visibility = wgpu::ShaderStage::Compute;
-                bindings[2].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                bindings[2].buffer.minBindingSize = sizeof(float);
-                std::size_t bindingCount = 3u;
-                if (m_bufferLease->hasMeshPayloads())
+                if (!m_scenePayloads)
                 {
-                    bindings[bindingCount].binding = 4u;
-                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
-                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                    bindings[bindingCount].buffer.minBindingSize = sizeof(float);
-                    ++bindingCount;
-                    bindings[bindingCount].binding = 5u;
-                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
-                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                    bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
-                    ++bindingCount;
-                }
-                if (m_bufferLease->hasBeamPayloads())
-                {
-                    bindings[bindingCount].binding = 6u;
-                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
-                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                    bindings[bindingCount].buffer.minBindingSize = sizeof(float);
-                    ++bindingCount;
-                    bindings[bindingCount].binding = 7u;
-                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
-                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                    bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
-                    ++bindingCount;
-                }
-                if (m_bufferLease->hasImagePayloads())
-                {
-                    bindings[bindingCount].binding = 8u;
-                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
-                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                    bindings[bindingCount].buffer.minBindingSize = sizeof(float);
-                    ++bindingCount;
-                    bindings[bindingCount].binding = 9u;
-                    bindings[bindingCount].visibility = wgpu::ShaderStage::Compute;
-                    bindings[bindingCount].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-                    bindings[bindingCount].buffer.minBindingSize = 2u * sizeof(std::uint32_t);
-                    ++bindingCount;
+                    m_bufferLease->setMeshPayloads(device, queue, request.meshPayloads);
+                    m_bufferLease->setBeamPayloads(device, queue, request.beamPayloads);
+                    m_bufferLease->setImagePayloads(device, queue, request.imagePayloads);
                 }
 
-                wgpu::BindGroupLayoutDescriptor layoutDescriptor;
-                layoutDescriptor.entryCount = bindingCount;
-                layoutDescriptor.entries = bindings;
-                auto const bindGroupLayout = device.CreateBindGroupLayout(&layoutDescriptor);
+                bool const hasMeshes =
+                  m_scenePayloads ? m_scenePayloads->hasMeshPayloads() : m_bufferLease->hasMeshPayloads();
+                bool const hasBeams =
+                  m_scenePayloads ? m_scenePayloads->hasBeamPayloads() : m_bufferLease->hasBeamPayloads();
+                bool const hasImages =
+                  m_scenePayloads ? m_scenePayloads->hasImagePayloads() : m_bufferLease->hasImagePayloads();
+
+                m_pipeline = m_prebakePipelineCache->getOrCreate(
+                  device, request.shaderSource, request.shaderHash, hasMeshes, hasBeams, hasImages);
 
                 wgpu::BindGroupEntry entries[9]{};
                 entries[0].binding = 0u;
@@ -1657,70 +1867,57 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 entries[2].buffer = m_bufferLease->getParameterBuffer();
                 entries[2].size = m_bufferLease->getParameterSizeBytes();
                 std::size_t entryCount = 3u;
-                if (m_bufferLease->hasMeshPayloads())
+                if (hasMeshes)
                 {
+                    auto const & meshBuf = m_scenePayloads ? m_scenePayloads->meshPayloadBuffer
+                                                           : m_bufferLease->getMeshPayloadBuffer();
+                    auto const & meshOff = m_scenePayloads ? m_scenePayloads->meshOffsetTableBuffer
+                                                           : m_bufferLease->getMeshOffsetTableBuffer();
                     entries[entryCount].binding = 4u;
-                    entries[entryCount].buffer = m_bufferLease->getMeshPayloadBuffer();
-                    entries[entryCount].size = m_bufferLease->getMeshPayloadBuffer().GetSize();
+                    entries[entryCount].buffer = meshBuf;
+                    entries[entryCount].size = meshBuf.GetSize();
                     ++entryCount;
                     entries[entryCount].binding = 5u;
-                    entries[entryCount].buffer = m_bufferLease->getMeshOffsetTableBuffer();
-                    entries[entryCount].size = m_bufferLease->getMeshOffsetTableBuffer().GetSize();
+                    entries[entryCount].buffer = meshOff;
+                    entries[entryCount].size = meshOff.GetSize();
                     ++entryCount;
                 }
-                if (m_bufferLease->hasBeamPayloads())
+                if (hasBeams)
                 {
+                    auto const & beamBuf = m_scenePayloads ? m_scenePayloads->beamPayloadBuffer
+                                                           : m_bufferLease->getBeamPayloadBuffer();
+                    auto const & beamOff = m_scenePayloads ? m_scenePayloads->beamOffsetTableBuffer
+                                                           : m_bufferLease->getBeamOffsetTableBuffer();
                     entries[entryCount].binding = 6u;
-                    entries[entryCount].buffer = m_bufferLease->getBeamPayloadBuffer();
-                    entries[entryCount].size = m_bufferLease->getBeamPayloadBuffer().GetSize();
+                    entries[entryCount].buffer = beamBuf;
+                    entries[entryCount].size = beamBuf.GetSize();
                     ++entryCount;
                     entries[entryCount].binding = 7u;
-                    entries[entryCount].buffer = m_bufferLease->getBeamOffsetTableBuffer();
-                    entries[entryCount].size = m_bufferLease->getBeamOffsetTableBuffer().GetSize();
+                    entries[entryCount].buffer = beamOff;
+                    entries[entryCount].size = beamOff.GetSize();
                     ++entryCount;
                 }
-                if (m_bufferLease->hasImagePayloads())
+                if (hasImages)
                 {
+                    auto const & imgBuf = m_scenePayloads ? m_scenePayloads->imagePayloadBuffer
+                                                          : m_bufferLease->getImagePayloadBuffer();
+                    auto const & imgOff = m_scenePayloads ? m_scenePayloads->imageOffsetTableBuffer
+                                                          : m_bufferLease->getImageOffsetTableBuffer();
                     entries[entryCount].binding = 8u;
-                    entries[entryCount].buffer = m_bufferLease->getImagePayloadBuffer();
-                    entries[entryCount].size = m_bufferLease->getImagePayloadBuffer().GetSize();
+                    entries[entryCount].buffer = imgBuf;
+                    entries[entryCount].size = imgBuf.GetSize();
                     ++entryCount;
                     entries[entryCount].binding = 9u;
-                    entries[entryCount].buffer = m_bufferLease->getImageOffsetTableBuffer();
-                    entries[entryCount].size = m_bufferLease->getImageOffsetTableBuffer().GetSize();
+                    entries[entryCount].buffer = imgOff;
+                    entries[entryCount].size = imgOff.GetSize();
                     ++entryCount;
                 }
 
                 wgpu::BindGroupDescriptor bindGroupDescriptor;
-                bindGroupDescriptor.layout = bindGroupLayout;
+                bindGroupDescriptor.layout = m_pipeline->getBindGroupLayout();
                 bindGroupDescriptor.entryCount = entryCount;
                 bindGroupDescriptor.entries = entries;
                 m_bindGroup = device.CreateBindGroup(&bindGroupDescriptor);
-
-                wgpu::PipelineLayoutDescriptor pipelineLayoutDescriptor;
-                pipelineLayoutDescriptor.bindGroupLayoutCount = 1u;
-                pipelineLayoutDescriptor.bindGroupLayouts = &bindGroupLayout;
-                auto const pipelineLayout = device.CreatePipelineLayout(&pipelineLayoutDescriptor);
-
-                wgpu::ComputePipelineDescriptor pipelineDescriptor;
-                pipelineDescriptor.layout = pipelineLayout;
-                pipelineDescriptor.compute.module = shader;
-                pipelineDescriptor.compute.entryPoint = "main";
-
-                auto pipelineState = std::make_shared<WebGPUFramePipelineCache::Pipeline>();
-                m_pipeline = pipelineState;
-#ifdef __EMSCRIPTEN__
-                auto const callbackMode = wgpu::CallbackMode::AllowSpontaneous;
-#else
-                auto const callbackMode = wgpu::CallbackMode::AllowProcessEvents;
-#endif
-                (void) device.CreateComputePipelineAsync(
-                  &pipelineDescriptor,
-                  callbackMode,
-                  [pipelineState](wgpu::CreatePipelineAsyncStatus const status,
-                                  wgpu::ComputePipeline computePipeline,
-                                  wgpu::StringView const message)
-                  { pipelineState->complete(status, std::move(computePipeline), message); });
 
                 submitIfPipelineReady();
             }
@@ -1813,6 +2010,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             std::shared_ptr<WebGPUComputeContext> m_context;
             std::shared_ptr<PrecomputedSdfState> m_precomputedSdf;
             std::shared_ptr<WebGPUFrameBufferSet> m_bufferLease;
+            std::shared_ptr<WebGPUPrebakePipelineCache> m_prebakePipelineCache;
+            std::shared_ptr<WebGPUScenePayloadBuffers const> m_scenePayloads;
             std::shared_ptr<WebGPUFramePipelineCache::Pipeline> m_pipeline;
             wgpu::BindGroup m_bindGroup;
             PrecomputedSdfUniforms m_uniforms{};
@@ -1827,6 +2026,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
         : m_context(context ? std::move(context) : std::make_shared<WebGPUComputeContext>())
         , m_frameBufferPool(std::make_shared<FrameBufferPool>())
         , m_framePipelineCache(std::make_shared<WebGPUFramePipelineCache>())
+        , m_prebakePipelineCache(std::make_shared<WebGPUPrebakePipelineCache>())
         , m_precomputedSdf(std::make_shared<PrecomputedSdfState>())
     {
     }
@@ -1837,6 +2037,25 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
     bool WebGPUComputeBackend::isAvailable() const noexcept
     { return m_context && m_context->isValid(); }
 
+    std::shared_ptr<WebGPUScenePayloadBuffers> WebGPUComputeBackend::createScenePayloadBuffers(
+      std::vector<std::vector<float>> const & meshPayloadTable,
+      std::vector<std::vector<float>> const & beamPayloadTable,
+      std::vector<std::vector<std::uint32_t>> const & imagePayloadTable)
+    {
+        if (!isAvailable())
+        {
+            return nullptr;
+        }
+        WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
+        auto const resourceId = m_nextScenePayloadId.fetch_add(1u, std::memory_order_relaxed);
+        return uploadScenePayloadBuffers(m_context->getDevice(),
+                                         m_context->getQueue(),
+                                         resourceId,
+                                         meshPayloadTable,
+                                         beamPayloadTable,
+                                         imagePayloadTable);
+    }
+
     std::unique_ptr<compute::ISliceSubmission>
     WebGPUComputeBackend::submitSlice(compute::SliceRequest request)
     { return std::make_unique<WebGPUSliceSubmission>(m_context, std::move(request)); }
@@ -1844,9 +2063,17 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
     std::unique_ptr<compute::IFrameSubmission>
     WebGPUComputeBackend::submitFrame(compute::FrameRequest request)
     {
+        return submitFrame(std::move(request), WebGPUFrameSubmissionOptions{});
+    }
+
+    std::unique_ptr<compute::IFrameSubmission>
+    WebGPUComputeBackend::submitFrame(compute::FrameRequest request,
+                                      WebGPUFrameSubmissionOptions options)
+    {
         return std::make_unique<WebGPUFrameSubmission>(
                     m_context,
                     std::move(request),
+                    std::move(options),
                     m_frameBufferPool->acquire(),
                     m_framePipelineCache,
                     m_precomputedSdf);
@@ -1859,6 +2086,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
           m_context,
           std::move(request),
           m_frameBufferPool->acquire(),
+          m_prebakePipelineCache,
           m_precomputedSdf);
     }
 

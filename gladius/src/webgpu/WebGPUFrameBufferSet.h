@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <vector>
 
 #include <webgpu/webgpu_cpp.h>
@@ -12,17 +14,88 @@
 namespace gladius::webgpu
 {
     /**
+     * @brief Immutable GPU storage buffers for scene-scoped mesh, beam, and image payloads.
+     *
+     * Uploaded once when a scene is materialized and shared across all frame submissions
+     * and SDF prebakes for that scene generation without per-frame CPU copies or GPU uploads.
+     */
+    struct WebGPUScenePayloadBuffers
+    {
+        std::uint64_t resourceId{0u};
+        wgpu::Buffer meshPayloadBuffer;
+        wgpu::Buffer meshOffsetTableBuffer;
+        wgpu::Buffer beamPayloadBuffer;
+        wgpu::Buffer beamOffsetTableBuffer;
+        wgpu::Buffer imagePayloadBuffer;
+        wgpu::Buffer imageOffsetTableBuffer;
+
+        [[nodiscard]] bool hasMeshPayloads() const noexcept { return meshPayloadBuffer != nullptr; }
+        [[nodiscard]] bool hasBeamPayloads() const noexcept { return beamPayloadBuffer != nullptr; }
+        [[nodiscard]] bool hasImagePayloads() const noexcept { return imagePayloadBuffer != nullptr; }
+    };
+
+    /// Retains a completed WebGPU compute output buffer for zero-copy GPU texture presentation.
+    struct WebGPUGpuOutputFrame
+    {
+        wgpu::Buffer outputBuffer;
+        std::uint32_t bytesPerRow{0u};
+        std::uint32_t rowCount{0u};
+        std::shared_ptr<void> bufferLease;
+    };
+
+    /// Uploads mesh, beam-lattice, and image-stack payloads once into an immutable GPU bundle.
+    [[nodiscard]] std::shared_ptr<WebGPUScenePayloadBuffers> uploadScenePayloadBuffers(
+      wgpu::Device const & device,
+      wgpu::Queue const & queue,
+      std::uint64_t resourceId,
+      std::vector<std::vector<float>> const & meshPayloadTable,
+      std::vector<std::vector<float>> const & beamPayloadTable,
+      std::vector<std::vector<std::uint32_t>> const & imagePayloadTable);
+
+    /**
      * @brief Owns buffers required by one headless WebGPU frame render.
      */
     class WebGPUFrameBufferSet
     {
       public:
+        struct FrameBindGroupKey
+        {
+            WGPUBindGroupLayout layout{};
+            WGPUBuffer outputBuffer{};
+            std::size_t outputSizeBytes{};
+            WGPUBuffer parameterBuffer{};
+            std::size_t parameterSizeBytes{};
+            WGPUBuffer meshPayloadBuffer{};
+            WGPUBuffer meshOffsetTableBuffer{};
+            WGPUBuffer beamPayloadBuffer{};
+            WGPUBuffer beamOffsetTableBuffer{};
+            WGPUBuffer imagePayloadBuffer{};
+            WGPUBuffer imageOffsetTableBuffer{};
+            WGPUBuffer precomputedUniformBuffer{};
+            WGPUTextureView precomputedTextureView{};
+            WGPUSampler precomputedSampler{};
+
+            [[nodiscard]] bool operator==(FrameBindGroupKey const &) const noexcept = default;
+        };
+
         void resize(wgpu::Device const & device,
                     std::uint32_t width,
                     std::uint32_t height,
-                    std::size_t parameterCount);
+                    std::size_t parameterCount,
+                    std::uint32_t rowStridePixels = 0u);
         void writeUniforms(wgpu::Queue const & queue, FrameUniforms const & uniforms) const;
-        void writeParameters(wgpu::Queue const & queue, std::vector<float> const & parameters) const;
+        void writeParameters(wgpu::Queue const & queue, std::vector<float> const & parameters);
+        void writeParametersIfChanged(wgpu::Queue const & queue,
+                                      std::vector<float> const & parameters,
+                                      std::optional<std::uint64_t> sceneResourceId,
+                                      std::optional<std::uint64_t> parameterGeneration);
+        [[nodiscard]] wgpu::BindGroup getOrCreateFrameBindGroup(
+          wgpu::Device const & device,
+          wgpu::BindGroupLayout const & layout,
+          WebGPUScenePayloadBuffers const * scenePayloads,
+          wgpu::Buffer const & precomputedUniformBuffer,
+          wgpu::TextureView const & precomputedTextureView,
+          wgpu::Sampler const & precomputedSampler = {});
         void reset();
 
         /// Upload mesh payloads (concatenated, one entry per resource slot).
@@ -157,5 +230,10 @@ namespace gladius::webgpu
         wgpu::Texture m_precomputedSdfTexture;
         wgpu::TextureView m_precomputedSdfTextureView;
         std::uint32_t m_precomputedSdfGridSize{0u};
+        std::optional<std::uint64_t> m_uploadedParameterSceneId;
+        std::optional<std::uint64_t> m_uploadedParameterGeneration;
+        std::size_t m_uploadedParameterCount{0u};
+        std::optional<FrameBindGroupKey> m_cachedBindGroupKey;
+        wgpu::BindGroup m_cachedBindGroup;
     };
 }

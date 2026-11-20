@@ -208,16 +208,16 @@ fn background_skip_bounds() -> SkipBounds {
     return SkipBounds(minimum - margin, maximum + margin);
 }
 
-/// True when the segment origin..origin + direction * max_distance provably stays
-/// outside the skip bounds, so no surface can be reached along this ray.
-fn ray_misses_bounds(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> bool {
+/// Returns the (t_min, t_max) overlap interval of the segment origin..origin + direction * max_distance
+/// with background_skip_bounds(). When t_min > t_max, the ray provably misses all scene surfaces.
+fn ray_bounds_interval(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32) -> vec2<f32> {
     let bounds = background_skip_bounds();
     var t_min = 0.0;
     var t_max = max_distance;
 
     if (direction.x == 0.0) {
         if (origin.x < bounds.min.x || origin.x > bounds.max.x) {
-            return true;
+            return vec2<f32>(1.0, 0.0);
         }
     } else {
         let inv = 1.0 / direction.x;
@@ -229,7 +229,7 @@ fn ray_misses_bounds(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32)
 
     if (direction.y == 0.0) {
         if (origin.y < bounds.min.y || origin.y > bounds.max.y) {
-            return true;
+            return vec2<f32>(1.0, 0.0);
         }
     } else {
         let inv = 1.0 / direction.y;
@@ -241,7 +241,7 @@ fn ray_misses_bounds(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32)
 
     if (direction.z == 0.0) {
         if (origin.z < bounds.min.z || origin.z > bounds.max.z) {
-            return true;
+            return vec2<f32>(1.0, 0.0);
         }
     } else {
         let inv = 1.0 / direction.z;
@@ -251,7 +251,7 @@ fn ray_misses_bounds(origin: vec3<f32>, direction: vec3<f32>, max_distance: f32)
         t_max = min(t_max, max(t0, t1));
     }
 
-    return t_min > t_max;
+    return vec2<f32>(t_min, t_max);
 }
 
 /// True when two boxes do not overlap.
@@ -332,6 +332,7 @@ fn tile_misses_bounds(global_id: vec3<u32>, width: u32, row_count: u32) -> bool 
     return boxes_disjoint(tile_reach_bounds(global_id, width, row_count), background_skip_bounds());
 }
 
+// GLADIUS_PRECOMPUTED_SDF_SAMPLE_BEGIN
 fn sample_precomputed_sdf(position: vec3<f32>) -> f32 {
     let bbox_min = precomputed_sdf_info.bbox_min_and_tolerance.xyz;
     let bbox_max = precomputed_sdf_info.bbox_max_and_valid.xyz;
@@ -361,6 +362,7 @@ fn sample_precomputed_sdf(position: vec3<f32>) -> f32 {
     let c1 = mix(c01, c11, f.y);
     return mix(c0, c1, f.z);
 }
+// GLADIUS_PRECOMPUTED_SDF_SAMPLE_END
 
 fn evaluate_model_cached(position: vec3<f32>) -> vec4<f32> {
     let flags = frame.flags_mode_reserved.x;
@@ -382,8 +384,7 @@ fn evaluate_model_cached(position: vec3<f32>) -> vec4<f32> {
     return evaluateModel(position);
 }
 
-fn evaluate_surface(position: vec3<f32>) -> SceneSample {
-    let model = evaluate_model_cached(position);
+fn evaluate_surface_from_model(position: vec3<f32>, model: vec4<f32>) -> SceneSample {
     var sample = SceneSample(model.w, model.xyz, 1.0f);
     let flags = frame.flags_mode_reserved.x;
     let slice_height = frame.time_slice_quality_normal.y;
@@ -450,6 +451,17 @@ fn evaluate_surface(position: vec3<f32>) -> SceneSample {
     return sample;
 }
 
+fn evaluate_surface(position: vec3<f32>) -> SceneSample {
+    return evaluate_surface_from_model(position, evaluate_model_cached(position));
+}
+
+/// Evaluates the exact scene surface without querying the precomputed 3D SDF cache.
+/// Used on surface hits and normal estimation where the sample is known to lie inside
+/// the precomputed SDF tolerance band and would always fall back to evaluateModel().
+fn evaluate_surface_exact(position: vec3<f32>) -> SceneSample {
+    return evaluate_surface_from_model(position, evaluateModel(position));
+}
+
 /// True when the frame requests the low-quality surface-hit refinement path.
 fn is_coarse_path() -> bool {
     return (frame.flags_mode_reserved.x & RF_COARSE_REFINEMENT) != 0u;
@@ -466,7 +478,7 @@ fn estimate_normal(position: vec3<f32>) -> vec3<f32> {
     for (var sample = 0u; sample < 4u; sample++) {
         let bits = vec3<u32>((sample + 3u) >> 1u, sample >> 1u, sample);
         let offset = 0.5773f * (2.0f * vec3<f32>(vec3<u32>(bits & vec3<u32>(1u))) - vec3<f32>(1.0));
-        normal = normal + offset * evaluate_surface(position + offset * epsilon).distance;
+        normal = normal + offset * evaluate_surface_exact(position + offset * epsilon).distance;
     }
     return normalize(normal);
 }
@@ -551,8 +563,12 @@ fn shade_surface(position: vec3<f32>, ray_direction: vec3<f32>, base_color: vec3
     let shadows_enabled = (flags & RF_DISABLE_SHADOWS) == 0u &&
                           frame.flags_mode_reserved.y != 2u;
     if (shadows_enabled) {
-        diffuse = diffuse * calc_soft_shadow(position, light_direction);
-        dominant = dominant * calc_soft_shadow(position, reflected);
+        if (diffuse > 0.0f) {
+            diffuse = diffuse * calc_soft_shadow(position, light_direction);
+        }
+        if (dominant > 0.0f) {
+            dominant = dominant * calc_soft_shadow(position, reflected);
+        }
     }
 
     let specular = pow(clamp(dot(normal, half_direction), 0.0f, 1.0f), 16.0f) * diffuse *
@@ -793,9 +809,7 @@ fn shade_for_hit(eye: vec3<f32>,
                  hit_sample: SceneSample) -> vec3<f32>
 {
     let hit_position = eye + ray_direction * distance;
-    let use_model_color = hit_sample.object_type == 1.0f && frame.flags_mode_reserved.y != 2u;
-    let hit_color = select(hit_sample.color, evaluateModel(hit_position).xyz, use_model_color);
-    return shade_surface(hit_position, ray_direction, hit_color);
+    return shade_surface(hit_position, ray_direction, hit_sample.color);
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -820,16 +834,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let eye = frame.eye_and_max_distance.xyz;
     let max_distance = frame.eye_and_max_distance.w;
 
-    let pixel_index = global_id.y * width + global_id.x;
+    let row_stride = select(width, u32(frame.first_row_and_count.z), frame.first_row_and_count.z > 0.0f);
+    let pixel_index = global_id.y * row_stride + global_id.x;
     let background = vec3<f32>(0.1f);
     recordMetric(0u, 1u);
 
     // Rays that provably stay outside the scene AABB cannot hit anything: both the
     // plain and the translucent miss path end on the plain background colour.
-    if ((frame.flags_mode_reserved.x & RF_SKIP_BACKGROUND_RAYS) != 0u && has_model_bounds() &&
-        ray_misses_bounds(eye, ray_direction, max_distance)) {
-        output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
-        return;
+    // For rays that intersect the AABB, clamp the march start/end to the conservative
+    // entry/exit interval so empty space before the scene is skipped in zero steps.
+    var march_start = 0.0f;
+    var march_end = max_distance;
+    if ((frame.flags_mode_reserved.x & RF_SKIP_BACKGROUND_RAYS) != 0u && has_model_bounds()) {
+        let bounds_interval = ray_bounds_interval(eye, ray_direction, max_distance);
+        if (bounds_interval.x > bounds_interval.y) {
+            output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
+            return;
+        }
+        march_start = max(bounds_interval.x - 0.5f, 0.0f);
+        march_end = min(max_distance, bounds_interval.y + 0.5f);
     }
 
     // Whole-tile variant: one conservative box test rejects every ray of the workgroup tile.
@@ -840,13 +863,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     if (!translucency_enabled()) {
-        let march = march_surface(eye, ray_direction, 0.0f, max_distance);
+        let march = march_surface(eye, ray_direction, march_start, march_end);
         if (!march.hit) {
             output_pixels[pixel_index] = pack_rgba8(vec4<f32>(background, 1.0));
             return;
         }
         recordMetric(2u, 1u);
-        let hit_sample = evaluate_surface(eye + ray_direction * march.distance);
+        let hit_sample = evaluate_surface_exact(eye + ray_direction * march.distance);
         let shaded = shade_for_hit(eye, ray_direction, march.distance, hit_sample);
         let fog = 1.0f - exp(-1.0e-10f * march.distance * march.distance * march.distance);
         output_pixels[pixel_index] = pack_rgba8(vec4<f32>(mix(shaded, background, fog), 1.0));
@@ -859,15 +882,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let transmittance_floor = clamp(frame.translucency_params.w, 0.0f, 1.0f);
     var transmittance = 1.0f;
     var accumulated = vec3<f32>(0.0f);
-    var distance = 0.0f;
+    var distance = march_start;
     for (var surface = 0u; surface < max_surfaces; surface++) {
-        let march = march_surface(eye, ray_direction, distance, max_distance);
+        let march = march_surface(eye, ray_direction, distance, march_end);
         if (!march.hit) {
             accumulated = accumulated + transmittance * background;
             break;
         }
         recordMetric(2u, 1u);
-        let hit_sample = evaluate_surface(eye + ray_direction * march.distance);
+        let hit_sample = evaluate_surface_exact(eye + ray_direction * march.distance);
         let shaded = shade_for_hit(eye, ray_direction, march.distance, hit_sample);
         let fog = 1.0f - exp(-1.0e-10f * march.distance * march.distance * march.distance);
         accumulated = accumulated + transmittance * mix(shaded, background, fog);

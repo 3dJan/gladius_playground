@@ -590,62 +590,67 @@ namespace gladius
             return;
         }
 
+        {
 #ifndef __EMSCRIPTEN__
-        webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
+            webgpu::WebGPUComputeContext::DeviceLock const lock(*m_webgpuContext);
 #endif
-        auto const width = static_cast<std::uint32_t>(framebufferWidth);
-        auto const height = static_cast<std::uint32_t>(framebufferHeight);
-        if (width != m_webgpuSurfaceWidth || height != m_webgpuSurfaceHeight)
-        {
-            wgpu::SurfaceConfiguration configuration;
-            configuration.device = m_webgpuContext->getDevice();
-            configuration.format = m_webgpuSurfaceFormat;
-            configuration.usage = wgpu::TextureUsage::RenderAttachment;
-            configuration.width = width;
-            configuration.height = height;
-            configuration.alphaMode = wgpu::CompositeAlphaMode::Auto;
-            configuration.presentMode = wgpu::PresentMode::Fifo;
-            m_webgpuSurface.Configure(&configuration);
-            m_webgpuSurfaceWidth = width;
-            m_webgpuSurfaceHeight = height;
-        }
-        wgpu::SurfaceTexture surfaceTexture;
-        m_webgpuSurface.GetCurrentTexture(&surfaceTexture);
-        if (surfaceTexture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal &&
-            surfaceTexture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal)
-        {
-            return;
-        }
+            auto const width = static_cast<std::uint32_t>(framebufferWidth);
+            auto const height = static_cast<std::uint32_t>(framebufferHeight);
+            if (width != m_webgpuSurfaceWidth || height != m_webgpuSurfaceHeight)
+            {
+                wgpu::SurfaceConfiguration configuration;
+                configuration.device = m_webgpuContext->getDevice();
+                configuration.format = m_webgpuSurfaceFormat;
+                configuration.usage = wgpu::TextureUsage::RenderAttachment;
+                configuration.width = width;
+                configuration.height = height;
+                configuration.alphaMode = wgpu::CompositeAlphaMode::Auto;
+                configuration.presentMode = wgpu::PresentMode::Fifo;
+                m_webgpuSurface.Configure(&configuration);
+                m_webgpuSurfaceWidth = width;
+                m_webgpuSurfaceHeight = height;
+            }
+            wgpu::SurfaceTexture surfaceTexture;
+            m_webgpuSurface.GetCurrentTexture(&surfaceTexture);
+            if (surfaceTexture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal &&
+                surfaceTexture.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal)
+            {
+                return;
+            }
 
-        wgpu::TextureView view = surfaceTexture.texture.CreateView();
-        wgpu::CommandEncoder encoder = m_webgpuContext->getDevice().CreateCommandEncoder();
-        wgpu::RenderPassColorAttachment colorAttachment;
-        colorAttachment.view = view;
-        colorAttachment.loadOp = wgpu::LoadOp::Clear;
-        colorAttachment.storeOp = wgpu::StoreOp::Store;
-        colorAttachment.clearValue = {0.14, 0.14, 0.14, 1.0};
-        wgpu::RenderPassDescriptor renderPassDescriptor;
-        renderPassDescriptor.colorAttachmentCount = 1u;
-        renderPassDescriptor.colorAttachments = &colorAttachment;
-        wgpu::RenderPassEncoder renderPass = encoder.BeginRenderPass(&renderPassDescriptor);
+            wgpu::TextureView view = surfaceTexture.texture.CreateView();
+            wgpu::CommandEncoder encoder = m_webgpuContext->getDevice().CreateCommandEncoder();
+            wgpu::RenderPassColorAttachment colorAttachment;
+            colorAttachment.view = view;
+            colorAttachment.loadOp = wgpu::LoadOp::Clear;
+            colorAttachment.storeOp = wgpu::StoreOp::Store;
+            colorAttachment.clearValue = {0.14, 0.14, 0.14, 1.0};
+            wgpu::RenderPassDescriptor renderPassDescriptor;
+            renderPassDescriptor.colorAttachmentCount = 1u;
+            renderPassDescriptor.colorAttachments = &colorAttachment;
+            wgpu::RenderPassEncoder renderPass = encoder.BeginRenderPass(&renderPassDescriptor);
 
-        ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), renderPass.Get());
+            ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), renderPass.Get());
 
-        renderPass.End();
-        wgpu::CommandBuffer commandBuffer = encoder.Finish();
-        m_webgpuContext->getQueue().Submit(1u, &commandBuffer);
+            renderPass.End();
+            wgpu::CommandBuffer commandBuffer = encoder.Finish();
+            m_webgpuContext->getQueue().Submit(1u, &commandBuffer);
 #ifdef __EMSCRIPTEN__
-        std::string const webgpuError = m_webgpuContext->getErrorMessage();
-        if (!webgpuError.empty())
-        {
-            EM_ASM({
-                var status = document.getElementById('gladius-status');
-                if (status) status.textContent = UTF8ToString($0);
-            }, webgpuError.c_str());
-        }
+            std::string const webgpuError = m_webgpuContext->getErrorMessage();
+            if (!webgpuError.empty())
+            {
+                EM_ASM({
+                    var status = document.getElementById('gladius-status');
+                    if (status) status.textContent = UTF8ToString($0);
+                }, webgpuError.c_str());
+            }
 #endif
+        }
 #ifndef __EMSCRIPTEN__
+        // Present outside DeviceLock so VSync wait never starves background WebGPU compute work,
+        // then pump completed callbacks that finished while waiting for VSync.
         m_webgpuSurface.Present();
+        m_webgpuContext->processEvents();
 #endif
     }
 #endif

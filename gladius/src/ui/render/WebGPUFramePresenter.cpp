@@ -2,6 +2,7 @@
 
 #include "ProgressivePreviewSeed.h"
 #include "webgpu/WebGPUComputeContext.h"
+#include "webgpu/WebGPUFrameBufferSet.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -20,6 +21,11 @@ namespace gladius::ui::async_rendering
     WebGPUFramePresenter::~WebGPUFramePresenter()
     {
         release();
+    }
+
+    bool WebGPUFramePresenter::supportsGpuDirectPresentation() const noexcept
+    {
+        return m_context != nullptr && m_context->isValid();
     }
 
     bool WebGPUFramePresenter::present(compute::RenderFrame const & frame,
@@ -51,26 +57,49 @@ namespace gladius::ui::async_rendering
             return false;
         }
 
-        auto const uploadSize = alignedBytesPerRow * static_cast<std::size_t>(rowCount);
-        m_uploadData.resize(uploadSize);
-        for (std::uint32_t row = 0u; row < rowCount; ++row)
-        {
-            auto const * sourceRow = reinterpret_cast<unsigned char const *>(frame.pixels.data()) +
-                                     static_cast<std::size_t>(row) * rowBytes;
-            std::copy_n(sourceRow,
-                        rowBytes,
-                        m_uploadData.data() + static_cast<std::size_t>(row) * alignedBytesPerRow);
-        }
-
         bool const activeDimensionsChanged = m_width != frame.width || m_height != frame.height;
         bool const freshnessChanged = !m_freshness.has_value() || *m_freshness != frame.freshness;
+        bool const isFullFrame = frame.firstRow == 0u && frame.endRow == frame.height;
         bool const startsProgressiveFrame = frame.firstRow == 0u && frame.endRow < frame.height;
         if (frame.firstRow > 0u && (activeDimensionsChanged || freshnessChanged))
         {
             std::cerr << "[WebGPUFramePresenter] Cannot continue an uninitialized progressive frame\n";
             return false;
         }
-        bool const initializeFrame = activeDimensionsChanged || freshnessChanged || startsProgressiveFrame;
+
+        bool const isGpuDirect = frame.gpuOutputHandle != nullptr;
+        auto const * gpuOutput = isGpuDirect
+                                   ? static_cast<webgpu::WebGPUGpuOutputFrame const *>(
+                                       frame.gpuOutputHandle.get())
+                                   : nullptr;
+        if (isGpuDirect && (gpuOutput == nullptr || !gpuOutput->outputBuffer ||
+                            gpuOutput->bytesPerRow < rowBytes ||
+                            (gpuOutput->bytesPerRow % rowAlignment) != 0u ||
+                            gpuOutput->rowCount < rowCount))
+        {
+            return false;
+        }
+
+        // Full-frame uploads overwrite every pixel in [0..width) x [0..height), so clearing
+        // beforehand would waste an entire full-frame texture upload.
+        bool const initializeFrame =
+          !isFullFrame && (activeDimensionsChanged || freshnessChanged || startsProgressiveFrame);
+
+        if (!isGpuDirect)
+        {
+            auto const uploadSize = alignedBytesPerRow * static_cast<std::size_t>(rowCount);
+            m_uploadData.resize(uploadSize);
+            for (std::uint32_t row = 0u; row < rowCount; ++row)
+            {
+                auto const * sourceRow =
+                  reinterpret_cast<unsigned char const *>(frame.pixels.data()) +
+                  static_cast<std::size_t>(row) * rowBytes;
+                std::copy_n(sourceRow,
+                            rowBytes,
+                            m_uploadData.data() + static_cast<std::size_t>(row) * alignedBytesPerRow);
+            }
+        }
+
         if (initializeFrame)
         {
             if (static_cast<std::size_t>(frame.height) >
@@ -84,6 +113,7 @@ namespace gladius::ui::async_rendering
 
             bool const hasCompatibleSeed =
               startsProgressiveFrame && m_previewSeedFrame && m_previewSeedCandidate &&
+              !m_previewSeedFrame->pixels.empty() &&
               canSeedProgressiveFrame(*m_previewSeedFrame,
                                       *m_previewSeedCandidate,
                                       frame,
@@ -132,20 +162,44 @@ namespace gladius::ui::async_rendering
                                                &clearExtent);
         }
 
-        wgpu::TexelCopyTextureInfo destination;
-        destination.texture = m_texture;
-        destination.origin = {.x = 0u, .y = frame.firstRow, .z = 0u};
+        if (isGpuDirect)
+        {
+            wgpu::TexelCopyBufferInfo source;
+            source.buffer = gpuOutput->outputBuffer;
+            source.layout.offset = 0u;
+            source.layout.bytesPerRow = gpuOutput->bytesPerRow;
+            source.layout.rowsPerImage = rowCount;
 
-        wgpu::TexelCopyBufferLayout layout;
-        layout.bytesPerRow = static_cast<std::uint32_t>(alignedBytesPerRow);
-        layout.rowsPerImage = rowCount;
+            wgpu::TexelCopyTextureInfo destination;
+            destination.texture = m_texture;
+            destination.origin = {.x = 0u, .y = frame.firstRow, .z = 0u};
 
-        wgpu::Extent3D writeSize{.width = frame.width, .height = rowCount, .depthOrArrayLayers = 1u};
-        m_context->getQueue().WriteTexture(&destination,
-                                           m_uploadData.data(),
-                                           m_uploadData.size(),
-                                           &layout,
-                                           &writeSize);
+            wgpu::Extent3D copySize{
+              .width = frame.width, .height = rowCount, .depthOrArrayLayers = 1u};
+
+            auto const encoder = m_context->getDevice().CreateCommandEncoder();
+            encoder.CopyBufferToTexture(&source, &destination, &copySize);
+            auto const commandBuffer = encoder.Finish();
+            m_context->getQueue().Submit(1u, &commandBuffer);
+        }
+        else
+        {
+            wgpu::TexelCopyTextureInfo destination;
+            destination.texture = m_texture;
+            destination.origin = {.x = 0u, .y = frame.firstRow, .z = 0u};
+
+            wgpu::TexelCopyBufferLayout layout;
+            layout.bytesPerRow = static_cast<std::uint32_t>(alignedBytesPerRow);
+            layout.rowsPerImage = rowCount;
+
+            wgpu::Extent3D writeSize{
+              .width = frame.width, .height = rowCount, .depthOrArrayLayers = 1u};
+            m_context->getQueue().WriteTexture(&destination,
+                                               m_uploadData.data(),
+                                               m_uploadData.size(),
+                                               &layout,
+                                               &writeSize);
+        }
 
         auto const errorMessage = m_context->getErrorMessage();
 #ifdef __EMSCRIPTEN__
@@ -159,7 +213,7 @@ namespace gladius::ui::async_rendering
         }
         bool const loggedDimensionsChanged = frame.width != m_lastLoggedWidth || frame.height != m_lastLoggedHeight;
         bool const viewChanged = frame.freshness.viewGeneration != m_lastLoggedViewGeneration;
-        if (m_presentCount < 5u || loggedDimensionsChanged || viewChanged)
+        if (!frame.pixels.empty() && (m_presentCount < 5u || loggedDimensionsChanged || viewChanged))
         {
             std::uint64_t checksum = 0u;
             for (auto const pixel : frame.pixels)
@@ -184,7 +238,7 @@ namespace gladius::ui::async_rendering
         m_width = frame.width;
         m_height = frame.height;
         m_freshness = frame.freshness;
-        if (isCompletePreviewSeedFrame(frame, candidate))
+        if (isCompletePreviewSeedFrame(frame, candidate) && !frame.pixels.empty())
         {
             m_previewSeedFrame = frame;
             m_previewSeedCandidate = candidate;

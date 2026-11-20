@@ -79,6 +79,11 @@ namespace gladius::webgpu
         return m_supportsTimestampQueries;
     }
 
+    bool WebGPUComputeContext::supportsFloat32Filterable() const noexcept
+    {
+        return m_supportsFloat32Filterable;
+    }
+
     std::string WebGPUComputeContext::getErrorMessage() const
     {
         std::lock_guard<std::mutex> const lock(m_errorMutex);
@@ -223,6 +228,14 @@ namespace gladius::webgpu
         {
             m_supportsTimestampQueries = true;
             requiredFeatures.push_back(wgpu::FeatureName::TimestampQuery);
+        }
+        if (m_adapter.HasFeature(wgpu::FeatureName::Float32Filterable))
+        {
+            m_supportsFloat32Filterable = true;
+            requiredFeatures.push_back(wgpu::FeatureName::Float32Filterable);
+        }
+        if (!requiredFeatures.empty())
+        {
             deviceDescriptor.requiredFeatureCount = requiredFeatures.size();
             deviceDescriptor.requiredFeatures = requiredFeatures.data();
         }

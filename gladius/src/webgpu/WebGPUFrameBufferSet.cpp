@@ -10,16 +10,20 @@ namespace gladius::webgpu
     void WebGPUFrameBufferSet::resize(wgpu::Device const & device,
                                        std::uint32_t const width,
                                        std::uint32_t const height,
-                                       std::size_t const parameterCount)
+                                       std::size_t const parameterCount,
+                                       std::uint32_t const rowStridePixels)
     {
-        auto const dispatchSize = calculateSliceDispatchSize(width, height);
+        auto const effectiveRowStride = std::max(width, rowStridePixels);
+        auto const dispatchSize = calculateSliceDispatchSize(effectiveRowStride, height);
         if (!dispatchSize.has_value())
         {
             throw std::invalid_argument("Invalid WebGPU frame dimensions");
         }
 
         auto const parameterSizeBytes = std::max(sizeof(float), parameterCount * sizeof(float));
-        if (m_width == width && m_height == height && m_parameterSizeBytes == parameterSizeBytes && isValid())
+        if (m_width == width && m_height == height &&
+            m_outputSizeBytes == dispatchSize->outputSizeBytes &&
+            m_parameterSizeBytes == parameterSizeBytes && isValid())
         {
             return;
         }
@@ -79,6 +83,9 @@ namespace gladius::webgpu
             }
             m_parameterBuffer = std::move(parameterBuffer);
             m_parameterCapacitySizeBytes = parameterCapacitySizeBytes;
+            m_uploadedParameterSceneId.reset();
+            m_uploadedParameterGeneration.reset();
+            m_uploadedParameterCount = 0u;
         }
 
         if (!isValid())
@@ -97,12 +104,291 @@ namespace gladius::webgpu
         queue.WriteBuffer(m_uniformBuffer, 0u, &uniforms, sizeof(uniforms));
     }
 
-    void WebGPUFrameBufferSet::writeParameters(wgpu::Queue const & queue, std::vector<float> const & parameters) const
+    void WebGPUFrameBufferSet::writeParameters(wgpu::Queue const & queue, std::vector<float> const & parameters)
     {
         float const zero{};
         auto const * data = parameters.empty() ? &zero : parameters.data();
         auto const size = parameters.empty() ? sizeof(zero) : parameters.size() * sizeof(float);
         queue.WriteBuffer(m_parameterBuffer, 0u, data, size);
+        m_uploadedParameterSceneId.reset();
+        m_uploadedParameterGeneration.reset();
+        m_uploadedParameterCount = parameters.size();
+    }
+
+    void WebGPUFrameBufferSet::writeParametersIfChanged(
+      wgpu::Queue const & queue,
+      std::vector<float> const & parameters,
+      std::optional<std::uint64_t> const sceneResourceId,
+      std::optional<std::uint64_t> const parameterGeneration)
+    {
+        if (sceneResourceId.has_value() && parameterGeneration.has_value() &&
+            m_uploadedParameterSceneId == sceneResourceId &&
+            m_uploadedParameterGeneration == parameterGeneration &&
+            m_uploadedParameterCount == parameters.size())
+        {
+            return;
+        }
+
+        writeParameters(queue, parameters);
+        m_uploadedParameterSceneId = sceneResourceId;
+        m_uploadedParameterGeneration = parameterGeneration;
+    }
+
+    wgpu::BindGroup WebGPUFrameBufferSet::getOrCreateFrameBindGroup(
+      wgpu::Device const & device,
+      wgpu::BindGroupLayout const & layout,
+      WebGPUScenePayloadBuffers const * const scenePayloads,
+      wgpu::Buffer const & precomputedUniformBuffer,
+      wgpu::TextureView const & precomputedTextureView,
+      wgpu::Sampler const & precomputedSampler)
+    {
+        wgpu::Buffer const & meshPayload =
+          scenePayloads != nullptr ? scenePayloads->meshPayloadBuffer : m_meshPayloadBuffer;
+        wgpu::Buffer const & meshOffsets =
+          scenePayloads != nullptr ? scenePayloads->meshOffsetTableBuffer : m_meshOffsetTableBuffer;
+        wgpu::Buffer const & beamPayload =
+          scenePayloads != nullptr ? scenePayloads->beamPayloadBuffer : m_beamPayloadBuffer;
+        wgpu::Buffer const & beamOffsets =
+          scenePayloads != nullptr ? scenePayloads->beamOffsetTableBuffer : m_beamOffsetTableBuffer;
+        wgpu::Buffer const & imagePayload =
+          scenePayloads != nullptr ? scenePayloads->imagePayloadBuffer : m_imagePayloadBuffer;
+        wgpu::Buffer const & imageOffsets =
+          scenePayloads != nullptr ? scenePayloads->imageOffsetTableBuffer : m_imageOffsetTableBuffer;
+
+        FrameBindGroupKey const key{
+          .layout = layout.Get(),
+          .outputBuffer = m_outputBuffer.Get(),
+          .outputSizeBytes = m_outputSizeBytes,
+          .parameterBuffer = m_parameterBuffer.Get(),
+          .parameterSizeBytes = m_parameterSizeBytes,
+          .meshPayloadBuffer = meshPayload.Get(),
+          .meshOffsetTableBuffer = meshOffsets.Get(),
+          .beamPayloadBuffer = beamPayload.Get(),
+          .beamOffsetTableBuffer = beamOffsets.Get(),
+          .imagePayloadBuffer = imagePayload.Get(),
+          .imageOffsetTableBuffer = imageOffsets.Get(),
+          .precomputedUniformBuffer = precomputedUniformBuffer.Get(),
+          .precomputedTextureView = precomputedTextureView.Get(),
+          .precomputedSampler = precomputedSampler.Get()};
+
+        if (m_cachedBindGroup && m_cachedBindGroupKey.has_value() && *m_cachedBindGroupKey == key)
+        {
+            return m_cachedBindGroup;
+        }
+
+        wgpu::BindGroupEntry bindGroupEntries[13]{};
+        bindGroupEntries[0].binding = 0u;
+        bindGroupEntries[0].buffer = m_uniformBuffer;
+        bindGroupEntries[0].size = sizeof(FrameUniforms);
+        bindGroupEntries[1].binding = 1u;
+        bindGroupEntries[1].buffer = m_outputBuffer;
+        bindGroupEntries[1].size = m_outputSizeBytes;
+        bindGroupEntries[2].binding = 2u;
+        bindGroupEntries[2].buffer = m_parameterBuffer;
+        bindGroupEntries[2].size = m_parameterSizeBytes;
+        std::size_t entryCount = 3u;
+
+        if (meshPayload)
+        {
+            bindGroupEntries[entryCount].binding = 4u;
+            bindGroupEntries[entryCount].buffer = meshPayload;
+            bindGroupEntries[entryCount].size = meshPayload.GetSize();
+            ++entryCount;
+            bindGroupEntries[entryCount].binding = 5u;
+            bindGroupEntries[entryCount].buffer = meshOffsets;
+            bindGroupEntries[entryCount].size = meshOffsets.GetSize();
+            ++entryCount;
+        }
+        if (beamPayload)
+        {
+            bindGroupEntries[entryCount].binding = 6u;
+            bindGroupEntries[entryCount].buffer = beamPayload;
+            bindGroupEntries[entryCount].size = beamPayload.GetSize();
+            ++entryCount;
+            bindGroupEntries[entryCount].binding = 7u;
+            bindGroupEntries[entryCount].buffer = beamOffsets;
+            bindGroupEntries[entryCount].size = beamOffsets.GetSize();
+            ++entryCount;
+        }
+        if (imagePayload)
+        {
+            bindGroupEntries[entryCount].binding = 8u;
+            bindGroupEntries[entryCount].buffer = imagePayload;
+            bindGroupEntries[entryCount].size = imagePayload.GetSize();
+            ++entryCount;
+            bindGroupEntries[entryCount].binding = 9u;
+            bindGroupEntries[entryCount].buffer = imageOffsets;
+            bindGroupEntries[entryCount].size = imageOffsets.GetSize();
+            ++entryCount;
+        }
+
+        bindGroupEntries[entryCount].binding = 10u;
+        bindGroupEntries[entryCount].buffer = m_metricsBuffer;
+        bindGroupEntries[entryCount].size = FRAME_METRICS_SIZE_BYTES;
+        ++entryCount;
+
+        bindGroupEntries[entryCount].binding = 11u;
+        bindGroupEntries[entryCount].buffer = precomputedUniformBuffer;
+        bindGroupEntries[entryCount].size = sizeof(PrecomputedSdfUniforms);
+        ++entryCount;
+
+        bindGroupEntries[entryCount].binding = 12u;
+        bindGroupEntries[entryCount].textureView = precomputedTextureView;
+        ++entryCount;
+
+        if (precomputedSampler)
+        {
+            bindGroupEntries[entryCount].binding = 13u;
+            bindGroupEntries[entryCount].sampler = precomputedSampler;
+            ++entryCount;
+        }
+
+        wgpu::BindGroupDescriptor bindGroupDescriptor;
+        bindGroupDescriptor.layout = layout;
+        bindGroupDescriptor.entryCount = entryCount;
+        bindGroupDescriptor.entries = bindGroupEntries;
+        m_cachedBindGroup = device.CreateBindGroup(&bindGroupDescriptor);
+        m_cachedBindGroupKey = key;
+        return m_cachedBindGroup;
+    }
+
+    std::shared_ptr<WebGPUScenePayloadBuffers> uploadScenePayloadBuffers(
+      wgpu::Device const & device,
+      wgpu::Queue const & queue,
+      std::uint64_t const resourceId,
+      std::vector<std::vector<float>> const & meshPayloadTable,
+      std::vector<std::vector<float>> const & beamPayloadTable,
+      std::vector<std::vector<std::uint32_t>> const & imagePayloadTable)
+    {
+        auto bundle = std::make_shared<WebGPUScenePayloadBuffers>();
+        bundle->resourceId = resourceId;
+
+        auto const uploadFloatPayloads =
+          [&](std::vector<std::vector<float>> const & table,
+              char const * const dataLabel,
+              char const * const offsetLabel,
+              char const * const overflowMessage,
+              wgpu::Buffer & dataBuffer,
+              wgpu::Buffer & offsetBuffer)
+        {
+            if (table.empty())
+            {
+                return;
+            }
+            std::vector<std::uint32_t> offsetTable(table.size() * 2u, 0u);
+            std::size_t totalFloats = 0u;
+            for (std::size_t slot = 0u; slot < table.size(); ++slot)
+            {
+                auto const & payload = table[slot];
+                if (payload.empty())
+                {
+                    continue;
+                }
+                if (totalFloats > std::numeric_limits<std::uint32_t>::max() ||
+                    payload.size() > std::numeric_limits<std::uint32_t>::max() - totalFloats)
+                {
+                    throw std::length_error(overflowMessage);
+                }
+                offsetTable[slot * 2u] = static_cast<std::uint32_t>(totalFloats);
+                offsetTable[slot * 2u + 1u] = static_cast<std::uint32_t>(payload.size());
+                totalFloats += payload.size();
+            }
+            if (totalFloats == 0u)
+            {
+                return;
+            }
+            wgpu::BufferDescriptor dataDesc;
+            dataDesc.label = dataLabel;
+            dataDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+            dataDesc.size = totalFloats * sizeof(float);
+            dataBuffer = device.CreateBuffer(&dataDesc);
+
+            auto const offsetTableBytes = offsetTable.size() * sizeof(std::uint32_t);
+            wgpu::BufferDescriptor offsetDesc;
+            offsetDesc.label = offsetLabel;
+            offsetDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+            offsetDesc.size = offsetTableBytes;
+            offsetBuffer = device.CreateBuffer(&offsetDesc);
+            queue.WriteBuffer(offsetBuffer, 0u, offsetTable.data(), offsetTableBytes);
+
+            std::size_t byteOffset = 0u;
+            for (auto const & payload : table)
+            {
+                if (payload.empty())
+                {
+                    continue;
+                }
+                auto const bytes = payload.size() * sizeof(float);
+                queue.WriteBuffer(dataBuffer, byteOffset, payload.data(), bytes);
+                byteOffset += bytes;
+            }
+        };
+
+        uploadFloatPayloads(meshPayloadTable,
+                            "Gladius scene mesh payloads",
+                            "Gladius scene mesh offset table",
+                            "WebGPU mesh payload table exceeds 32-bit addressing",
+                            bundle->meshPayloadBuffer,
+                            bundle->meshOffsetTableBuffer);
+        uploadFloatPayloads(beamPayloadTable,
+                            "Gladius scene beam payloads",
+                            "Gladius scene beam offset table",
+                            "WebGPU beam payload table exceeds 32-bit addressing",
+                            bundle->beamPayloadBuffer,
+                            bundle->beamOffsetTableBuffer);
+
+        if (!imagePayloadTable.empty())
+        {
+            std::vector<std::uint32_t> offsetTable(imagePayloadTable.size() * 2u, 0u);
+            std::size_t totalWords = 0u;
+            for (std::size_t slot = 0u; slot < imagePayloadTable.size(); ++slot)
+            {
+                auto const & payload = imagePayloadTable[slot];
+                if (payload.empty())
+                {
+                    continue;
+                }
+                if (totalWords > std::numeric_limits<std::uint32_t>::max() ||
+                    payload.size() > std::numeric_limits<std::uint32_t>::max() - totalWords)
+                {
+                    throw std::length_error("WebGPU image payload table exceeds 32-bit addressing");
+                }
+                offsetTable[slot * 2u] = static_cast<std::uint32_t>(totalWords);
+                offsetTable[slot * 2u + 1u] = static_cast<std::uint32_t>(payload.size());
+                totalWords += payload.size();
+            }
+            if (totalWords > 0u)
+            {
+                wgpu::BufferDescriptor dataDesc;
+                dataDesc.label = "Gladius scene image payloads";
+                dataDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+                dataDesc.size = totalWords * sizeof(std::uint32_t);
+                bundle->imagePayloadBuffer = device.CreateBuffer(&dataDesc);
+
+                auto const offsetTableBytes = offsetTable.size() * sizeof(std::uint32_t);
+                wgpu::BufferDescriptor offsetDesc;
+                offsetDesc.label = "Gladius scene image offset table";
+                offsetDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+                offsetDesc.size = offsetTableBytes;
+                bundle->imageOffsetTableBuffer = device.CreateBuffer(&offsetDesc);
+                queue.WriteBuffer(
+                  bundle->imageOffsetTableBuffer, 0u, offsetTable.data(), offsetTableBytes);
+
+                std::size_t byteOffset = 0u;
+                for (auto const & payload : imagePayloadTable)
+                {
+                    if (payload.empty())
+                    {
+                        continue;
+                    }
+                    auto const bytes = payload.size() * sizeof(std::uint32_t);
+                    queue.WriteBuffer(bundle->imagePayloadBuffer, byteOffset, payload.data(), bytes);
+                    byteOffset += bytes;
+                }
+            }
+        }
+
+        return bundle;
     }
 
     void WebGPUFrameBufferSet::setMeshPayloads(wgpu::Device const & device,
@@ -473,6 +759,11 @@ namespace gladius::webgpu
         m_outputCapacitySizeBytes = 0u;
         m_parameterSizeBytes = 0u;
         m_parameterCapacitySizeBytes = 0u;
+        m_uploadedParameterSceneId.reset();
+        m_uploadedParameterGeneration.reset();
+        m_uploadedParameterCount = 0u;
+        m_cachedBindGroupKey.reset();
+        m_cachedBindGroup = nullptr;
     }
 
     bool WebGPUFrameBufferSet::isValid() const noexcept

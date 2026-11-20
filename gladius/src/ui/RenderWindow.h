@@ -585,7 +585,10 @@ namespace gladius::ui
                     .viewport = viewport,
                     .freshness = {.sceneGeneration = task.stamp.sceneEpoch,
                                   .viewGeneration = task.stamp.viewEpoch,
-                                  .parameterGeneration = task.stamp.parameterEpoch}};
+                                  .parameterGeneration = task.stamp.parameterEpoch},
+                    .skipCpuReadback =
+                      (m_neutralFramePresenter != nullptr &&
+                       m_neutralFramePresenter->supportsGpuDirectPresentation())};
                   if (request.isValid())
                   {
                       logNeutralRenderRequest(task, request);
