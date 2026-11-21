@@ -11,7 +11,7 @@ description: >-
   and the snippet workflow.
 metadata:
   author: gladius
-  version: "5.1"
+  version: "5.2"
   requires: gladius-mcp-server
 ---
 
@@ -160,10 +160,13 @@ comment with name and ID:
 
 **Syntax:** types `float`, `vec3`; operators `+ - * /`; functions `sin cos tan
 asin acos atan atan2 sqrt abs exp log pow mod fmod min max clamp dot cross
-length sign round floor ceil step fract`; `vec3(x, y, z)` and `.x .y .z`;
-`float v = expr;` assignments; `if (cond) expr1 else expr2` (→ select nodes);
-cross-function calls `name_ID(args)`; multiple outputs
-`(float a, vec3 b) func_ID(...)`; `[root]` to mark root functions.
+length sign round floor ceil fract`; `vec3(x, y, z)` and `.x .y .z`;
+`float v = expr;` assignments; cross-function calls `name_ID(args)`; multiple
+outputs `(float a, vec3 b) func_ID(...)`; `[root]` to mark root functions.
+There is **no** `step()` — use `clamp(-sdf * 100.0, 0.0, 1.0)` for membership
+masks. `if` needs the fully braced form
+`if (a < b) { v = x; } else { v = y; }` (→ select nodes); the one-line
+`if (cond) a else b` shorthand is not parsed.
 
 ```glsl
 // Function: twist (ID: 1)
@@ -432,6 +435,15 @@ catalog in [MODELING-GUIDE.md](MODELING-GUIDE.md) §4–§5.
 
 ### Snippet Authoring Tips
 
+- **Put `{` on the signature line.** `ProgramSnippetApplier` reads the signature
+  only from the line containing `{` (`src/ProgramSnippetApplier.cpp:168`). With an
+  Allman brace the bare `{` becomes the signature, the parameter list is silently
+  dropped, and every non-`pos` parameter then fails as undeclared.
+- **No comments inside a function body.** Bodies are split on `;` with no comment
+  awareness (`:334`); a comment becomes a statement and aborts the function. Only
+  the `// Function: name (ID: n)` header is consumed.
+- Name the position parameter `pos`. Undeclared `in_x` identifiers are auto-added,
+  bare ones are not.
 - `get_program_snippet` prints arguments with an `in_` prefix (`in_pos`); the
   parser accepts both `in_pos` and `pos`.
 - **Only functions that exist in the assembly are callable.** There are no

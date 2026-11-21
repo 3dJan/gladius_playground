@@ -76,10 +76,15 @@ Selected signatures:
 
 | Function | Signature |
 |----------|-----------|
-| `box_4` | `box_4(vec3 b, vec3 pos)` |
+| `box_4` | `box_4(vec3 b, vec3 pos)` — `b` is the **full size**, not the half-extent |
 | `sphere_5` | `sphere_5(vec3 pos, float radius)` |
 | `torus_6` | `torus_6(vec3 pos, float radius1, float radius2)` |
-| `circle_8` | `circle_8(vec3 pos, float radius)` — 2D |
+| `circle_8` | `circle_8(vec3 pos, float radius)` — 2D disc in XY |
+
+`box_4` computes `abs(pos) - 0.5 * b`, so `box_4(vec3(20, 20, 4), pos)` is a
+20 × 20 × 4 mm box centred on `pos`. Passing half-extents silently halves every
+dimension — the usual cause of floating tiers and missing cuts. `circle_8` is
+flat: extrude it with `max(circle_8(q, r), abs(q.z - h) - h)`.
 
 Some template functions declare their inputs in an unintuitive order (the saved
 `<i:in>` list is not the call order). Read the signature from
