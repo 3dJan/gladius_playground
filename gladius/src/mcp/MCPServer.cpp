@@ -117,6 +117,8 @@ namespace gladius::mcp
     MCPServer::MCPServer(std::shared_ptr<MCPApplicationInterface> app)
         : m_application(app.get())
         , m_applicationShared(std::move(app))
+        , m_registry(std::make_shared<gladius::tools::ToolRegistry>())
+        , m_executor(*m_registry)
         , m_server(std::make_unique<httplib::Server>())
     {
         setupRoutes();
@@ -127,6 +129,8 @@ namespace gladius::mcp
     MCPServer::MCPServer(MCPApplicationInterface * app)
         : m_application(app)
         , m_applicationShared(nullptr)
+        , m_registry(std::make_shared<gladius::tools::ToolRegistry>())
+        , m_executor(*m_registry)
         , m_server(std::make_unique<httplib::Server>())
     {
         setupRoutes();
@@ -144,8 +148,16 @@ namespace gladius::mcp
                                  const nlohmann::json & schema,
                                  ToolFunction func)
     {
-        m_toolInfo[name] = {name, description, schema};
-        m_tools[name] = std::move(func);
+        registerTool(name, description, schema, gladius::tools::ToolPolicy::ModelModification, std::move(func));
+    }
+
+    void MCPServer::registerTool(const std::string & name,
+                                 const std::string & description,
+                                 const nlohmann::json & schema,
+                                 gladius::tools::ToolPolicy policy,
+                                 ToolFunction func)
+    {
+        m_registry->registerSyncTool({name, description, schema, policy}, std::move(func));
         // Always log to stderr (stdout is reserved for MCP protocol in stdio mode)
         std::cerr << "Registered MCP tool: " << name << std::endl;
     }
@@ -258,10 +270,12 @@ namespace gladius::mcp
 
     std::vector<ToolInfo> MCPServer::getRegisteredTools() const
     {
+        auto const defs = m_registry->definitions();
         std::vector<ToolInfo> tools;
-        for (const auto & [name, info] : m_toolInfo)
+        tools.reserve(defs.size());
+        for (auto const & def : defs)
         {
-            tools.push_back(info);
+            tools.push_back({def.name, def.description, def.inputSchema});
         }
         return tools;
     }
@@ -329,7 +343,7 @@ namespace gladius::mcp
     /// Enrich an error response with a consistent error and usage example.
     static void enrichErrorResponse(nlohmann::json & result,
                                     std::string const & toolName,
-                                    std::map<std::string, ToolInfo> const & toolInfo)
+                                    gladius::tools::ToolRegistry const & registry)
     {
         if (!isToolError(result))
         {
@@ -347,10 +361,13 @@ namespace gladius::mcp
         }
         if (!result.contains("usage_example"))
         {
-            auto infoIt = toolInfo.find(toolName);
-            if (infoIt != toolInfo.end() && !infoIt->second.schema.empty())
+            if (auto const tool = registry.getTool(toolName))
             {
-                result["usage_example"] = buildUsageExample(infoIt->second.schema);
+                auto const def = tool->definition();
+                if (!def.inputSchema.empty())
+                {
+                    result["usage_example"] = buildUsageExample(def.inputSchema);
+                }
             }
         }
     }
@@ -358,25 +375,15 @@ namespace gladius::mcp
     nlohmann::json MCPServer::executeTool(const std::string & toolName,
                                           const nlohmann::json & params)
     {
-        auto toolIt = m_tools.find(toolName);
-        if (toolIt == m_tools.end())
+        if (!m_registry->hasTool(toolName))
         {
             return {{"success", false}, {"error", "Tool not found: " + toolName}};
         }
 
-        try
-        {
-            auto result = toolIt->second(params);
-            enrichErrorResponse(result, toolName, m_toolInfo);
-            return result;
-        }
-        catch (const std::exception & e)
-        {
-            nlohmann::json result = {
-              {"success", false}, {"error", "Tool execution failed: " + std::string(e.what())}};
-            enrichErrorResponse(result, toolName, m_toolInfo);
-            return result;
-        }
+        io::CancellationToken noCancel;
+        auto result = m_executor.executeSync(toolName, params, noCancel);
+        enrichErrorResponse(result, toolName, *m_registry);
+        return result;
     }
 
     void MCPServer::setupRoutes()
@@ -401,7 +408,7 @@ namespace gladius::mcp
                           json response = {{"status", "ok"},
                                            {"server", "Gladius MCP Server"},
                                            {"running", m_running.load()},
-                                           {"tools_count", m_tools.size()}};
+                                           {"tools_count", m_registry->size()}};
                           res.set_content(response.dump(), "application/json");
                       });
     }
@@ -477,11 +484,11 @@ namespace gladius::mcp
     {
         json tools = json::array();
 
-        for (const auto & [name, info] : m_toolInfo)
+        for (const auto & def : m_registry->definitions())
         {
-            tools.push_back({{"name", info.name},
-                             {"description", info.description},
-                             {"inputSchema", info.schema}});
+            tools.push_back({{"name", def.name},
+                             {"description", def.description},
+                             {"inputSchema", def.inputSchema}});
         }
 
         json response = {{"jsonrpc", "2.0"}, {"result", {{"tools", tools}}}};
@@ -506,17 +513,17 @@ namespace gladius::mcp
             }
 
             std::string toolName = request["params"]["name"];
-            auto toolIt = m_tools.find(toolName);
 
-            if (toolIt == m_tools.end())
+            if (!m_registry->hasTool(toolName))
             {
-                // Build the tool list directly from the registered map so it is always
+                // Build the tool list directly from the canonical registry so it is always
                 // complete regardless of which tools were compiled or registered.
+                auto const defs = m_registry->definitions();
                 std::vector<std::string> availableTools;
-                availableTools.reserve(m_tools.size());
-                for (auto const & [name, handler] : m_tools)
+                availableTools.reserve(defs.size());
+                for (auto const & def : defs)
                 {
-                    availableTools.push_back(name);
+                    availableTools.push_back(def.name);
                 }
                 std::sort(availableTools.begin(), availableTools.end());
 

@@ -164,6 +164,9 @@ set (INCLUDE_PATHS
     ${CMAKE_CURRENT_SOURCE_DIR}/nodes
     ${CMAKE_CURRENT_SOURCE_DIR}/compute
     ${CMAKE_CURRENT_SOURCE_DIR}/slicer
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    ${CMAKE_CURRENT_SOURCE_DIR}/agent
+    ${CMAKE_CURRENT_SOURCE_DIR}/design
     ${CMAKE_CURRENT_SOURCE_DIR}/components/IconFontCppHeaders
     ${CMAKE_CURRENT_SOURCE_DIR}/components
     ${OPENMESH_INCLUDE_DIRS}
@@ -207,10 +210,11 @@ set(DEPENDENCIES_CORE
     NLopt::nlopt
     muparser::muparser
     PkgConfig::libcoro
+    nlohmann_json::nlohmann_json
 )
 
 if(NOT EMSCRIPTEN)
-    list(APPEND DEPENDENCIES_CORE ${X11_LIBRARIES} Threads::Threads OpenMP::OpenMP_CXX)
+    list(APPEND DEPENDENCIES_CORE ${X11_LIBRARIES} Threads::Threads OpenMP::OpenMP_CXX CURL::libcurl)
 endif()
 
 if(GLADIUS_UI_BACKEND_NORMALIZED STREQUAL "OPENGL")
@@ -240,7 +244,6 @@ endif()
 # MCP-only dependencies
 set(DEPENDENCIES_MCP
     httplib::httplib
-    nlohmann_json::nlohmann_json
 )
 
 if (ENABLE_TRACY)

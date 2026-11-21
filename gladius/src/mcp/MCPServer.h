@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include "../tools/ToolExecutor.h"
+#include "../tools/ToolRegistry.h"
+
 #include <atomic>
 #include <functional>
 #include <httplib.h>
@@ -78,6 +81,25 @@ namespace gladius::mcp
                           const nlohmann::json & schema,
                           ToolFunction func);
 
+        /// @brief Register a tool with explicit effect policy into the underlying canonical ToolRegistry
+        void registerTool(const std::string & name,
+                          const std::string & description,
+                          const nlohmann::json & schema,
+                          gladius::tools::ToolPolicy policy,
+                          ToolFunction func);
+
+        /// @brief Access the underlying canonical ToolRegistry
+        [[nodiscard]] gladius::tools::ToolRegistry & toolRegistry()
+        {
+            return *m_registry;
+        }
+
+        /// @brief Access the underlying canonical ToolRegistry (const)
+        [[nodiscard]] gladius::tools::ToolRegistry const & toolRegistry() const
+        {
+            return *m_registry;
+        }
+
         /**
          * @brief Start the MCP server
          * @param port Port to listen on (for HTTP transport, default: 8080)
@@ -146,8 +168,8 @@ namespace gladius::mcp
         MCPApplicationInterface *
           m_application; // Raw pointer (can work with shared_ptr or adapter)
         std::shared_ptr<MCPApplicationInterface> m_applicationShared; // Holds shared_ptr if used
-        std::map<std::string, ToolInfo> m_toolInfo;
-        std::map<std::string, ToolFunction> m_tools;
+        std::shared_ptr<gladius::tools::ToolRegistry> m_registry;
+        gladius::tools::ToolExecutor m_executor;
         std::atomic<bool> m_running{false};
         int m_port{0};
         TransportType m_transportType{TransportType::HTTP};

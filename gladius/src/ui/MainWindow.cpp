@@ -144,6 +144,7 @@ namespace gladius::ui
 #endif
 
         m_modelEditor.setDocument(m_doc);
+        m_agentPanels.bind(m_doc.get(), m_configManager);
 
         // Sync shipped library items into the user's persistent library directory.
         // This copies new files without overwriting existing user customizations.
@@ -1673,6 +1674,7 @@ namespace gladius::ui
 
                 // Library export dialog (modal, renders independently of compute)
                 m_libraryExportDialog.render();
+                m_agentPanels.render();
                 if (m_libraryExportDialog.wasExportCompleted())
                 {
                     m_modelEditor.refreshLibraryDirectories();
@@ -2236,6 +2238,11 @@ namespace gladius::ui
         {
             closeMenu();
             showWelcomeScreen();
+        }
+        if (ImGui::MenuItem("Design Agent", nullptr, m_agentPanels.isVisible()))
+        {
+            closeMenu();
+            m_agentPanels.toggleVisible();
         }
 
         // Disable export menu items if an asynchronous file dialog is active.

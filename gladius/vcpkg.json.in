@@ -73,6 +73,10 @@
     "nlohmann-json",
     "muparser",
     "cpp-httplib",
+    {
+      "name": "curl",
+      "platform": "!emscripten"
+    },
     "libcoro",
     "nlopt"
   ],

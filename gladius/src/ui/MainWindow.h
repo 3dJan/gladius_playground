@@ -11,6 +11,7 @@
 #include "../Document.h"
 #include "../compute/ComputeBackend.h"
 #include "AboutDialog.h"
+#include "AgentPanels.h"
 #ifdef __EMSCRIPTEN__
 #include "BrowserFileDropInbox.h"
 #endif
@@ -362,6 +363,7 @@ namespace gladius::ui
         CliExportDialog m_cliExportDialog;
     #endif
         LibraryExportDialog m_libraryExportDialog;
+        AgentPanels m_agentPanels;
         SliceView m_sliceView;
         LogView m_logView;
         RenderWindow m_renderWindow;

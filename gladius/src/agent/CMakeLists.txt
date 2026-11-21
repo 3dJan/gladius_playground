@@ -1,0 +1,17 @@
+set(BINARY ${CMAKE_PROJECT_NAME})
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS LIST_DIRECTORIES false *.h *.cpp)
+target_sources(${BINARY}_lib PRIVATE ${SOURCES})
+target_sources(${BINARY}_lib_mcp PRIVATE ${SOURCES})
+target_sources(${BINARY} PRIVATE ${SOURCES})
+
+target_include_directories(${BINARY}_lib PRIVATE ./)
+target_include_directories(${BINARY}_lib_mcp PRIVATE ./)
+target_include_directories(${BINARY} PRIVATE ./)
+
+if(WIN32)
+    target_link_libraries(${BINARY}_lib PRIVATE Advapi32)
+    target_link_libraries(${BINARY}_lib_mcp PRIVATE Advapi32)
+elseif(APPLE)
+    target_link_libraries(${BINARY}_lib PRIVATE "-framework Security" "-framework CoreFoundation")
+    target_link_libraries(${BINARY}_lib_mcp PRIVATE "-framework Security" "-framework CoreFoundation")
+endif()
