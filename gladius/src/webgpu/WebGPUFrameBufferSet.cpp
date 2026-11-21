@@ -660,6 +660,24 @@ namespace gladius::webgpu
         }
     }
 
+    void WebGPUFrameBufferSet::ensureGpuFenceBuffer(wgpu::Device const & device)
+    {
+        if (m_gpuFenceBuffer)
+        {
+            return;
+        }
+
+        wgpu::BufferDescriptor fenceDescriptor;
+        fenceDescriptor.label = "Gladius GPU completion fence";
+        fenceDescriptor.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+        fenceDescriptor.size = sizeof(std::uint32_t);
+        m_gpuFenceBuffer = device.CreateBuffer(&fenceDescriptor);
+        if (!m_gpuFenceBuffer)
+        {
+            throw std::runtime_error("Unable to allocate WebGPU GPU completion fence buffer");
+        }
+    }
+
     void WebGPUFrameBufferSet::ensurePrecomputedSdfResources(wgpu::Device const & device,
                                                            wgpu::Queue const & queue,
                                                            std::uint32_t const gridSize)
@@ -740,6 +758,7 @@ namespace gladius::webgpu
         m_querySet = nullptr;
         m_timestampResolveBuffer = nullptr;
         m_timestampStagingBuffer = nullptr;
+        m_gpuFenceBuffer = nullptr;
         m_stagingBuffer = nullptr;
         m_parameterBuffer = nullptr;
         m_outputBuffer = nullptr;

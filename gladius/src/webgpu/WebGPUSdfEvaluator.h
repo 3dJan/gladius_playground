@@ -22,7 +22,7 @@ namespace gladius::webgpu
     class WebGPUSdfEvaluator final
     {
       public:
-        static constexpr std::size_t MAX_BATCH_POINTS = 1024u * 1024u;
+        static constexpr std::size_t MAX_BATCH_POINTS = 16u * 1024u;
 
         using PositionBatchSource =
           std::function<void(std::size_t, std::size_t, std::vector<std::array<float, 3>> &)>;

@@ -177,6 +177,15 @@ namespace gladius::webgpu
             return m_timestampStagingBuffer;
         }
 
+        /// Create (once) a 4-byte MapRead fence buffer used to synchronize GPU completion
+        /// without reading back full frame pixels (Dawn/radv OnSubmittedWorkDone does not
+        /// wait for GPU execution, whereas MapAsync on a 4-byte copy does).
+        void ensureGpuFenceBuffer(wgpu::Device const & device);
+        [[nodiscard]] wgpu::Buffer const & getGpuFenceBuffer() const noexcept
+        {
+            return m_gpuFenceBuffer;
+        }
+
         /// Ensure the 3D precomputed SDF texture and uniform buffer exist (at least 1x1x1).
         void ensurePrecomputedSdfResources(wgpu::Device const & device,
                                          wgpu::Queue const & queue,
@@ -226,6 +235,7 @@ namespace gladius::webgpu
         wgpu::QuerySet m_querySet;
         wgpu::Buffer m_timestampResolveBuffer;
         wgpu::Buffer m_timestampStagingBuffer;
+        wgpu::Buffer m_gpuFenceBuffer;
         wgpu::Buffer m_precomputedSdfUniformBuffer;
         wgpu::Texture m_precomputedSdfTexture;
         wgpu::TextureView m_precomputedSdfTextureView;

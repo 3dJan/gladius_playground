@@ -109,7 +109,7 @@ namespace gladius::ui::async_rendering
             }
             auto const clearSizeBytes = alignedBytesPerRow * static_cast<std::size_t>(frame.height);
             m_clearData.resize(clearSizeBytes / sizeof(std::uint32_t));
-            std::fill(m_clearData.begin(), m_clearData.end(), 0u);
+            std::fill(m_clearData.begin(), m_clearData.end(), 0xFF1A1A1Au);
 
             bool const hasCompatibleSeed =
               startsProgressiveFrame && m_previewSeedFrame && m_previewSeedCandidate &&
@@ -181,9 +181,13 @@ namespace gladius::ui::async_rendering
             encoder.CopyBufferToTexture(&source, &destination, &copySize);
             auto const commandBuffer = encoder.Finish();
             m_context->getQueue().Submit(1u, &commandBuffer);
+            // Retain the GPU output buffer lease until the next present/release so the
+            // frame buffer pool ping-pongs to its second slot while CopyBufferToTexture runs.
+            m_lastGpuOutputHandle = frame.gpuOutputHandle;
         }
         else
         {
+            m_lastGpuOutputHandle.reset();
             wgpu::TexelCopyTextureInfo destination;
             destination.texture = m_texture;
             destination.origin = {.x = 0u, .y = frame.firstRow, .z = 0u};
@@ -270,6 +274,7 @@ namespace gladius::ui::async_rendering
         m_freshness.reset();
         m_previewSeedFrame.reset();
         m_previewSeedCandidate.reset();
+        m_lastGpuOutputHandle.reset();
         m_presentCount = 0u;
         m_lastLoggedViewGeneration = 0u;
         m_lastLoggedWidth = 0u;

@@ -233,6 +233,13 @@ namespace gladius::ui::async_rendering
           m_progressiveWidth == task.width && m_progressiveHeight == task.height;
         if (!sameSequence)
         {
+            if (!m_progressiveStamp.has_value() ||
+                m_progressiveStamp->sceneEpoch != task.stamp.sceneEpoch)
+            {
+                // New scene geometry can be orders of magnitude more expensive than the previous
+                // model; reset to the conservative initial chunk budget to avoid GPU TDR hangs.
+                m_progressiveChunkPixels = MAX_PROGRESSIVE_CHUNK_PIXELS;
+            }
             m_progressiveStamp = task.stamp;
             m_progressiveWidth = task.width;
             m_progressiveHeight = task.height;

@@ -943,6 +943,7 @@ namespace gladius::ui
                     !m_pendingRenderCommands.empty() ||
                     m_neutralRenderScheduler.hasInFlightSubmissions() ||
                     m_neutralBoundsSubmission != nullptr ||
+                    m_neutralSdfPrebakeSubmission != nullptr ||
                     m_renderUpdateCoordinator.interactionState() ==
                       async_rendering::RenderInteractionState::CameraInteracting)
                 {
@@ -1023,6 +1024,16 @@ namespace gladius::ui
     {
         m_renderBackendSession.reset();
         m_dirty = true;
+        if (m_neutralSdfPrebakeSubmission)
+        {
+            m_neutralSdfPrebakeSubmission->requestCancellation();
+            m_neutralSdfPrebakeSubmission.reset();
+            m_neutralSdfPrebakeTask.reset();
+        }
+        if (m_neutralFramePresenter)
+        {
+            m_neutralFramePresenter->release();
+        }
         queueRenderDecision(m_renderUpdateCoordinator.notifyStructuralModelChanged());
         m_neutralRenderScheduler.requestCancellationForStale();
     }

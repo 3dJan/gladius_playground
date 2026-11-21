@@ -835,7 +835,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let max_distance = frame.eye_and_max_distance.w;
 
     let row_stride = select(width, u32(frame.first_row_and_count.z), frame.first_row_and_count.z > 0.0f);
-    let pixel_index = global_id.y * row_stride + global_id.x;
+    let output_row_offset = u32(frame.first_row_and_count.w);
+    let pixel_index = (global_id.y + output_row_offset) * row_stride + global_id.x;
     let background = vec3<f32>(0.1f);
     recordMetric(0u, 1u);
 

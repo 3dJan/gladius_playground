@@ -16,6 +16,9 @@
 #include <optional>
 #include <string>
 #include <stdexcept>
+#ifndef __EMSCRIPTEN__
+#include <thread>
+#endif
 #include <utility>
 #include <vector>
 
@@ -694,6 +697,7 @@ fn sample_precomputed_sdf(position: vec3<f32>) -> f32 {
             std::shared_ptr<WebGPUFrameBufferSet> bufferLease;
             WebGPUFrameBufferSet & buffers;
             compute::ComputeCompletionStatus status{compute::ComputeCompletionStatus::Pending};
+            bool subbandInFlight{false};
             std::optional<compute::FrameResult> result;
             std::optional<compute::FrameMetrics> metrics;
             /// GPU compute-pass duration in milliseconds from timestamp queries;
@@ -1028,7 +1032,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                         }
                         return;
                     }
-                    if (!m_frameSubmitted)
+                    if (!m_frameSubmitted || (m_skipCpuReadback && m_nextSubbandRow < m_rowCount))
                     {
                         WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
                         submitFrameWithPipeline();
@@ -1129,9 +1133,18 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
             void submitFrameWithPipeline()
             {
-                if (m_frameSubmitted)
+                if (!m_skipCpuReadback && m_frameSubmitted)
                 {
                     return;
+                }
+                if (m_skipCpuReadback)
+                {
+                    std::scoped_lock lock{m_state->mutex};
+                    if (m_state->status != compute::ComputeCompletionStatus::Pending ||
+                        m_state->subbandInFlight || m_nextSubbandRow >= m_rowCount)
+                    {
+                        return;
+                    }
                 }
 
                 auto const pipelineHandles = m_pipeline->getReadyHandles();
@@ -1147,6 +1160,117 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     return;
                 }
 
+                auto const state = m_state;
+                auto const & queue = m_context->getQueue();
+                if (m_skipCpuReadback)
+                {
+                    bool const hasHeavyPrimitives =
+                      m_scenePayloads &&
+                      (m_scenePayloads->hasMeshPayloads() || m_scenePayloads->hasBeamPayloads());
+                    bool precomputedSdfValid = false;
+                    {
+                        std::scoped_lock sdfLock{m_precomputedSdf->mutex};
+                        precomputedSdfValid = m_precomputedSdf->valid;
+                    }
+                    // Keep individual GPU dispatches well below the OS/driver TDR timeout
+                    // (~2s on Linux amdgpu), especially for unbaked mesh/beam-lattice scenes.
+                    std::uint32_t const maxPixelsPerDispatch =
+                      (hasHeavyPrimitives && !precomputedSdfValid) ? 2048u : 32768u;
+                    std::uint32_t const rowsPerSubband =
+                      std::max(1u, maxPixelsPerDispatch / std::max(m_width, 1u));
+                    std::uint32_t const subbandOffset = m_nextSubbandRow;
+                    std::uint32_t const subbandRows =
+                      std::min(rowsPerSubband, m_rowCount - subbandOffset);
+                    bool const isFinalSubband = (subbandOffset + subbandRows) >= m_rowCount;
+
+                    auto const dispatchSize =
+                      calculateSliceDispatchSize(m_width, subbandRows, m_workgroupShape);
+                    if (!dispatchSize.has_value())
+                    {
+                        throw std::logic_error("WebGPU frame sub-band dispatch dimensions became invalid");
+                    }
+
+                    FrameUniforms subbandUniforms = m_baseUniforms;
+                    subbandUniforms.firstRowAndCount[0] =
+                      static_cast<float>(m_firstRow + subbandOffset);
+                    subbandUniforms.firstRowAndCount[1] = static_cast<float>(subbandRows);
+                    subbandUniforms.firstRowAndCount[2] = static_cast<float>(m_rowStridePixels);
+                    subbandUniforms.firstRowAndCount[3] = static_cast<float>(subbandOffset);
+                    m_state->buffers.writeUniforms(queue, subbandUniforms);
+
+                    auto const encoder = m_context->getDevice().CreateCommandEncoder();
+                    auto const computePass = encoder.BeginComputePass();
+                    computePass.SetPipeline(pipelineHandles->computePipeline);
+                    computePass.SetBindGroup(0u, m_bindGroup);
+                    computePass.DispatchWorkgroups(
+                      dispatchSize->workgroupsX, dispatchSize->workgroupsY);
+                    computePass.End();
+                    encoder.CopyBufferToBuffer(m_state->buffers.getOutputBuffer(),
+                                               0u,
+                                               m_state->buffers.getGpuFenceBuffer(),
+                                               0u,
+                                               sizeof(std::uint32_t));
+                    auto const commandBuffer = encoder.Finish();
+                    {
+                        std::scoped_lock lock{state->mutex};
+                        if (!state->submittedAt.has_value())
+                        {
+                            state->submittedAt = std::chrono::steady_clock::now();
+                        }
+                        state->subbandInFlight = true;
+                    }
+                    m_nextSubbandRow = subbandOffset + subbandRows;
+                    m_frameSubmitted = true;
+                    queue.Submit(1u, &commandBuffer);
+
+                    auto const bytesPerRow =
+                      m_rowStridePixels * static_cast<std::uint32_t>(sizeof(std::uint32_t));
+                    auto const rowCount = m_rowCount;
+                    auto const width = m_width;
+                    auto const height = m_height;
+                    state->buffers.getGpuFenceBuffer().MapAsync(
+                      wgpu::MapMode::Read,
+                      0u,
+                      sizeof(std::uint32_t),
+#ifdef __EMSCRIPTEN__
+                      wgpu::CallbackMode::AllowSpontaneous,
+#else
+                      wgpu::CallbackMode::AllowProcessEvents,
+#endif
+                      [state, width, height, bytesPerRow, rowCount, isFinalSubband](
+                        wgpu::MapAsyncStatus const fenceStatus,
+                        wgpu::StringView const message)
+                      {
+                          std::scoped_lock lock{state->mutex};
+                          state->subbandInFlight = false;
+                          if (fenceStatus != wgpu::MapAsyncStatus::Success)
+                          {
+                              state->status = compute::ComputeCompletionStatus::Failed;
+                              state->errorMessage =
+                                "WebGPU zero-copy frame fence failed: " + toString(message);
+                              return;
+                          }
+                          state->buffers.getGpuFenceBuffer().Unmap();
+                          if (!isFinalSubband)
+                          {
+                              return;
+                          }
+                          auto gpuHandle = std::make_shared<WebGPUGpuOutputFrame>(
+                            WebGPUGpuOutputFrame{.outputBuffer = state->buffers.getOutputBuffer(),
+                                                 .bytesPerRow = bytesPerRow,
+                                                 .rowCount = rowCount,
+                                                 .bufferLease = state->bufferLease});
+                          state->result = compute::FrameResult{.width = width,
+                                                               .height = height,
+                                                               .gpuOutputHandle = std::move(gpuHandle)};
+                          auto const now = std::chrono::steady_clock::now();
+                          state->workDoneAt = now;
+                          state->readbackAt = now;
+                          state->status = compute::ComputeCompletionStatus::Succeeded;
+                      });
+                    return;
+                }
+
                 auto const dispatchSize =
                   calculateSliceDispatchSize(m_width, m_rowCount, m_workgroupShape);
                 if (!dispatchSize.has_value())
@@ -1154,7 +1278,6 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     throw std::logic_error("WebGPU frame dispatch dimensions became invalid");
                 }
 
-                auto const state = m_state;
                 auto const encoder = m_context->getDevice().CreateCommandEncoder();
                 if (m_collectMetrics)
                 {
@@ -1202,61 +1325,18 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                0u,
                                                FRAME_METRICS_SIZE_BYTES);
                 }
-                if (!m_skipCpuReadback)
-                {
-                    encoder.CopyBufferToBuffer(m_state->buffers.getOutputBuffer(),
-                                               0u,
-                                               m_state->buffers.getStagingBuffer(),
-                                               0u,
-                                               state->buffers.getOutputSizeBytes());
-                }
+                encoder.CopyBufferToBuffer(m_state->buffers.getOutputBuffer(),
+                                           0u,
+                                           m_state->buffers.getStagingBuffer(),
+                                           0u,
+                                           state->buffers.getOutputSizeBytes());
                 auto const commandBuffer = encoder.Finish();
-                auto const & queue = m_context->getQueue();
                 {
                     std::scoped_lock lock{state->mutex};
                     state->submittedAt = std::chrono::steady_clock::now();
                 }
-                if (m_skipCpuReadback)
-                {
-                    auto const bytesPerRow = m_rowStridePixels * static_cast<std::uint32_t>(sizeof(std::uint32_t));
-                    auto const rowCount = m_rowCount;
-                    auto const width = m_width;
-                    auto const height = m_height;
-                    queue.OnSubmittedWorkDone(
-#ifdef __EMSCRIPTEN__
-                      wgpu::CallbackMode::AllowSpontaneous,
-#else
-                      wgpu::CallbackMode::AllowProcessEvents,
-#endif
-                      [state, width, height, bytesPerRow, rowCount](
-                        wgpu::QueueWorkDoneStatus const workDoneStatus,
-                        wgpu::StringView const message)
-                      {
-                          std::scoped_lock lock{state->mutex};
-                          if (workDoneStatus != wgpu::QueueWorkDoneStatus::Success)
-                          {
-                              state->status = compute::ComputeCompletionStatus::Failed;
-                              state->errorMessage =
-                                "WebGPU zero-copy frame submission failed: " + toString(message);
-                              return;
-                          }
-                          auto gpuHandle = std::make_shared<WebGPUGpuOutputFrame>(
-                            WebGPUGpuOutputFrame{.outputBuffer = state->buffers.getOutputBuffer(),
-                                                 .bytesPerRow = bytesPerRow,
-                                                 .rowCount = rowCount,
-                                                 .bufferLease = state->bufferLease});
-                          state->result = compute::FrameResult{.width = width,
-                                                               .height = height,
-                                                               .gpuOutputHandle = std::move(gpuHandle)};
-                          auto const now = std::chrono::steady_clock::now();
-                          state->workDoneAt = now;
-                          state->readbackAt = now;
-                          state->status = compute::ComputeCompletionStatus::Succeeded;
-                      });
-                    queue.Submit(1u, &commandBuffer);
-                    m_frameSubmitted = true;
-                    return;
-                }
+                queue.Submit(1u, &commandBuffer);
+                m_frameSubmitted = true;
                 if (m_collectGpuTiming)
                 {
                     queue.OnSubmittedWorkDone(
@@ -1276,8 +1356,6 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                           }
                       });
                 }
-                queue.Submit(1u, &commandBuffer);
-                m_frameSubmitted = true;
 
                 auto const collectTimestamps = m_collectGpuTiming && m_state->buffers.hasTimestampBuffers();
                 auto const collectMetrics = m_collectMetrics;
@@ -1552,14 +1630,18 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                0.0f};
                 }
 
+                m_firstRow = request.firstRow;
+                m_baseUniforms = uniforms;
+                m_nextSubbandRow = 0u;
                 m_state->buffers.resize(m_context->getDevice(),
                                         request.width,
                                         rowCount,
                                         request.parameterValues.size(),
                                         m_rowStridePixels);
-                m_state->buffers.writeUniforms(
-                  m_context->getQueue(),
-                  uniforms);
+                if (!m_skipCpuReadback)
+                {
+                    m_state->buffers.writeUniforms(m_context->getQueue(), uniforms);
+                }
                 m_state->buffers.writeParametersIfChanged(m_context->getQueue(),
                                                           request.parameterValues,
                                                           options.sceneResourceId,
@@ -1577,6 +1659,10 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                                       request.imagePayloadTable);
                 }
                 m_state->buffers.ensureMetricsBuffers(m_context->getDevice());
+                if (m_skipCpuReadback)
+                {
+                    m_state->buffers.ensureGpuFenceBuffer(m_context->getDevice());
+                }
                 if (m_collectGpuTiming && m_context->supportsTimestampQueries())
                 {
                     m_state->buffers.ensureTimestampBuffers(m_context->getDevice());
@@ -1645,8 +1731,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             std::shared_ptr<WebGPUComputeContext> m_context;
             std::uint32_t m_width{};
             std::uint32_t m_height{};
+            std::uint32_t m_firstRow{};
             std::uint32_t m_rowCount{};
             std::uint32_t m_rowStridePixels{};
+            std::uint32_t m_nextSubbandRow{};
+            FrameUniforms m_baseUniforms{};
             compute::WorkgroupShape m_workgroupShape{};
             std::shared_ptr<WebGPUFramePipelineCache> m_pipelineCache;
             std::shared_ptr<WebGPUFramePipelineCache::Pipeline> m_pipeline;
@@ -1762,6 +1851,11 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
             void wait() override
             {
+#ifdef __EMSCRIPTEN__
+                // Browser callbacks are delivered by the event loop. Waiting here would block
+                // that loop and prevent the prebake completion callback from ever running.
+                return;
+#else
                 while (getStatus() == compute::RenderSubmissionStatus::Pending)
                 {
                     progress();
@@ -1770,6 +1864,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                         std::this_thread::yield();
                     }
                 }
+#endif
             }
 
             [[nodiscard]] std::optional<compute::RenderFrame> takeFrame() override
@@ -1788,6 +1883,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             {
                 std::mutex mutex;
                 compute::RenderSubmissionStatus status{compute::RenderSubmissionStatus::Pending};
+                bool slabInFlight{false};
                 std::string errorMessage;
             };
             void prepare(SdfPrebakeRequest request)
@@ -1839,6 +1935,7 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                                   sizeof(prebakeDispatchUniforms));
 
                 m_bufferLease->resize(device, 1u, 1u, request.parameters.size());
+                m_bufferLease->ensureGpuFenceBuffer(device);
                 m_bufferLease->writeParameters(queue, request.parameters);
                 if (!m_scenePayloads)
                 {
@@ -1924,9 +2021,17 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
 
             void submitIfPipelineReady()
             {
-                if (m_submitted || !m_pipeline)
+                if (!m_pipeline)
                 {
                     return;
+                }
+                {
+                    std::scoped_lock lock{m_state->mutex};
+                    if (m_state->status != compute::RenderSubmissionStatus::Pending ||
+                        m_state->slabInFlight)
+                    {
+                        return;
+                    }
                 }
                 auto const handles = m_pipeline->getReadyHandles();
                 if (!handles.has_value())
@@ -1948,54 +2053,102 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                     }
                 }
 
+                bool const hasHeavyPrimitives =
+                  m_scenePayloads &&
+                  (m_scenePayloads->hasMeshPayloads() || m_scenePayloads->hasBeamPayloads());
+                std::uint32_t const kSlicesPerSlab = hasHeavyPrimitives ? 2u : 8u;
+                std::uint32_t const slabStartZ = m_nextSliceZ;
+                if (slabStartZ >= m_gridSize)
+                {
+                    return;
+                }
+                std::uint32_t const slabSlices = std::min(kSlicesPerSlab, m_gridSize - slabStartZ);
+                bool const isFinalSlab = (slabStartZ + slabSlices) >= m_gridSize;
+
                 WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
+                auto const & queue = m_context->getQueue();
+                PrecomputedSdfUniforms slabUniforms = m_uniforms;
+                slabUniforms.bboxMaxAndValid[3] = 0.0f;
+                slabUniforms.gridDims[3] = slabStartZ;
+                queue.WriteBuffer(
+                  m_precomputedSdf->uniformBuffer, 0u, &slabUniforms, sizeof(slabUniforms));
+
                 auto const encoder = m_context->getDevice().CreateCommandEncoder();
                 auto const pass = encoder.BeginComputePass();
                 pass.SetPipeline(handles->computePipeline);
                 pass.SetBindGroup(0u, m_bindGroup);
-                auto const groups = (m_gridSize + 3u) / 4u;
-                pass.DispatchWorkgroups(groups, groups, groups);
+                auto const groupsXY = (m_gridSize + 3u) / 4u;
+                auto const groupsZ = (slabSlices + 3u) / 4u;
+                pass.DispatchWorkgroups(groupsXY, groupsXY, groupsZ);
                 pass.End();
+                encoder.CopyBufferToBuffer(m_bufferLease->getOutputBuffer(),
+                                           0u,
+                                           m_bufferLease->getGpuFenceBuffer(),
+                                           0u,
+                                           sizeof(std::uint32_t));
                 auto const commands = encoder.Finish();
-                auto const & queue = m_context->getQueue();
-                m_submitted = true;
+                {
+                    std::scoped_lock lock{m_state->mutex};
+                    m_state->slabInFlight = true;
+                }
+                m_nextSliceZ = slabStartZ + slabSlices;
+                queue.Submit(1u, &commands);
 
                 auto const state = m_state;
+                auto const bufferLease = m_bufferLease;
                 auto const precomputedSdf = m_precomputedSdf;
                 auto const context = m_context;
                 auto const epoch = m_epoch;
-                auto const uniforms = m_uniforms;
+                auto const finalUniforms = m_uniforms;
 #ifdef __EMSCRIPTEN__
                 auto const callbackMode = wgpu::CallbackMode::AllowSpontaneous;
 #else
                 auto const callbackMode = wgpu::CallbackMode::AllowProcessEvents;
 #endif
-                queue.OnSubmittedWorkDone(
+                bufferLease->getGpuFenceBuffer().MapAsync(
+                  wgpu::MapMode::Read,
+                  0u,
+                  sizeof(std::uint32_t),
                   callbackMode,
-                  [state, precomputedSdf, context, epoch, uniforms](
-                    wgpu::QueueWorkDoneStatus const status,
+                  [state, bufferLease, precomputedSdf, context, epoch, finalUniforms, isFinalSlab](
+                    wgpu::MapAsyncStatus const status,
                     wgpu::StringView const message)
                   {
-                      if (status == wgpu::QueueWorkDoneStatus::Success)
+                      if (status == wgpu::MapAsyncStatus::Success)
                       {
+                          bufferLease->getGpuFenceBuffer().Unmap();
+                          if (isFinalSlab)
                           {
-                              std::scoped_lock sdfLock{precomputedSdf->mutex};
-                              if (precomputedSdf->generationEpoch == epoch && context && context->isValid())
                               {
-                                  precomputedSdf->valid = true;
-                                  context->getQueue().WriteBuffer(
-                                    precomputedSdf->uniformBuffer, 0u, &uniforms, sizeof(uniforms));
+                                  std::scoped_lock sdfLock{precomputedSdf->mutex};
+                                  if (precomputedSdf->generationEpoch == epoch && context &&
+                                      context->isValid())
+                                  {
+                                      precomputedSdf->valid = true;
+                                      context->getQueue().WriteBuffer(
+                                        precomputedSdf->uniformBuffer,
+                                        0u,
+                                        &finalUniforms,
+                                        sizeof(finalUniforms));
+                                  }
+                              }
+                              std::scoped_lock lock{state->mutex};
+                              state->slabInFlight = false;
+                              if (state->status == compute::RenderSubmissionStatus::Pending)
+                              {
+                                  state->status = compute::RenderSubmissionStatus::Succeeded;
                               }
                           }
-                          std::scoped_lock lock{state->mutex};
-                          if (state->status == compute::RenderSubmissionStatus::Pending)
+                          else
                           {
-                              state->status = compute::RenderSubmissionStatus::Succeeded;
+                              std::scoped_lock lock{state->mutex};
+                              state->slabInFlight = false;
                           }
                       }
                       else
                       {
                           std::scoped_lock lock{state->mutex};
+                          state->slabInFlight = false;
                           if (state->status == compute::RenderSubmissionStatus::Pending)
                           {
                               state->status = compute::RenderSubmissionStatus::Failed;
@@ -2004,7 +2157,6 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                           }
                       }
                   });
-                queue.Submit(1u, &commands);
             }
 
             std::shared_ptr<WebGPUComputeContext> m_context;
@@ -2016,8 +2168,8 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
             wgpu::BindGroup m_bindGroup;
             PrecomputedSdfUniforms m_uniforms{};
             std::uint32_t m_gridSize{128u};
+            std::uint32_t m_nextSliceZ{0u};
             std::uint64_t m_epoch{0u};
-            bool m_submitted{false};
             std::shared_ptr<PrebakeStatusState> m_state;
         };
     }

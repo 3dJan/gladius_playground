@@ -645,13 +645,11 @@ namespace gladius
                 }, webgpuError.c_str());
             }
 #endif
-        }
 #ifndef __EMSCRIPTEN__
-        // Present outside DeviceLock so VSync wait never starves background WebGPU compute work,
-        // then pump completed callbacks that finished while waiting for VSync.
-        m_webgpuSurface.Present();
-        m_webgpuContext->processEvents();
+            m_webgpuSurface.Present();
+            m_webgpuContext->processEvents();
 #endif
+        }
     }
 #endif
 

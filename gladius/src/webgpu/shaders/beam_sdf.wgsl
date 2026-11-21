@@ -99,7 +99,12 @@ fn beam_sd_to_beam(position: vec3<f32>,
     return surface_dist;
 }
 
-const BEAM_BVH_STACK_SIZE: u32 = 32u;
+const BEAM_BVH_STACK_SIZE: u32 = 64u;
+
+fn beam_sq_distance_to_aabb(position: vec3<f32>, bb_min: vec3<f32>, bb_max: vec3<f32>) -> f32 {
+    let d = max(bb_min - position, max(position - bb_max, vec3<f32>(0.0)));
+    return dot(d, d);
+}
 
 /// Core BVH traversal over the beam lattice payload; returns min signed distance.
 fn gladius_beam_sdf_core(payload_base: u32, position: vec3<f32>) -> f32 {
@@ -137,10 +142,11 @@ fn gladius_beam_sdf_core(payload_base: u32, position: vec3<f32>) -> f32 {
         let bb_min = beam_load_vec3(payload_base, node_base);
         let bb_max = beam_load_vec3(payload_base, node_base + 3u);
 
-        // Distance to AABB (matches OpenCL bbBox helper).
-        let d = max(bb_min - position, max(position - bb_max, vec3<f32>(0.0)));
-        let bb_dist = length(d);
-        if (bb_dist > min_dist) {
+        let bb_sq_dist = beam_sq_distance_to_aabb(position, bb_min, bb_max);
+        if (min_dist > 0.0 && bb_sq_dist > min_dist * min_dist) {
+            continue;
+        }
+        if (min_dist <= 0.0 && bb_sq_dist > 0.0) {
             continue;
         }
 
@@ -182,16 +188,38 @@ fn gladius_beam_sdf_core(payload_base: u32, position: vec3<f32>) -> f32 {
                 i = i + 1u;
             }
         } else {
-            // Push right first so left is processed first (depth-first).
-            if (right_child >= 0i && u32(right_child) < node_count &&
-                stack_ptr < BEAM_BVH_STACK_SIZE - 1u) {
-                stack[stack_ptr] = u32(right_child);
-                stack_ptr = stack_ptr + 1u;
-            }
-            if (left_child >= 0i && u32(left_child) < node_count &&
-                stack_ptr < BEAM_BVH_STACK_SIZE) {
-                stack[stack_ptr] = u32(left_child);
-                stack_ptr = stack_ptr + 1u;
+            let left_valid = left_child >= 0i && u32(left_child) < node_count;
+            let right_valid = right_child >= 0i && u32(right_child) < node_count;
+            if (left_valid && right_valid && stack_ptr < BEAM_BVH_STACK_SIZE - 2u) {
+                let left_base = bvh_offset + u32(left_child) * 10u;
+                let right_base = bvh_offset + u32(right_child) * 10u;
+                let left_sq = beam_sq_distance_to_aabb(position,
+                                                      beam_load_vec3(payload_base, left_base),
+                                                      beam_load_vec3(payload_base, left_base + 3u));
+                let right_sq = beam_sq_distance_to_aabb(position,
+                                                       beam_load_vec3(payload_base, right_base),
+                                                       beam_load_vec3(payload_base, right_base + 3u));
+                // Push farther child first so the nearer child is popped and tightens min_dist first.
+                if (left_sq < right_sq) {
+                    stack[stack_ptr] = u32(right_child);
+                    stack_ptr = stack_ptr + 1u;
+                    stack[stack_ptr] = u32(left_child);
+                    stack_ptr = stack_ptr + 1u;
+                } else {
+                    stack[stack_ptr] = u32(left_child);
+                    stack_ptr = stack_ptr + 1u;
+                    stack[stack_ptr] = u32(right_child);
+                    stack_ptr = stack_ptr + 1u;
+                }
+            } else {
+                if (right_valid && stack_ptr < BEAM_BVH_STACK_SIZE - 1u) {
+                    stack[stack_ptr] = u32(right_child);
+                    stack_ptr = stack_ptr + 1u;
+                }
+                if (left_valid && stack_ptr < BEAM_BVH_STACK_SIZE) {
+                    stack[stack_ptr] = u32(left_child);
+                    stack_ptr = stack_ptr + 1u;
+                }
             }
         }
     }

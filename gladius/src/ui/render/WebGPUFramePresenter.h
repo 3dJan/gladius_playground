@@ -57,6 +57,7 @@ namespace gladius::ui::async_rendering
         std::optional<compute::RenderFreshnessStamp> m_freshness;
         std::optional<compute::RenderFrame> m_previewSeedFrame;
         std::optional<FramePresentationCandidate> m_previewSeedCandidate;
+        std::shared_ptr<void> m_lastGpuOutputHandle;
         std::vector<unsigned char> m_uploadData;
         std::vector<std::uint32_t> m_clearData;
         std::uint64_t m_presentCount{};
