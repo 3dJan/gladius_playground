@@ -264,6 +264,7 @@ namespace gladius::nodes
         FunctionCall * createFunctionCallNode(ResourceId functionId, Model & sourceModel);
 
         void setLogger(events::SharedLogger logger);
+        [[nodiscard]] events::SharedLogger getLogger() const;
 
         void setResourceId(ResourceId resourceId);
         [[nodiscard]] ResourceId getResourceId() const;

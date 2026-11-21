@@ -130,7 +130,10 @@ namespace gladius
 
         /// Parse a multi-function code listing and create/update function graphs.
         /// Each function must be in the format produced by convertProgramToSnippet.
-        /// Throws std::runtime_error on parse errors or dangling references.
+        /// The listing is applied all-or-nothing: if any function cannot be converted,
+        /// the assembly is left unchanged. Throws std::runtime_error in that case, with
+        /// the first conversion error. Use ProgramSnippetApplier::apply to get the
+        /// per-function diagnostics instead of an exception.
         static void setProgramSnippet(std::string const & program,
                                       nodes::Assembly & assembly,
                                       ExpressionParser & parser);

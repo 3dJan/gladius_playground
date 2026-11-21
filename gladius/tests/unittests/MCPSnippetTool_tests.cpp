@@ -12,8 +12,10 @@
 #include "ExpressionToGraphConverter.h"
 #include "FunctionArgument.h"
 #include "nodes/Assembly.h"
+#include "nodes/DerivedNodes.h"
 #include "nodes/GraphFlattener.h"
 #include "nodes/Model.h"
+#include "ProgramSnippetApplier.h"
 
 namespace gladius::tests
 {
@@ -1419,5 +1421,156 @@ namespace gladius::tests
         EXPECT_EQ(argList[0].second->getTypeIndex(), nodes::ParameterTypeIndex::Float3);
         EXPECT_EQ(argList[1].first, "height");
     }
+
+    // =====================================================================================
+    // Atomicity: a function that fails to convert must keep its previous graph
+    // =====================================================================================
+
+    static const char * const kValidProgram =
+      "// Function: sphere (ID: 10)\n"
+      "float sphere_10(vec3 pos) {\n"
+      "  return length(in_pos) - 5.0;\n"
+      "}\n"
+      "\n"
+      "// Function: combo (ID: 20)\n"
+      "float combo_20(vec3 pos) {\n"
+      "  return sphere_10(in_pos);\n"
+      "}\n";
+
+    static size_t countFunctionCalls(nodes::Model & model)
+    {
+        size_t count = 0;
+        for (auto & [nodeId, node] : model)
+        {
+            if (dynamic_cast<nodes::FunctionCall *>(node.get()) != nullptr)
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_OneFunctionWithBadBody_KeepsPreviousGraph)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+        ExpressionToGraphConverter::setProgramSnippet(kValidProgram, assembly, parser);
+
+        auto combo = assembly.findModel(20);
+        ASSERT_NE(combo, nullptr);
+        auto const callsBefore = countFunctionCalls(*combo);
+        ASSERT_GT(callsBefore, 0u) << "combo should call sphere_10 before the failing update";
+
+        // combo's body is unparseable, sphere stays valid
+        std::string const brokenProgram =
+          "// Function: sphere (ID: 10)\n"
+          "float sphere_10(vec3 pos) {\n"
+          "  return length(in_pos) - 7.0;\n"
+          "}\n"
+          "\n"
+          "// Function: combo (ID: 20)\n"
+          "float combo_20(vec3 pos) {\n"
+          "  return sphere_10(pos.y +;\n"
+          "}\n";
+
+        auto const sphere = assembly.findModel(10);
+        ASSERT_NE(sphere, nullptr);
+
+        auto const report = ProgramSnippetApplier::apply(brokenProgram, assembly, parser);
+
+        EXPECT_TRUE(report.parsed.empty()) << "Nothing may be committed on partial failure";
+        ASSERT_EQ(report.failed.size(), 1u);
+        EXPECT_EQ(report.failed[0].resourceId, 20u);
+        EXPECT_EQ(report.failed[0].displayName, "combo");
+        EXPECT_FALSE(report.failed[0].message.empty());
+
+        // The failing function must not be left as a hollow begin/end shell.
+        auto const callsAfter = countFunctionCalls(*combo);
+        EXPECT_EQ(callsAfter, callsBefore)
+          << "combo must keep its previous graph when conversion fails";
+
+        // The function that did parse is rolled back as well (all or nothing).
+        EXPECT_EQ(sphere->getDisplayName(), "sphere");
+        EXPECT_NE(sphere->getEndNode(), nullptr);
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_UnqualifiedCrossFunctionCall_ReportsQualifiedForm)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        // sphere is defined in the same listing, but the call is not qualified with its ID
+        std::string const program =
+          "// Function: sphere (ID: 10)\n"
+          "float sphere_10(vec3 pos) {\n"
+          "  return length(in_pos) - 5.0;\n"
+          "}\n"
+          "\n"
+          "// Function: combo (ID: 20)\n"
+          "float combo_20(vec3 pos) {\n"
+          "  return sphere(in_pos);\n"
+          "}\n";
+
+        auto const report = ProgramSnippetApplier::apply(program, assembly, parser);
+
+        ASSERT_EQ(report.failed.size(), 1u);
+        EXPECT_EQ(report.failed[0].resourceId, 20u);
+        EXPECT_NE(report.failed[0].message.find("sphere_10"), std::string::npos)
+          << "Error must name the qualified call form, got: " << report.failed[0].message;
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_UnsupportedNodeMarker_ReportsSkippedFunction)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+        ExpressionToGraphConverter::setProgramSnippet(kValidProgram, assembly, parser);
+
+        std::string const programWithMarker =
+          "// Function: combo (ID: 20)\n"
+          "float combo_20(vec3 pos) {\n"
+          "  /* unsupported: Bevel */\n"
+          "  return sphere_10(in_pos);\n"
+          "}\n";
+
+        auto const report = ProgramSnippetApplier::apply(programWithMarker, assembly, parser);
+
+        ASSERT_EQ(report.skipped.size(), 1u);
+        EXPECT_EQ(report.skipped[0].resourceId, 20u);
+        EXPECT_FALSE(report.skipped[0].message.empty());
+        EXPECT_GT(countFunctionCalls(*assembly.findModel(20)), 0u)
+          << "Skipped function must keep its previous graph";
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_AllFunctionsValid_ReportsNoFailures)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        auto const report = ProgramSnippetApplier::apply(kValidProgram, assembly, parser);
+
+        EXPECT_TRUE(report.isComplete());
+        EXPECT_TRUE(report.failed.empty());
+        EXPECT_TRUE(report.skipped.empty());
+        EXPECT_EQ(report.parsed.size(), 2u);
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_NothingApplicable_Throws)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        std::string const program =
+          "// Function: combo (ID: 20)\n"
+          "float combo_20(vec3 pos) {\n"
+          "  return sphere_10(pos.y +;\n"
+          "}\n";
+
+        EXPECT_THROW(ProgramSnippetApplier::applyOrThrow(program, assembly, parser),
+                     std::runtime_error);
+        // The listing only described one never-applied function, so the assembly must
+        // look exactly like it did before the call.
+        EXPECT_EQ(assembly.findModel(20), nullptr) << "Failed function must not be created";
+    }
+
 
 } // namespace gladius::tests

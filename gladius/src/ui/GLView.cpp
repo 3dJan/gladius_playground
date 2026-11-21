@@ -37,7 +37,11 @@ CMRC_DECLARE(gladius_resources);
 #if defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
 #endif
-#if (defined(GLADIUS_UI_BACKEND_WEBGPU) && !defined(__EMSCRIPTEN__)) || defined(_WIN32)
+#if defined(__APPLE__)
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include "WebGpuSurfaceMac.h"
+#endif
+#if (defined(GLADIUS_UI_BACKEND_WEBGPU) && !defined(__EMSCRIPTEN__)) || defined(_WIN32) || defined(__APPLE__)
 #include <GLFW/glfw3native.h>
 #endif
 #ifdef __EMSCRIPTEN__
@@ -51,6 +55,7 @@ CMRC_DECLARE(gladius_resources);
 #include <filesystem>
 #include <fmt/format.h>
 #include <iostream>
+#include <string_view>
 #include <sago/platform_folders.h>
 #include <thread>
 #include <lodepng.h>
@@ -60,8 +65,32 @@ namespace gladius
 
     GLView::GLView() = default;
 
+#if defined(__APPLE__) && defined(GLADIUS_UI_BACKEND_WEBGPU)
+    /// ImGui's GLFW backend refreshes the monitor list every frame. On macOS a
+    /// monitor can temporarily lose its NSScreen association, which makes GLFW
+    /// report the two platform errors below before continuing with defaults.
+    /// They are harmless log noise, so they are filtered out.
+    bool isBenignMacMonitorError(int error, const char * description)
+    {
+        if (error != GLFW_PLATFORM_ERROR || description == nullptr)
+        {
+            return false;
+        }
+
+        std::string_view const message{description};
+        return message.find("Cannot query workarea without screen") != std::string_view::npos ||
+               message.find("Cannot query content scale without screen") != std::string_view::npos;
+    }
+#endif
+
     void errorCallback(int error, const char * description)
     {
+#if defined(__APPLE__) && defined(GLADIUS_UI_BACKEND_WEBGPU)
+        if (isBenignMacMonitorError(error, description))
+        {
+            return;
+        }
+#endif
         // Validate description pointer to prevent potential buffer overruns
         if (description != nullptr)
         {
@@ -72,6 +101,57 @@ namespace gladius
             std::cerr << "Error: " << error << " (no description)\n";
         }
     }
+
+#if (defined(__EMSCRIPTEN__) || defined(__APPLE__)) && defined(GLADIUS_UI_BACKEND_WEBGPU)
+    /**
+     * @brief Scale finalized draw data from logical units to physical backbuffer pixels.
+     *
+     * The bundled WebGPU backend builds its orthographic projection from
+     * DisplayPos/DisplaySize only, while it derives viewport, scissor and clip
+     * rects from FramebufferScale * DisplaySize. On a HiDPI display that leaves
+     * the UI in the top left quarter of the window, so the draw data is scaled
+     * uniformly and FramebufferScale is reset to one.
+     */
+    void scaleDrawDataToFramebuffer(ImDrawData * const drawData)
+    {
+        if (drawData == nullptr)
+        {
+            return;
+        }
+
+        auto const framebufferScale = drawData->FramebufferScale;
+        if (framebufferScale.x == 1.0f && framebufferScale.y == 1.0f)
+        {
+            return;
+        }
+
+        drawData->DisplayPos.x *= framebufferScale.x;
+        drawData->DisplayPos.y *= framebufferScale.y;
+        drawData->DisplaySize.x *= framebufferScale.x;
+        drawData->DisplaySize.y *= framebufferScale.y;
+
+        for (int listIndex = 0; listIndex < drawData->CmdLists.Size; ++listIndex)
+        {
+            ImDrawList * const drawList = drawData->CmdLists[listIndex];
+            for (int vertexIndex = 0; vertexIndex < drawList->VtxBuffer.Size; ++vertexIndex)
+            {
+                ImVec2 & position = drawList->VtxBuffer[vertexIndex].pos;
+                position.x *= framebufferScale.x;
+                position.y *= framebufferScale.y;
+            }
+            for (int commandIndex = 0; commandIndex < drawList->CmdBuffer.Size; ++commandIndex)
+            {
+                ImVec4 & clipRect = drawList->CmdBuffer[commandIndex].ClipRect;
+                clipRect.x *= framebufferScale.x;
+                clipRect.y *= framebufferScale.y;
+                clipRect.z *= framebufferScale.x;
+                clipRect.w *= framebufferScale.y;
+            }
+        }
+
+        drawData->FramebufferScale = ImVec2(1.0f, 1.0f);
+    }
+#endif
 
     GLView::~GLView()
     {
@@ -272,7 +352,7 @@ namespace gladius
             GLView * view = static_cast<GLView *>(glfwGetWindowUserPointer(window));
             if (view)
             {
-                view->determineUiScale();
+                view->determineUiScale(xscale, yscale);
             }
         };
 
@@ -484,6 +564,13 @@ namespace gladius
         wgpu::SurfaceSourceWindowsHWND surfaceSource;
         surfaceSource.hinstance = GetModuleHandle(nullptr);
         surfaceSource.hwnd = glfwGetWin32Window(m_window);
+#elif defined(__APPLE__)
+        wgpu::SurfaceSourceMetalLayer surfaceSource = createMetalSurfaceSource(m_window);
+        if (!surfaceSource.layer)
+        {
+            std::cerr << "Unable to create Metal surface for WebGPU\n";
+            return;
+        }
 #else
         std::cerr << "WebGPU surfaces are not implemented for this platform\n";
         return;
@@ -809,43 +896,8 @@ namespace gladius
             }, ex.what());
 #endif
         }
-#ifdef __EMSCRIPTEN__
-        // The bundled WebGPU renderer uses FramebufferScale for its viewport and
-        // scissors but not its vertex projection. Scale finalized draw data so
-        // it fills the physical canvas while ImGui layout/input remain in CSS px.
-        auto * const drawData = ImGui::GetDrawData();
-        if (drawData != nullptr)
-        {
-            auto const framebufferScale = drawData->FramebufferScale;
-            if (framebufferScale.x != 1.0f || framebufferScale.y != 1.0f)
-            {
-                drawData->DisplayPos.x *= framebufferScale.x;
-                drawData->DisplayPos.y *= framebufferScale.y;
-                drawData->DisplaySize.x *= framebufferScale.x;
-                drawData->DisplaySize.y *= framebufferScale.y;
-
-                for (int listIndex = 0; listIndex < drawData->CmdLists.Size; ++listIndex)
-                {
-                    ImDrawList * const drawList = drawData->CmdLists[listIndex];
-                    for (int vertexIndex = 0; vertexIndex < drawList->VtxBuffer.Size; ++vertexIndex)
-                    {
-                        ImVec2 & position = drawList->VtxBuffer[vertexIndex].pos;
-                        position.x *= framebufferScale.x;
-                        position.y *= framebufferScale.y;
-                    }
-                    for (int commandIndex = 0; commandIndex < drawList->CmdBuffer.Size; ++commandIndex)
-                    {
-                        ImVec4 & clipRect = drawList->CmdBuffer[commandIndex].ClipRect;
-                        clipRect.x *= framebufferScale.x;
-                        clipRect.y *= framebufferScale.y;
-                        clipRect.z *= framebufferScale.x;
-                        clipRect.w *= framebufferScale.y;
-                    }
-                }
-
-                drawData->FramebufferScale = ImVec2(1.0f, 1.0f);
-            }
-        }
+#if (defined(__EMSCRIPTEN__) || defined(__APPLE__)) && defined(GLADIUS_UI_BACKEND_WEBGPU)
+        scaleDrawDataToFramebuffer(ImGui::GetDrawData());
 #endif
         ImGuiIO & io = ImGui::GetIO();
     #if defined(GLADIUS_UI_BACKEND_OPENGL)
@@ -937,6 +989,26 @@ namespace gladius
         {
             // Final fallback
             m_baseScale = 1.0f;
+        }
+
+        recomputeTotalScale();
+    }
+
+    void GLView::determineUiScale(float xscale, float yscale)
+    {
+        // Overload that accepts scale parameters directly (for use in GLFW callbacks)
+        // This avoids calling glfwGetWindowContentScale() within the callback,
+        // which can trigger Cocoa errors on macOS when display association is unstable
+
+        if (xscale > 0.0f && yscale > 0.0f)
+        {
+            m_baseScale = (xscale + yscale) / 2.0f;
+        }
+        else
+        {
+            // Fallback to the no-parameter version
+            determineUiScale();
+            return;
         }
 
         recomputeTotalScale();

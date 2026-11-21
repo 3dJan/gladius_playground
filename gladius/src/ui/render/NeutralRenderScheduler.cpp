@@ -176,7 +176,7 @@ namespace gladius::ui::async_rendering
                         completion.taskResult.type == RenderTaskType::ProgressiveHighQualityChunk)
                     {
                         m_progressiveNextRow = completion.frame->endRow;
-                        adaptProgressiveChunkBudget(completion.taskResult.durationNs);
+                        adaptProgressiveChunkBudget(completion.taskResult);
                         if (completion.taskResult.completedFrame)
                         {
                             resetProgressiveSequence();
@@ -214,7 +214,7 @@ namespace gladius::ui::async_rendering
         }
         m_workflow = RenderWorkflowController{};
         m_workflow.configureRealtime(config);
-        m_progressiveChunkPixels = MAX_PROGRESSIVE_CHUNK_PIXELS;
+        m_progressiveChunkPixels = MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS;
         resetProgressiveSequence();
     }
 
@@ -233,18 +233,19 @@ namespace gladius::ui::async_rendering
           m_progressiveWidth == task.width && m_progressiveHeight == task.height;
         if (!sameSequence)
         {
-            if (!m_progressiveStamp.has_value() ||
-                m_progressiveStamp->sceneEpoch != task.stamp.sceneEpoch)
-            {
-                // New scene geometry can be orders of magnitude more expensive than the previous
-                // model; reset to the conservative initial chunk budget to avoid GPU TDR hangs.
-                m_progressiveChunkPixels = MAX_PROGRESSIVE_CHUNK_PIXELS;
-            }
+            // New scene geometry can be orders of magnitude more expensive than the previous
+            // model; start such a sequence at the conservative floor instead of the
+            // resolution-sized budget to avoid GPU TDR hangs.
+            bool const sceneChanged =
+              m_progressiveStamp.has_value() && m_progressiveStamp->sceneEpoch != task.stamp.sceneEpoch;
             m_progressiveStamp = task.stamp;
             m_progressiveWidth = task.width;
             m_progressiveHeight = task.height;
             m_progressiveNextRow = 0u;
             m_progressiveSequenceActive = true;
+            m_progressiveChunkPixels =
+              sceneChanged ? INITIAL_PROGRESSIVE_CHUNK_PIXELS
+                           : budgetForResolution(task.width, task.height);
         }
 
         if (m_progressiveNextRow >= task.height)
@@ -253,32 +254,55 @@ namespace gladius::ui::async_rendering
         }
 
         auto const remainingRows = task.height - m_progressiveNextRow;
+        // Round rows up so a resolution-aware budget never yields more chunks than requested.
         auto const rowsPerChunk = std::max<std::size_t>(
           1u,
-          m_progressiveChunkPixels / static_cast<std::size_t>(task.width));
+          (m_progressiveChunkPixels + static_cast<std::size_t>(task.width) - 1u) /
+            static_cast<std::size_t>(task.width));
         submissionTask.startLine = m_progressiveNextRow;
         submissionTask.lineCount = std::min<std::size_t>(remainingRows, rowsPerChunk);
         return submissionTask;
     }
 
-    void NeutralRenderScheduler::adaptProgressiveChunkBudget(std::uint64_t const durationNs) noexcept
+    std::size_t NeutralRenderScheduler::budgetForResolution(std::size_t const width,
+                                                            std::size_t const height) noexcept
     {
-        if (durationNs == 0u)
+        auto const framePixels = width * height;
+        if (framePixels == 0u)
         {
-            return;
+            return MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS;
         }
-        double const observedMs = static_cast<double>(durationNs) / 1'000'000.0;
+        auto const evenSplit = (framePixels + TARGET_PROGRESSIVE_CHUNKS - 1u) / TARGET_PROGRESSIVE_CHUNKS;
+        return std::clamp(evenSplit, INITIAL_PROGRESSIVE_CHUNK_PIXELS, MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS);
+    }
+
+    void NeutralRenderScheduler::adaptProgressiveChunkBudget(RenderTaskResult const & result) noexcept
+    {
+        // GPU timestamps isolate device work from submission overhead; wall time is only a fallback.
+        double const observedMs = result.gpuTimeAvailable
+                                    ? static_cast<double>(result.gpuDurationNs) / 1'000'000.0
+                                    : static_cast<double>(result.durationNs) / 1'000'000.0;
         if (observedMs <= 0.0)
         {
             return;
         }
-        double const ratio = std::clamp(static_cast<double>(TARGET_PROGRESSIVE_CHUNK_MS) / observedMs,
-                                        0.5,
-                                        2.0);
-        auto const scaled = static_cast<std::size_t>(static_cast<double>(m_progressiveChunkPixels) * ratio);
-        m_progressiveChunkPixels = std::clamp(scaled,
-                                              MIN_PROGRESSIVE_CHUNK_PIXELS,
-                                              MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS);
+
+        float const targetMs = result.gpuTimeAvailable ? MAX_PROGRESSIVE_CHUNK_GPU_MS : TARGET_PROGRESSIVE_CHUNK_MS;
+        if (observedMs > static_cast<double>(targetMs))
+        {
+            // Shrink aggressively: one over-budget chunk already costs the user a dropped frame.
+            double const ratio = std::clamp(static_cast<double>(targetMs) / observedMs, 0.25, 1.0);
+            auto const scaled = static_cast<std::size_t>(static_cast<double>(m_progressiveChunkPixels) * ratio);
+            m_progressiveChunkPixels = std::max(MIN_PROGRESSIVE_CHUNK_PIXELS, scaled);
+            return;
+        }
+
+        if (m_progressiveChunkPixels < MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS)
+        {
+            // Recover towards a whole-frame chunk while the device stays under the time budget.
+            m_progressiveChunkPixels =
+              std::min(MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS, m_progressiveChunkPixels * 2u);
+        }
     }
 
     ProgressiveRenderProgress NeutralRenderScheduler::progressiveProgress() const noexcept

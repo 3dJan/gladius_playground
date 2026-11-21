@@ -586,6 +586,10 @@ namespace gladius::ui
                     .freshness = {.sceneGeneration = task.stamp.sceneEpoch,
                                   .viewGeneration = task.stamp.viewEpoch,
                                   .parameterGeneration = task.stamp.parameterEpoch},
+                    // The adaptive progressive controller needs device time, not submit-to-readback
+                    // wall time, to keep chunks inside the per-frame budget.
+                    .collectGpuTiming =
+                      task.type == async_rendering::RenderTaskType::ProgressiveHighQualityChunk,
                     .skipCpuReadback =
                       (m_neutralFramePresenter != nullptr &&
                        m_neutralFramePresenter->supportsGpuDirectPresentation())};

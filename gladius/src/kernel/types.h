@@ -2,6 +2,7 @@
 #define COMPILING_FOR_HOST
 #include <float.h>
 #include <iterator>
+#include <algorithm>
 #endif
 
 #ifdef COMPILING_FOR_HOST

@@ -225,9 +225,20 @@ settings inside the `RenderWindow` async scheduler:
 | `StreamingPreview` and non-frame tasks | none | OpenCL-only / not a frame dispatch |
 
 Background HQ catch-up uses adaptive progressive chunk sizing in
-`NeutralRenderScheduler` (2K–256K pixels/chunk targeting ~20 ms per chunk) and async
-`RenderTaskType::SdfPrecomputation` (`128³` or `64³` `R32Float` 3D texture prebake in
-`WebGPUComputeBackend`, invalidated on scene/parameter edits).
+`NeutralRenderScheduler` and async `RenderTaskType::SdfPrecomputation` (`128³` or `64³`
+`R32Float` 3D texture prebake in `WebGPUComputeBackend`, invalidated on scene/parameter edits).
+
+The application starts at most one display submission per UI frame, so time-to-full-quality is
+dominated by `chunks * frameInterval` and not by per-chunk submission cost (measured ~0.1 ms,
+see `specs/031-webgpu-raymarch-performance/results.md`, section PR). The chunk budget is therefore
+seeded per resolution: `NeutralRenderScheduler::budgetForResolution()` fills a settled static view
+in `TARGET_PROGRESSIVE_CHUNKS` (8) chunks, clamped to
+[`INITIAL_PROGRESSIVE_CHUNK_PIXELS` (16K), `MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS` (256K)]. During
+the sequence the budget adapts to the observed cost of the last chunk: GPU pass time from
+`IRenderSubmission::getFrameTiming()` when the backend collected timestamps
+(`RenderRequest::collectGpuTiming`, enabled for progressive chunks on the WebGPU backend),
+otherwise wall time. Chunks may take up to `MAX_PROGRESSIVE_CHUNK_GPU_MS` (33 ms, two frame
+intervals) before the budget shrinks; faster chunks double it back towards the ceiling.
 
 Background-skip and tile-culling are bounds guards that never change pixel output, so they
 are safe on the high-quality path. Tile-culling is what makes far-camera frames cheap

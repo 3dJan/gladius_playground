@@ -1054,7 +1054,12 @@ namespace gladius::mcp
               "set_program_snippet",
               "Replace all function graphs from a multi-function GLSL-like code listing. "
               "Each function must include a comment header with display name and ID. "
-              "Returns the normalized program on success.",
+              "The listing is applied all-or-nothing: if any function fails to convert, "
+              "nothing changes and every problem is reported in 'failed'. Functions whose "
+              "body contains unsupported nodes are reported in 'skipped' and keep their "
+              "previous graph. Cross-function calls must use the qualified form "
+              "'name_<ID>' (e.g. 'box_7'), otherwise the error names the required form. "
+              "Returns the normalized program plus 'parsed', 'failed' and 'skipped' lists.",
               setProgramSchema,
               [this](json const & params) -> json
               {

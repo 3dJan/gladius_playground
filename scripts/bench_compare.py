@@ -4,6 +4,10 @@
 Usage:
     bench_compare.py BASELINE.json CURRENT.json [--tolerance 0.10]
 
+Both the full-frame schema (``medianWallMs``) and the progressive schema
+(``timeToHqMs``) are detected automatically; the primary metric of the respective
+schema decides the gate.
+
 Exit codes:
     0  no regression beyond the tolerance
     1  at least one sample regressed beyond the tolerance
@@ -14,14 +18,27 @@ import argparse
 import json
 import sys
 
-SCHEMA_VERSION = 1
+SUPPORTED_SCHEMA_VERSIONS = {1, 2}
+FULL_FRAME_METRIC = "medianWallMs"
+PROGRESSIVE_METRIC = "timeToHqMs"
+# Secondary progressive metrics worth reporting even though only the primary one gates.
+PROGRESSIVE_CONTEXT = (
+    "timeToFirstPixelMs",
+    "chunks",
+    "paceMs",
+    "medianChunkGpuMs",
+    "medianChunkSubmitCallMs",
+    "medianChunkPaceMs",
+    "medianChunkFixedOverheadMs",
+)
 
 
 def load_samples(path):
     with open(path, "r", encoding="utf-8") as stream:
         document = json.load(stream)
-    if document.get("schemaVersion") != SCHEMA_VERSION:
-        raise ValueError(f"{path}: unsupported schemaVersion {document.get('schemaVersion')!r}")
+    version = document.get("schemaVersion")
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ValueError(f"{path}: unsupported schemaVersion {version!r}")
     samples = {}
     for sample in document.get("samples", []):
         key = (sample["model"], sample["resolution"])
@@ -29,6 +46,18 @@ def load_samples(path):
             raise ValueError(f"{path}: duplicate sample {key}")
         samples[key] = sample
     return samples
+
+
+def detect_metric(samples, path):
+    """Pick the gating metric from whichever schema the file uses."""
+    present = [
+        metric
+        for metric in (PROGRESSIVE_METRIC, FULL_FRAME_METRIC)
+        if all(metric in sample for sample in samples.values())
+    ]
+    if not present:
+        raise ValueError(f"{path}: no known timing metric found")
+    return present[0]
 
 
 def main():
@@ -52,20 +81,35 @@ def main():
         print(f"Sample sets differ: missing {missing}, extra {extra}")
         return 2
 
+    metric = detect_metric(baseline, args.baseline)
+    if detect_metric(current, args.current) != metric:
+        print("Baseline and current use different benchmark schemas")
+        return 2
+
+    context_metrics = PROGRESSIVE_CONTEXT if metric == PROGRESSIVE_METRIC else ()
+
     regressions = []
-    print(f"{'model':24} {'res':>5} {'baseline':>9} {'current':>9} {'delta':>7}")
+    header = f"{'model':24} {'res':>5} {'baseline':>9} {'current':>9} {'delta':>7}"
+    print(f"Metric: {metric}")
+    print(header)
     for key in sorted(baseline):
         base = baseline[key]
         cur = current[key]
-        base_ms = base["medianWallMs"]
-        cur_ms = cur["medianWallMs"]
+        base_ms = base[metric]
+        cur_ms = cur[metric]
         delta = (cur_ms - base_ms) / base_ms if base_ms > 0.0 else 0.0
         status = "REGRESSION" if delta > args.tolerance else "ok"
         if delta > args.tolerance:
             regressions.append((key, delta))
+        extras = ""
+        if context_metrics:
+            extras = "  " + " ".join(
+                f"{name.removesuffix('Ms')}={base.get(name, '-')}/{cur.get(name, '-')}"
+                for name in context_metrics
+            )
         print(
             f"{key[0]:24} {key[1]:>5} {base_ms:>9.3f} {cur_ms:>9.3f} "
-            f"{delta:>+6.1%}  {status}"
+            f"{delta:>+6.1%}  {status}{extras}"
         )
 
     if regressions:

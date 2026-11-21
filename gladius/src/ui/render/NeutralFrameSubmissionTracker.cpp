@@ -154,11 +154,19 @@ namespace gladius::ui::async_rendering
     {
         auto const elapsed = std::chrono::steady_clock::now() - tracked.submittedAt;
         auto const duration = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+        // GPU timestamps are the only signal that separates device work from submission overhead,
+        // so the adaptive chunk controller consumes them whenever the backend can provide them.
+        auto const timing = tracked.submission->getFrameTiming();
+        bool const gpuTimeAvailable = timing.has_value() && timing->gpuTimestampsAvailable;
         return RenderTaskResult{.requestId = tracked.task.requestId,
                                 .type = tracked.task.type,
                                 .stamp = tracked.task.stamp,
                                 .status = status,
                                 .durationNs = static_cast<std::uint64_t>(duration),
+                                .gpuDurationNs = gpuTimeAvailable
+                                                  ? static_cast<std::uint64_t>(timing->gpuPassMs * 1'000'000.0)
+                                                  : 0u,
+                                .gpuTimeAvailable = gpuTimeAvailable,
                                 .producedDisplayFrame = producedDisplayFrame,
                                 .completedFrame = completedFrame};
     }

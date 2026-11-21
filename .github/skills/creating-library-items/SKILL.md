@@ -1,167 +1,172 @@
 ---
 name: creating-library-items
 description: >-
-  Create reusable 3MF library entries for the Gladius implicit modeling
-  application using MCP tools. Use when adding new SDF primitives, modifiers,
-  or other reusable functions to the Gladius library. Covers the one-step
-  snippet workflow (preferred), multi-function program editing, function
-  evaluation, change tracking, validation, rendering, and export with
-  scaffold and metadata.
+  Build and refine implicit (SDF) models and reusable 3MF library entries in
+  Gladius via the MCP server. Use when authoring or composing primitives,
+  modifiers, components, scenes, or whole objects; when adding library entries;
+  when a model renders slowly or a scene is compute intensive; when reviewing or
+  refactoring a graph made of large monolithic functions; and when choosing
+  between existing library parts and hand-written SDF math. Covers model
+  structure rules, WebGPU render-cost budgets, graph measurement, anti-patterns,
+  and the snippet workflow.
 metadata:
   author: gladius
-  version: "4.2"
+  version: "5.2"
   requires: gladius-mcp-server
 ---
 
 # Creating 3MF Library Items with Gladius MCP
 
-A library entry is a `.3mf` file stored in `~/.local/share/gladius/library/<category>/`
-containing:
+A library entry is a `.3mf` in the user library
+(`sago::getDataHome()/gladius/library/<category>/` — `~/Library/Application
+Support/gladius/library/` on macOS, `~/.local/share/gladius/library/` on Linux)
+holding a **tagged function** (the importable SDF), a **scaffold** (`main`,
+mesh, levelset, build item, so it renders standalone), and metadata
+(`gladius:library-functions` resource IDs, `gladius:library-description`,
+`gladius:library-tags`). The shipped library is copied into the user library on
+startup; shipped entries are read-only.
 
-- A **tagged function** — the importable SDF function (e.g. twist, cylinder).
-- A **scaffold** — `main` function, mesh, levelset, and build item so the entry
-  renders standalone.
-- **Metadata** — `gladius:library-functions` (comma-separated resource IDs),
-  `gladius:library-description`, and `gladius:library-tags` (comma-separated).
+**Before authoring any non-trivial model, read
+[MODELING-GUIDE.md](MODELING-GUIDE.md)** — how the graph is compiled, what
+actually costs time on WebGPU, and the anti-pattern catalog.
 
-Reference entries live in the library under categories like `primitives`,
-`modifiers`, `csg`, `blending`, `lattices`, etc. Inspect them with
-`get_library_entry_info` to see the pattern.
+## Model Structure Rules
+
+Agents consistently produce slow, unmaintainable graphs. Follow these rules on
+every model, not just library entries.
+
+1. **Every primitive is its own function.** Never inline a sphere/box/cylinder
+   SDF into `main` or a component — import it or write it once and call it.
+2. **Every component is its own function.** A leg, a wall, a tree, a gear —
+   one function each, shape parameters as arguments.
+3. **`main` only places, combines, and colors.** It must read as a parts list:
+   transform, call, `min`/`max`. Arithmetic beyond that means it is too deep.
+4. **Never duplicate shape math.** Three trees = one `tree(...)` called three
+   times with different offsets, not `treeA`, `treeB`, `treeC`.
+5. **Parameterize, do not hard-code.** `tree(pos, height, trunkRadius)`, not a
+   function with `22.0` and `3.5` baked in.
+6. **One function = one shape or one operation.**
+7. **Reuse before you write.** `list_library(query="...")` first — the library
+   already has box, sphere, cylinder, capsule, cone, torus, hexagon, rounded
+   box, tube, twist, symmetry, polar repetition, and smooth unions.
+
+**Why this matters for speed:** Gladius flattens the whole graph into one
+function before compiling to WGSL (`GraphFlattener`, `src/Document.cpp:850`) and
+clones per *call site*. Splitting a monolith into functions does **not** by
+itself reduce render cost — the flat node count does. Modularity buys
+maintainability; fewer/simpler shapes buy frame time. Do both, and never report
+a refactor as a performance win without measuring the flat node count.
+
+## Render Cost (WebGPU)
+
+On Apple Silicon WebGPU is the only render path. The evaluator runs once per
+ray-march step **plus** ~83 more times per hit pixel (4 normal, 8 AO, 2 × ≤32
+soft-shadow, 6 refinement, 1 color taps):
+
+```
+frame cost ≈ flat node count reachable from main × evaluation count
+```
+
+Budget: keep `main`'s flattened node count under ~400; over ~800 the preview
+degrades badly. Exact tap counts, how to measure, and the
+`tea_light_house_v2` (347 nodes, fast) vs `v3` (1006 nodes, slow) case study are
+in [MODELING-GUIDE.md](MODELING-GUIDE.md) §2–§4.
 
 ## MCP Server Modes
 
-The Gladius MCP server can run in two modes:
+`--headless` runs with no window (best for automation/CI); no flag opens the GUI
+so a human sees live updates. Both expose the same tools except the UI tools
+(`ui_click`, `ui_dump_windows`, `ui_dump_items`, `capture_screenshot`), which
+need UI mode.
 
-- **Headless mode** (`--headless`): No GUI window. Best for automated
-  workflows and CI pipelines. Runs fully in the background.
-- **UI mode** (no `--headless` flag): Opens the Gladius GUI window. Allows
-  human + agent collaboration — the human sees live updates in the viewport
-  while the agent makes changes via MCP tools.
-
-Both modes expose the same MCP tool set, except UI interaction tools
-(`ui_click`, `ui_dump_windows`, `ui_dump_items`, `capture_screenshot`) are
-only available in UI mode.
-
-**Important:** After rebuilding the MCP server binary, you must force-kill and
-restart the server for changes to take effect. The old binary stays in memory
-as `(deleted)` if not killed. Use:
+After rebuilding the MCP binary you must force-kill and restart it — the old
+binary stays resident as `(deleted)`, and the process ignores `SIGTERM`:
 
 ```bash
 rtk proxy sh -c "pkill -9 -f 'gladiusmcp'"
 ```
 
-Use `rtk proxy` rather than an output-filtering wrapper because the MCP server
-uses stdio protocol traffic. Never pipe its stdout through `rtk err` or another
-filter.
+Use `rtk proxy`, not an output-filtering wrapper: the server speaks MCP over
+stdio, so never pipe its stdout through `rtk err` or another filter. Restart it
+from your MCP client configuration.
 
-Regular `pkill` without `-9` does not work because the process ignores
-`SIGTERM`. After killing, trigger a restart from your MCP client configuration.
+### Build variants: pure WebGPU MCP builds
+
+Some MCP binaries are built with `GLADIUS_ENABLE_OPENCL=OFF` (e.g. the
+`macos-webgpu-releaseWithDebug` preset). In that build `list_library`,
+`get_library_entry_info`, `import_library_entry`, `create_library_entry`,
+`export_to_library`, `set_library_metadata`, the bin tools, `evaluate_function`,
+and `validate_model`'s compile phase all return
+`"... unavailable in a pure WebGPU MCP build."` Renders
+(`render_to_file`, `render_with_camera`, `generate_thumbnail`,
+`get_optimal_camera_position`) still work — they fall back to WebGPU.
+
+So on such a build you cannot create or import library entries through MCP. Do
+not retry or assume a bad argument list: check `get_status()` and the build's
+`GLADIUS_ENABLE_OPENCL` cache entry, then run the OpenCL-enabled binary or read
+the inventory from the filesystem. The repo's `gladius/library/` has identical
+contents and is the authoritative inventory; inspect any entry with
+`open_document` + `get_program_snippet`, or unzip the `.3mf` and read
+`3D/3dmodel.model` (see [LIBRARY.md](LIBRARY.md)).
 
 ## Workflow Overview
 
-### Quick Path (Recommended): One-step creation
+### Quick Path (Recommended): one-step creation
 
 ```
 create_library_entry(
-    category="modifiers",
+    category="operations",
     name="twist",
-    program_snippet="// Function: twist (ID: 1)\nvec3 twist_1(vec3 pos, float twist_rate) {\n  float angle = pos.z * twist_rate;\n  float c = cos(angle);\n  float s = sin(angle);\n  return vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);\n}\n\n// Function: main (ID: 3) [root]\n(float shape) main_3(vec3 pos) {\n  shape = length(twist_1(pos, 0.1)) - 15.0;\n}",
+    program_snippet="// Function: twist (ID: 1)\nvec3 twist_1(vec3 pos, float twist_rate) {\n  float angle = pos.z * twist_rate;\n  float c = cos(angle);\n  float s = sin(angle);\n  return vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);\n}\n\n// Function: main (ID: 3) [root]\n(float shape) main_3(vec3 pos) {\n  shape = box_4(vec3(30, 30, 60), twist_1(pos, 0.1));\n}",
     function_id=1,
     description="Twists a shape around the Z axis",
     tags=["modifier", "transform", "twist"]
 )
 ```
 
-This single call creates the document, applies the full program snippet
-(including a `main` function that demonstrates the library function),
-validates compilation and bounding box, renders a thumbnail, and exports
-to the library. It fails with a helpful error if compilation, thumbnail,
-or bounding box validation fails.
+Required: `name`, `category`, `program_snippet`, `function_id`, `description`.
+Optional: `tags`, `overwrite`. The tool creates a document from the template,
+applies the snippet, adds a default color output to `main` if missing, validates
+compilation and bounding box, renders a thumbnail, exports with scaffold and
+metadata, then re-checks the written file. On failure it returns `usage_example`
+showing the correct call format.
 
-**Important:** The `program_snippet` must include both the library function
-AND a `main` function. The main function must use named-output syntax:
-`(float shape) main_3(vec3 pos)` — not `float main_3(vec3 pos)`.
+The snippet must contain **both** the library function and a `main` using
+named-output syntax: `(float shape) main_3(vec3 pos)`, not `float main_3(...)`.
 
 ### Full-control Path
 
-1. Create a new document → define functions → validate → render → export
-
-Use the full-control path when you need to:
-- Compose multiple interacting functions
-- Customize the scaffold (main function, camera position)
-- Iteratively refine with `evaluate_function` before exporting
-
-## Quick Path Details
-
-`create_library_entry` accepts a full program snippet (same format as
-`set_program_snippet`) that must include both the library function and a
-`main` function demonstrating it. The tool:
-
-1. Creates a fresh document from the template
-2. Applies the program snippet via `set_program_snippet`
-3. Adds a default color output to `main` if missing (so the 3MF template's
-   volumetric color reference stays valid)
-4. Validates compilation (graph + OpenCL) and bounding box
-5. Renders a thumbnail
-6. Exports with scaffold, metadata, and thumbnail
-7. Validates the written file's 3MF references
-
-Required parameters: `name`, `category`, `program_snippet`, `function_id`,
-`description`. Optional: `tags` (array of strings), `overwrite` (boolean).
-
-If validation, thumbnail generation, or bounding box checks fail, the tool
-returns an error with `usage_example` showing the correct call format.
-
-## Full-control Path
+Create a document → define functions → validate → render → export. Use it when
+composing multiple interacting functions, customizing the scaffold, or iterating
+before export.
 
 ### Step 1 — Create Document
 
-```
-create_document()
-```
-
-This loads `template.3mf` with ~25 stock functions (box, sphere, torus, etc.)
-available for use.
-
-Optionally inspect the current state:
-
-```
-get_program_snippet()     # see all functions as code
-get_3mf_structure()       # see resource IDs, build items, meshes (includes
-                          # arguments, output_type, snippet_preview, constants)
-```
+`create_document()` loads `template.3mf` with ~25 stock functions (box, sphere,
+torus, …). Inspect with `get_program_snippet()` (all functions as code) and
+`get_3mf_structure()` (resource IDs, build items, arguments, output types).
 
 ### Step 2 — Define Functions
 
-#### Preferred: Snippet-based (`set_program_snippet`)
+#### Preferred: `set_program_snippet`
 
-This is the most powerful approach. Write all functions as GLSL-like code in a
-single listing. Each function block needs a header comment with name and ID.
-
-**Header format:**
+Write all functions as GLSL-like code in one listing. Each block needs a header
+comment with name and ID:
 
 ```glsl
 // Function: <display_name> (ID: <resource_id>)
-<return_type> <display_name>_<resource_id>(<args>) {
-  <body>
-}
+<return_type> <display_name>_<resource_id>(<args>) { <body> }
 ```
 
-**Snippet syntax supports:**
-
-- Types: `float`, `vec3`
-- Operators: `+`, `-`, `*`, `/`
-- Functions: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`,
-  `abs`, `exp`, `log`, `pow`, `mod`, `fmod`, `min`, `max`, `clamp`, `dot`,
-  `cross`, `length`, `sign`, `round`, `floor`, `ceil`, `step`, `fract`
-- Vector ops: `vec3(x, y, z)`, component access `.x .y .z`
-- Variable assignments: `float v = expr;`
-- `if (cond) expr1 else expr2` (converted to select nodes)
-- Cross-function calls: `functionName_ID(args)` to call other functions
-- Multiple outputs: `(float a, vec3 b) funcName_ID(...) { a = expr; b = expr; }`
-- `[root]` annotation to mark root functions: `// Function: main (ID: 3) [root]`
-
-**Example — Twist modifier with box demo:**
+**Syntax:** types `float`, `vec3`; operators `+ - * /`; functions `sin cos tan
+asin acos atan atan2 sqrt abs exp log pow mod fmod min max clamp dot cross
+length sign round floor ceil fract`; `vec3(x, y, z)` and `.x .y .z`;
+`float v = expr;` assignments; cross-function calls `name_ID(args)`; multiple
+outputs `(float a, vec3 b) func_ID(...)`; `[root]` to mark root functions.
+There is **no** `step()` — use `clamp(-sdf * 100.0, 0.0, 1.0)` for membership
+masks. `if` needs the fully braced form
+`if (a < b) { v = x; } else { v = y; }` (→ select nodes); the one-line
+`if (cond) a else b` shorthand is not parsed.
 
 ```glsl
 // Function: twist (ID: 1)
@@ -172,33 +177,24 @@ vec3 twist_1(vec3 pos, float twist_rate) {
   return vec3(c * pos.x - s * pos.y, s * pos.x + c * pos.y, pos.z);
 }
 
-// Function: box (ID: 4)
-float box_4(vec3 b, vec3 pos) {
-  float v0 = abs(pos) - vec3(0.5, 0.5, 0.5) * b;
-  return length(max(v0, vec3(0, 0, 0))) + min(0, max(v0.x, max(v0.y, v0.z)));
-}
-
 // Function: main (ID: 3) [root]
 (float shape) main_3(vec3 pos) {
   shape = box_4(vec3(30, 30, 60), twist_1(pos, 0.1));
 }
 ```
 
-The tool returns the normalized snippet (with CSE-optimized variable names).
-Functions not mentioned in the snippet are preserved unchanged.
+`box_4` is the template's box — reused, not redefined. Redefining a primitive you
+already have is exactly what rule 1 forbids.
 
-**Important:** Use IDs from the template. The template has `main` at ID 3 and
-`box` at ID 4. Check `get_program_snippet()` output for available IDs. New
-functions can reuse IDs of template functions you want to replace.
+The tool returns the normalized snippet (CSE-optimized variable names);
+functions not mentioned are preserved unchanged. Use IDs from the template
+(`main` = 3, `box` = 4) — check `get_program_snippet()`; new functions may reuse
+the ID of a function you are replacing. Wrong `main` syntax fails on export with
+"function has no output named 'shape'".
 
-**Important:** The `main` function must use named-output syntax
-`(float shape) main_3(vec3 pos)` — not `float main_3(vec3 pos)`. The 3MF
-template references the output channel "shape" by name. Using the wrong
-syntax causes a "function has no output named 'shape'" error on export.
+#### Alternative: `create_function_from_snippet`
 
-#### Alternative: Single function (`create_function_from_snippet`)
-
-For creating one new function without touching the rest:
+For one new function without touching the rest:
 
 ```
 create_function_from_snippet(
@@ -209,106 +205,32 @@ create_function_from_snippet(
 )
 ```
 
-Then wire `main` to call it using `set_function_snippet` or `set_program_snippet`.
+Then wire `main` to call it with `set_function_snippet` / `set_program_snippet`.
+For a single-expression SDF use `create_function_from_expression` (no `length()`,
+`vec3()`, or `^` — use `pow()`; no comments or semicolons).
 
 #### Output naming and verification
 
-Choose the output name by meaning, not just its data type:
+Name the output by meaning: `vec3 result` for position/domain transforms
+(twist, bend, rotation, repetition), `float shape` for SDFs and CSG, `vec3 color`
+for color. `output_type="vec3"` sets the type but does **not** guarantee the
+identifier — the single-function tool can still default to `shape`. Check
+`get_function_snippet().outputs` before declaring the item done; a transformation
+must expose `result`, not `shape`.
 
-| Function role | Output |
-|---------------|--------|
-| Position/domain transformation (twist, bend, rotation, repetition) | `vec3 result` |
-| Signed-distance shape, primitive, or CSG operation | `float shape` |
-| Color function | `vec3 color` |
+Renaming an existing output means updating its identifier and display name, the
+matching outputs on every calling FunctionCall node, and their consumer
+references. Leave scalar SDF outputs (`box.shape`, `main.shape`) alone — the
+levelset references main's `shape` channel. Then reopen, validate, render, and
+test a fresh import; for native package edits write the 3MF with lib3mf, since
+ZIP integrity alone does not prove Gladius can load it.
 
-`output_type="vec3"` specifies the type but does **not** guarantee the output
-identifier: the single-function creation tool can still default to `shape`.
-Inspect `get_function_snippet().outputs` and the saved entry's
-`get_library_entry_info().functions` before declaring the item complete.
-A transformation must expose `result`, not `shape`, `pos`, or `Vector`.
+### Step 3 — Evaluate (optional)
 
-When renaming an existing output, update both its identifier and display name,
-the corresponding outputs on all calling FunctionCall nodes, and their consumer
-references. Keep scalar SDF outputs such as `box.shape` and `main.shape` unchanged;
-the levelset still references main's `shape` channel. Stage the change, preserve
-metadata and thumbnail, then reopen, validate, render, and test a fresh import.
-For native package edits, use lib3mf to write and reopen the final 3MF; ZIP
-integrity alone does not establish that Gladius can load the package.
-
-#### Simple math: `create_function_from_expression`
-
-For single-expression SDFs (no `length()`, `vec3()`, or multi-line):
-
-```
-create_function_from_expression(
-    name="cylinder",
-    expression="max(sqrt(pos.x*pos.x + pos.y*pos.y) - radius, abs(pos.z) - height)",
-    arguments=[
-        {"name": "pos", "type": "vec3"},
-        {"name": "radius", "type": "float"},
-        {"name": "height", "type": "float"}
-    ]
-)
-```
-
-**Expression limitations:** No `length()`, `vec3()`, `^` (use `pow()`), no
-comments, no semicolons. Use `create_function_from_snippet` for anything beyond
-basic math.
-
-### Step 3 — Evaluate Functions (Optional)
-
-Use `evaluate_function` to numerically verify a function before exporting:
-
-```
-evaluate_function(
-    function_id=1,
-    samples=[
-        {"pos": [0, 0, 0]},
-        {"pos": [10, 0, 0]},
-        {"pos": [0, 0, 20]}
-    ]
-)
-```
-
-Each sample is a JSON object mapping argument names to values. Use `[x,y,z]`
-arrays for `vec3` arguments and plain numbers for `float` arguments. For
-functions with multiple arguments:
-
-```
-evaluate_function(
-    function_id=1,
-    samples=[
-        {"pos": [0, 0, 0], "radius": 5.0},
-        {"pos": [10, 0, 0], "radius": 5.0}
-    ]
-)
-```
-
-**Response:**
-
-```json
-{
-  "success": true,
-  "function_id": 1,
-  "function_name": "twist",
-  "output_type": "vec3",
-  "results": [
-    {"inputs": {"pos": [0, 0, 0]}, "outputs": {"result": [0, 0, 0]}},
-    {"inputs": {"pos": [10, 0, 0]}, "outputs": {"result": [10, 0, 0]}},
-    {"inputs": {"pos": [0, 0, 20]}, "outputs": {"result": [0, 0, 20]}}
-  ]
-}
-```
-
-This runs the function on the GPU via OpenCL — the same pipeline used for
-rendering. Use it to:
-
-- Verify SDF values at known points (e.g., surface should be ~0)
-- Check that position modifiers transform coordinates correctly
-- Debug unexpected rendering results
-
-**Note:** If the OpenCL kernel fails to compile or execute, the tool returns a
-diagnostic error. Always `validate_model()` first.
+`evaluate_function(function_id=1, samples=[{"pos": [0, 0, 0], "radius": 5.0}])`
+runs the function on the GPU (OpenCL) at sample points — `[x,y,z]` arrays for
+`vec3`, numbers for `float`. Use it to confirm the SDF is ~0 on the surface. Not
+available in pure WebGPU builds; verify with a small render instead.
 
 ### Step 4 — Validate
 
@@ -326,423 +248,246 @@ Expected: `graph_ok: true`, `compile_ok: true`.
 
 ### Step 5 — Render
 
-Quick render with auto camera:
-
 ```
 render_to_file(output_path="/tmp/preview.png", width=512, height=512)
 ```
 
-Or with explicit camera control:
-
-```
-get_optimal_camera_position()
-render_with_camera(
-    output_path="/tmp/preview.png",
-    width=512, height=512,
-    eye_position=[0, -100, 50],
-    target_position=[0, 0, 0]
-)
-```
+For an explicit camera, call `get_optimal_camera_position()` first and pass
+`eye_position` / `target_position` to `render_with_camera`. Renders fall back to
+WebGPU, so they work even when the library tools do not.
 
 ### Step 6 — Export to Library
 
 ```
 export_to_library(
     function_id=1,
-    category="modifiers",
+    category="operations",
     name="twist",
-    description="Twists a shape around the Z axis by rotating XY coordinates based on Z position and twist rate.",
+    description="Twists a shape around the Z axis",
     keep_scaffold=true,
     overwrite=false
 )
 ```
 
-The `function_id` is the resource ID of the tagged function (not `main`).
-`keep_scaffold=true` preserves the full document structure so the entry can
-render standalone. `overwrite=true` replaces an existing entry with the same
-name (default: false).
-
-This automatically embeds a thumbnail and stamps library metadata. The export
-validates the bounding box (rejects degenerate/zero-volume/NaN shapes) and
-thumbnail rendering before writing — if either fails, the export aborts with
-an error.
+`function_id` is the tagged function's resource ID (not `main`). Always
+`keep_scaffold=true` or the entry won't render standalone. The export embeds a
+thumbnail, stamps metadata, and aborts if the bounding box is degenerate or the
+thumbnail render fails.
 
 ### Step 7 — Set Tags and Verify
 
-After export, add tags to help with library search and discovery:
-
 ```
-set_library_metadata(
-    function_ids=[1],
-    description="Twists a shape around the Z axis",
-    tags=["modifier", "transform", "twist"]
-)
+set_library_metadata(function_ids=[1], description="Twists a shape around the Z axis",
+                     tags=["modifier", "transform", "twist"])
 ```
 
-You can also update tags on an **existing** library entry without opening it, by
-passing `category` and `name`:
-
-```
-set_library_metadata(
-    function_ids=[1],
-    description="hexagon (2d)",
-    tags=["primitive", "hexagon", "2d", "polygon", "nut", "bolt", "honeycomb"],
-    category="primitives",
-    name="hexagon"
-)
-```
-
-Verify the entry:
-
-```
-get_library_entry_info(category="modifiers", name="twist")
-```
-
-Check that the tagged function has correct inputs/outputs, description, and tags.
-
-Test importing into a fresh document:
-
-```
-create_document()
-import_library_entry(category="modifiers", name="twist")
-```
+Pass `category` and `name` to update tags on an **existing** entry without
+opening it. Then `get_library_entry_info(...)` to check the tagged function's
+inputs, outputs, description, and tags, and test a fresh import with
+`create_document()` + `import_library_entry(...)`.
 
 ## Change Tracking
 
-Use `get_changes_since` to track what changed during a session:
-
-```
-# 1. Record the current timestamp from get_status
-get_status()
-# → { "server_time": "2024-01-15T10:30:00Z", ... }
-
-# 2. Make changes
-set_program_snippet(snippet="...")
-create_function_from_snippet(...)
-
-# 3. Query what changed since your timestamp
-get_changes_since(since="2024-01-15T10:30:00Z")
-```
-
-**Response:**
-
-```json
-{
-  "success": true,
-  "changes": [
-    {
-      "timestamp": "2024-01-15T10:30:05Z",
-      "type": "modified",
-      "resource_type": "function",
-      "resource_id": "3",
-      "display_name": "main"
-    },
-    {
-      "timestamp": "2024-01-15T10:30:10Z",
-      "type": "created",
-      "resource_type": "function",
-      "resource_id": "5",
-      "display_name": "twist"
-    }
-  ]
-}
-```
-
-This is useful for:
-- Checking whether external (UI) edits have modified the document
-- Confirming which resources your tool calls actually changed
-- Multi-agent collaboration (one agent can see the other's changes)
+`get_status()` gives `server_time`; `get_changes_since(since="<that ISO time>")`
+returns the functions created or modified since — use it to detect external (UI)
+edits, confirm what your own calls changed, and coordinate between agents.
 
 ## Searching the Library
 
-Use `list_library` with an optional query to find existing entries:
-
 ```
-list_library()                          # all categories and entries
-list_library(category="modifiers")      # entries in one category
-list_library(query="twist")             # search by name, description, or tags
+list_library()                        # all categories and entries
+list_library(category="operations")   # one category
+list_library(query="twist")           # case-insensitive match on name, description, tags
 ```
-
-The query performs case-insensitive substring matching across entry names,
-descriptions, and tags.
 
 ## Composing Library Entries
 
-Complex objects are best built by combining existing library entries rather
-than writing everything from scratch. For example, a metric nut = hexagonal
-prism (from `primitives/hexagon`) + ISO internal thread (from
-`mechanical/iso-metric-internal-thread`).
+Build complex objects from existing entries rather than writing everything from
+scratch. A metric nut = `primitives/hexagon` + `mechanical/iso_external_thread` —
+but `mechanical/metric_nut` already exists, so check before rebuilding it.
 
-### Composition Workflow
-
-#### Step 1 — Discover Components
-
-Search the library for relevant building blocks. Use multiple queries to cast
-a wide net — search by function type, domain terms, and related keywords:
+**1. Discover.** Search with several queries — names, descriptions and tags are
+all matched:
 
 ```
-list_library(query="thread")       # → mechanical/iso-metric-internal-thread
+list_library(query="thread")       # → mechanical/iso_external_thread
 list_library(query="hexagon")      # → primitives/hexagon
-list_library(query="union smooth") # → csg/smooth_union, csg/soft_union
+list_library(query="nut")          # → mechanical/metric_nut
+list_library(query="smooth union") # → csg/smooth_union, csg/smooth_union_quadratic
 ```
 
-**Tip:** Descriptions and tags are searched too, so queries like "lattice",
-"2d", "boolean", or "decorative" work even if the name doesn't match.
+**2. Inspect signatures.** `get_library_entry_info(category="primitives",
+name="hexagon")` returns `functions` (`name`, `resource_id`, `inputs`,
+`outputs`, `is_tagged`) and `description`. The tagged function is what gets
+imported. Note parameter names, types **and order** — order is not consistent
+across entries, never guess it:
 
-#### Step 2 — Inspect Signatures
+| Entry | Tagged signature |
+|-------|------------------|
+| `primitives/hexagon` | `hexagon_17(vec3 pos, float size)` |
+| `primitives/box` | `box_4(vec3 b, vec3 pos)` |
+| `mechanical/metric_nut` | `metric_nut_1(vec3 pos, float m_size)` |
+| `mechanical/iso_external_thread` | `isoExternalThread_21(float diameter, float pitch, vec3 pos, float thread_length)` |
 
-For each candidate, inspect its function signature to understand inputs and
-outputs:
-
-```
-get_library_entry_info(category="primitives", name="hexagon")
-```
-
-This returns:
-- **`functions`** — all functions in the entry, each with `name`, `resource_id`,
-  `inputs` (name + type), `outputs` (name + type), and `is_tagged` (whether
-  it's the importable function).
-- **`description`** — what the entry does and what parameters mean.
-
-Look at the **tagged function** (`is_tagged: true`) — that's what gets imported.
-Note its parameter names and types; you'll call it by `name_ID(args)` after
-import.
-
-#### Step 3 — Import Components
-
-Create a fresh document and import each component:
+**3. Import.**
 
 ```
 create_document()
-import_library_entry(category="mechanical", name="iso-metric-internal-thread")
-# → imported as isoInternalThread at resource ID 21
-import_library_entry(category="primitives", name="hexagon")
-# → imported as hexagon at resource ID 17
+import_library_entry(category="mechanical", name="iso_external_thread")  # → ID 21
+import_library_entry(category="primitives", name="hexagon")              # → ID 17
 ```
 
-Each import returns the function name and assigned resource ID. Dependencies
-(sub-functions like `isoThreadProfile`) are imported automatically.
+Dependencies are imported automatically. Resource IDs are assigned dynamically —
+use the IDs from the import response, not from `get_library_entry_info`.
+`get_program_snippet()` then shows the full assembly.
 
-**Important:** Resource IDs are assigned dynamically — always use the IDs
-from the import response, not from `get_library_entry_info`.
-
-#### Step 4 — Check Available Functions
-
-After all imports, inspect the full assembly:
-
-```
-get_program_snippet()
-```
-
-This shows every function with its ID and signature. Find the imported
-functions and note their `name_ID` call syntax (e.g. `hexagon_17(pos, size)`,
-`isoInternalThread_21(pos, diameter, pitch, thread_length, wall_thickness)`).
-
-#### Step 5 — Compose in Main
-
-Write a `main` function that calls the imported components. Use standard SDF
-composition patterns:
+**4. Compose in `main`** — placement and boolean combination only, no primitive
+math:
 
 ```
 set_program_snippet(snippet="""
 // Function: main (ID: 3) [root]
 (float shape, vec3 color) main_3(vec3 pos) {
   float hex = max(hexagon_17(pos, 5.5), abs(pos.z) - 2.4);
-  float thread = isoInternalThread_21(pos, 3.0, 0.5, 4.8, 1.0);
+  float thread = isoExternalThread_21(6.0, 1.0, pos, 4.8);
   shape = max(hex, thread);
   color = vec3(0.6, 0.6, 0.65);
 }
 """)
 ```
 
-#### Step 6 — Validate, Render, Export
-
-```
-validate_model()
-render_to_file(output_path="/tmp/preview.png", width=512, height=512)
-export_to_library(function_id=..., category="mechanical", name="metric_nut",
-    description="...", keep_scaffold=true)
-```
+Then `validate_model()`, `render_to_file(...)`, `export_to_library(...)`.
 
 ### SDF Composition Patterns
 
-When composing shapes in `main`, use these standard patterns:
-
 | Pattern | Code | Use case |
 |---------|------|----------|
-| Union (join) | `min(a, b)` | Combine two shapes into one |
-| Intersection (trim) | `max(a, b)` | Keep only where both overlap |
-| Subtraction (cut) | `max(a, -b)` | Remove shape B from shape A |
-| 2D → 3D extrusion | `max(sdf2d, abs(pos.z) - h)` | Extrude a 2D SDF along Z axis |
-| Shell/hollow | `abs(sdf) - thickness` | Hollow out a solid shape |
-| Offset | `sdf - radius` | Grow a shape by radius |
+| Union | `min(a, b)` | Join two shapes |
+| Intersection | `max(a, b)` | Keep only the overlap |
+| Subtraction | `max(a, -b)` | Cut B from A |
+| 2D → 3D extrusion | `max(sdf2d, abs(pos.z) - h)` | Extrude a 2D SDF along Z |
+| Shell/hollow | `abs(sdf) - thickness` | Hollow a solid |
+| Offset | `sdf - radius` | Grow a shape |
+| Bounded placement | `max(part, region)` | Restrict a detail to a region |
 
-For smooth/decorative booleans, import a CSG operator from the library
-(e.g. `smooth_union`, `chamfer_subtraction`, `stairs_union`) and call it
-instead of using raw `min`/`max`.
+For smooth/decorative booleans import `csg/smooth_union` or
+`csg/smooth_union_quadratic` instead of writing a polynomial blend inline.
 
 ### Tips for Composition
 
-- **Search broadly first.** Before writing any SDF math from scratch, check
-  if the library already has it: `list_library(query="cylinder")`,
-  `list_library(query="prism")`, etc.
-- **2D primitives need extrusion.** Library entries in `2d_primitives` and
-  some entries like `hexagon` return 2D SDFs. Extrude them with
-  `max(sdf2d(pos), abs(pos.z) - halfHeight)` to make a solid.
-- **Template functions are available too.** After `create_document()`, the
-  template includes `box_4`, `sphere_5`, `torus_6`, `capsule_7`, `circle_8`,
-  `difference_9`, `union_10`, `intersection_11`, and more. Use
-  `get_program_snippet()` to see them all.
-- **Combine imported + inline functions.** You can write new helper functions
-  in the snippet alongside imported ones. Use a fresh ID (higher than any
-  existing) for new functions.
-- **One main, many components.** Keep the `main` function as the only `[root]`
-  — it should orchestrate all the imported components.
+- **2D primitives need extrusion.** Entries like `primitives/hexagon` return a
+  2D SDF; extrude with `max(sdf2d(pos), abs(pos.z) - halfHeight)`.
+- **Template functions are available too** — `box_4`, `sphere_5`, `capsule_7`,
+  `smoothUnion_48`, `repetitionPolar_40`, `symmetryX_31` and more (full list in
+  [LIBRARY.md](LIBRARY.md)).
+- **New helper functions can live in the snippet** alongside imported ones; give
+  them a fresh ID higher than any existing.
+- **Keep `main` the only `[root]`** and let it orchestrate the components.
+- **Transform by argument, not by rewriting the shape** — pass an offset/scale,
+  or import `operations/rotationX|Y|Z`, `operations/symmetryX|Y|Z`,
+  `operations/twist`, `operations/polar_repetition`.
+
+### Worked example: a scene, done right
+
+```glsl
+// Function: tree (ID: 50) — one parameterized component, reused for every tree
+float tree_50(vec3 p, float height, float trunkRadius, float spread) {
+  float trunk = box_4(vec3(trunkRadius, trunkRadius, height), p);
+  float canopy = sphere_5(p - vec3(0, 0, height), spread);
+  return min(trunk, canopy);
+}
+
+// Function: main (ID: 3) [root] — a parts list: place, call, combine
+(float shape, vec3 color) main_3(vec3 pos) {
+  float ground = box_4(vec3(120, 120, 4), pos - vec3(0, 0, -2));
+  float house  = houseWalls_30(pos);
+  float treeA  = tree_50(pos - vec3(-30, 20, 0), 22.0, 1.2, 6.0);
+  float treeB  = tree_50(pos - vec3( 28, 15, 0), 18.0, 1.0, 5.0);
+  float treeC  = tree_50(pos - vec3( 34,-18, 0), 26.0, 1.4, 7.0);
+  shape = min(min(ground, house), min(treeA, min(treeB, treeC)));
+  color = vec3(0.75, 0.75, 0.78);
+}
+```
+
+The anti-pattern this replaces: `tea_light_house_v3.3mf` has `treeA`, `treeB`
+and `treeC` as three separate functions, 22 direct calls in `main`, and 1006
+flattened nodes — 2.9× the cost of the 347-node `v2`. Full diff and anti-pattern
+catalog in [MODELING-GUIDE.md](MODELING-GUIDE.md) §4–§5.
 
 ## Guidelines
 
-- **Prefer `create_library_entry`** for single-function items — it handles
-  the entire workflow in one call.
-- **Use the full-control path** when composing multiple interacting functions
-  or iterating on a design.
-- **Always use `keep_scaffold=true`** when exporting. Without it, the entry
-  won't render standalone.
-- **Check `get_program_snippet()` first** to see existing function IDs in the
-  template before defining your snippet.
-- **Use meaningful parameter names** like `pos`, `radius`, `twist_rate` —
-  not `a`, `b`, `c`.
-- **main should demonstrate the function** with reasonable default parameter
-  values that produce a visible shape.
-- **Position modifiers expose `vec3 result`**, SDF shapes expose `float shape`,
-  and color functions expose `vec3 color`. Verify the saved output name as well
-  as its type; see Output naming and verification above.
-- **Cross-function calls use `name_ID` syntax** — e.g., `box_4(...)` calls the
-  function named "box" at resource ID 4.
-- **Template function IDs you can reuse:** ID 1 (honeycomb by default), and
-  others listed in `get_program_snippet()` output.
-- **Add tags** when exporting to make entries discoverable via `list_library`.
-- **Use `evaluate_function`** to verify SDF values before exporting.
-- **All error responses include `usage_example`** with the expected parameter
-  format, so you can self-correct on failure.
+- **Prefer `create_library_entry`** for single-function items; use the
+  full-control path when composing or iterating.
+- **Always `keep_scaffold=true`** when exporting, and **add tags** so the entry
+  is discoverable via `list_library`.
+- **Check `get_program_snippet()` first** for the IDs already in the assembly.
+- **Name things properly:** parameters `pos`, `radius`, `twist_rate` (not `a`,
+  `b`, `c`); functions after the thing they build (`tree`, `houseWalls`), not
+  `step1` or `tmp_shape`. `main` must demonstrate the function with defaults that
+  produce a visible shape.
+- **Outputs:** modifiers expose `vec3 result`, SDFs `float shape`, color `vec3
+  color`. Cross-function calls use `name_ID` — `box_4(...)` is "box" at ID 4.
+- **Never submit a monolithic function.** If a body contains more than one shape
+  or more than ~30 lines of math, split it. Review `get_program_snippet()` before
+  exporting and confirm `main` is a parts list, not a scene description.
+- **Error responses include `usage_example`** with the expected parameter format,
+  so you can self-correct on failure.
 
 ### Snippet Authoring Tips
 
-- **`get_program_snippet` emits `in_` prefix for arguments** — the output shows
-  `in_pos`, `in_radius` etc. in function bodies. When writing snippets, you can
-  use either form: both `pos` and `in_pos` are accepted by the parser. The `in_`
-  prefix exists to prevent collisions between argument and output names.
-- **Only use functions that exist in the assembly.** There are no built-in
-  SDF primitives like `fBox`, `fSphere`, etc. Write box/sphere SDFs using raw
-  math (e.g., `length(pos) - radius` for sphere, `abs(pos) - halfSize` for
-  box), or call template functions like `box_4(...)`, `sphere_5(...)`.
-- **Property access on cross-function calls works** — e.g.,
-  `repetitionPolar_40(20, in_pos, 10).x` accesses the `.x` component of the
-  returned `vec3`.
-- **Multi-output functions** use tuple syntax: `(float a, vec3 b)` before the
-  function name. Assign each output in the body: `a = expr; b = expr;`.
-- **`set_program_snippet` preserves unmentioned functions** — you only need to
-  include the functions you want to create or modify. Existing functions not
-  in the snippet are kept unchanged.
-- **The parser normalizes your code** — intermediate variables may be inlined
-  into a single expression. Use `get_program_snippet()` to see the normalized
-  form after setting.
+- **Put `{` on the signature line.** `ProgramSnippetApplier` reads the signature
+  only from the line containing `{` (`src/ProgramSnippetApplier.cpp:168`). With an
+  Allman brace the bare `{` becomes the signature, the parameter list is silently
+  dropped, and every non-`pos` parameter then fails as undeclared.
+- **No comments inside a function body.** Bodies are split on `;` with no comment
+  awareness (`:334`); a comment becomes a statement and aborts the function. Only
+  the `// Function: name (ID: n)` header is consumed.
+- Name the position parameter `pos`. Undeclared `in_x` identifiers are auto-added,
+  bare ones are not.
+- `get_program_snippet` prints arguments with an `in_` prefix (`in_pos`); the
+  parser accepts both `in_pos` and `pos`.
+- **Only functions that exist in the assembly are callable.** There are no
+  built-in `fBox`/`fSphere` helpers. Call a template function or imported entry;
+  write raw SDF math only when none exists — and then as its own function, never
+  inline in `main`.
+- Property access on calls works: `repetitionPolar_40(20, in_pos, 10).x`.
+- Multi-output functions use tuple syntax `(float a, vec3 b)` and assign each
+  output in the body.
+- The parser normalizes your code — intermediate variables may be inlined. Re-read
+  with `get_program_snippet()`.
 
 ## Library Categories
 
-| Category | Contents |
-|----------|----------|
-| `primitives` | Basic shapes: box, sphere, torus, capsule, cylinder |
-| `modifiers` | Shape transforms: shell, offset, round, twist, extrude |
-| `csg` | Boolean operations (union, difference, intersection) |
-| `blending` | Smooth boolean operations |
-| `lattices` | Infill patterns: gyroid, honeycomb |
-| `2d_primitives` | 2D SDF shapes |
-| `mechanical` | Gears, threads |
-| `noise` | Noise-based functions |
+Five categories ship: `primitives`, `csg`, `operations`, `lattices`,
+`mechanical`. There is **no** `modifiers`, `blending`, `2d_primitives`, or
+`noise` category — modifiers live in `operations`, smooth booleans in `csg`.
+Never invent a category name when exporting.
 
-## Complete Tool Reference
+The full entry list, tagged signatures, template function IDs, and how to read an
+entry's signature when `list_library` is unavailable are in
+[LIBRARY.md](LIBRARY.md) — load it before composing from parts.
 
-### Document Management
+## Slow Model? Check This First
 
-| Tool | Purpose |
-|------|---------|
-| `get_status` | Server status, loaded document info, `server_time` for change tracking |
-| `create_document` | New document from template |
-| `open_document` | Open an existing `.3mf` file |
-| `save_document` | Save current document |
-| `save_document_as` | Save current document to a new path |
-| `get_3mf_structure` | Full document structure: resources, build items, meshes, function arguments, output types, snippet previews, constants |
+Do not start by tweaking camera or step settings.
 
-### Function Authoring
+1. `get_program_snippet()` and count the nodes reachable from `main` after
+   inlining. That number, not the function count, is the cost (<400 good,
+   >800 bad). [MODELING-GUIDE.md](MODELING-GUIDE.md) §3 has a ready-to-run
+   analyzer for a saved `.3mf`.
+2. Look for the structural anti-patterns: flat union of every object in `main`,
+   copy-paste component variants, hand-placed duplicates instead of
+   `operations/*` repetition, `sin`/`cos` surface displacement, `mod`/`floor`
+   repetition. Fixes are catalogued in §5.
+3. A domain mesh with `meshbboxonly="true"` is **not** a cost factor — it is
+   never loaded as geometry and contributes one `BoxMinMax` node. Never shrink
+   one for performance (§6).
 
-| Tool | Purpose |
-|------|---------|
-| `get_program_snippet` | Read all functions as GLSL-like code |
-| `set_program_snippet` | Write/update multiple functions at once |
-| `get_function_snippet` | Read one function's code by ID |
-| `set_function_snippet` | Write one function's code by ID |
-| `create_function_from_snippet` | Create new function from multi-line code |
-| `create_function_from_expression` | Create from a single math expression |
-| `create_image3d_function` | Create a function from 3D image data (FunctionFromImage3D) |
-| `create_levelset` | Create a new levelset resource |
-| `modify_levelset` | Modify levelset properties |
-| `set_parameter` | Set a function parameter value |
-| `create_volumetric_color` | Create a volumetric color function |
-| `create_volumetric_property` | Create a volumetric property function |
+## Tool Reference
 
-### Evaluation & Validation
-
-| Tool | Purpose |
-|------|---------|
-| `evaluate_function` | Run a function on sample points via OpenCL (returns float or vec3 results) |
-| `validate_model` | Check graph connectivity + OpenCL compilation |
-| `get_model_bounding_box` | Get the model's world-space bounding box |
-
-### Rendering
-
-| Tool | Purpose |
-|------|---------|
-| `render_to_file` | Render to PNG with auto camera |
-| `render_with_camera` | Render with explicit camera position |
-| `get_optimal_camera_position` | Compute camera position that frames the model |
-| `generate_thumbnail` | Generate a 256px preview thumbnail |
-| `capture_screenshot` | Capture the current viewport (UI mode only) |
-
-### Build Items
-
-| Tool | Purpose |
-|------|---------|
-| `set_build_item_object` | Set which resource a build item references |
-| `set_build_item_transform` | Set a build item's transformation matrix |
-
-### Library Management
-
-| Tool | Purpose |
-|------|---------|
-| `create_library_entry` | One-step: create entry from snippet with scaffold, thumbnail, and metadata |
-| `export_to_library` | Export current document's function to library |
-| `import_library_entry` | Import a library entry into the current document |
-| `list_library` | List categories/entries with optional query filter |
-| `get_library_entry_info` | Inspect entry metadata, function info, tags, and snippet |
-| `set_library_metadata` | Update entry description and tags (pass `category`/`name` to target a library entry directly) |
-| `delete_library_entry` | Remove a library entry |
-
-### Change Tracking
-
-| Tool | Purpose |
-|------|---------|
-| `get_changes_since` | List resources changed since a given ISO-8601 timestamp |
-
-### Utility
-
-| Tool | Purpose |
-|------|---------|
-| `remove_unused_resources` | Clean up unreferenced resources |
-
-### UI Interaction (UI mode only)
-
-| Tool | Purpose |
-|------|---------|
-| `ui_click` | Click a UI element by name |
-| `ui_dump_windows` | List all open UI windows |
-| `ui_dump_items` | List UI items in a window |
+The complete per-tool listing is in [TOOLS.md](TOOLS.md). The tools you need most
+are: `get_status`, `create_document`, `get_program_snippet`,
+`set_program_snippet`, `create_function_from_snippet`, `set_function_snippet`,
+`validate_model`, `render_to_file`, `export_to_library`, `create_library_entry`,
+`list_library`, `import_library_entry`, `get_library_entry_info`,
+`set_library_metadata`, `get_changes_since`, `remove_unused_resources`.

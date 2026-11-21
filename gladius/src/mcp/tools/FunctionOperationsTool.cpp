@@ -17,6 +17,7 @@
 #include "../../nodes/Parameter.h"
 #include "../../nodes/Port.h"
 #include "../../nodes/nodesfwd.h"
+#include "../../ProgramSnippetApplier.h"
 #include "../FunctionGraphDeserializer.h"
 #include "../FunctionGraphSerializer.h"
 #include <array>
@@ -32,6 +33,43 @@ namespace gladius
 {
     namespace mcp::tools
     {
+        /// @brief Serializes successfully applied functions for the MCP response
+        static nlohmann::json serializeParsed(ProgramSnippetApplyReport const & report)
+        {
+            nlohmann::json result = nlohmann::json::array();
+            for (auto const & applied : report.parsed)
+            {
+                result.push_back({{"id", applied.resourceId}, {"name", applied.displayName}});
+            }
+            return result;
+        }
+
+        /// @brief Serializes functions that failed to convert for the MCP response
+        static nlohmann::json serializeFailures(ProgramSnippetApplyReport const & report)
+        {
+            nlohmann::json result = nlohmann::json::array();
+            for (auto const & failure : report.failed)
+            {
+                result.push_back({{"id", failure.resourceId},
+                                  {"name", failure.displayName},
+                                  {"error", failure.message}});
+            }
+            return result;
+        }
+
+        /// @brief Serializes functions removed because their body contains unsupported nodes
+        static nlohmann::json serializeSkipped(ProgramSnippetApplyReport const & report)
+        {
+            nlohmann::json result = nlohmann::json::array();
+            for (auto const & skipped : report.skipped)
+            {
+                result.push_back({{"id", skipped.resourceId},
+                                  {"name", skipped.displayName},
+                                  {"reason", skipped.message}});
+            }
+            return result;
+        }
+
         /// @brief Creates simplified input parameter information for MCP responses
         static nlohmann::json createSimplifiedInputInfo(const nodes::VariantParameter & param,
                                                         const std::string & name)
@@ -1668,7 +1706,19 @@ namespace gladius
 
                 auto const compileStart = std::chrono::steady_clock::now();
                 ExpressionParser parser;
-                ExpressionToGraphConverter::setProgramSnippet(snippet, *assembly, parser);
+                auto const report = ProgramSnippetApplier::apply(snippet, *assembly, parser);
+
+                if (!report.failed.empty())
+                {
+                    // Nothing was committed - report every failure so the caller can fix
+                    // the listing and retry.
+                    out["success"] = false;
+                    out["error"] = report.failed.front().message;
+                    out["parsed"] = nlohmann::json::array();
+                    out["failed"] = serializeFailures(report);
+                    out["skipped"] = serializeSkipped(report);
+                    return out;
+                }
 
                 std::size_t totalDeduplicated = 0u;
                 std::size_t totalPrunedDead = 0u;
@@ -1734,6 +1784,14 @@ namespace gladius
                                 {"pruned_dead_nodes", totalPrunedDead},
                                 {"peephole_rewrites", totalPeephole},
                                 {"compile_ms", compileMs}};
+                out["parsed"] = serializeParsed(report);
+                out["failed"] = serializeFailures(report);
+                out["skipped"] = serializeSkipped(report);
+                if (!report.skipped.empty())
+                {
+                    out["warning"] = "Functions containing unsupported nodes were skipped "
+                                     "and kept their previous graph. See 'skipped'.";
+                }
                 if (!warnings.empty())
                 {
                     out["warnings"] = std::move(warnings);

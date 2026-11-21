@@ -16,14 +16,19 @@
 #include "webgpu/WebGPUComputeRenderer.h"
 #include "webgpu/WebGPUBoundsService.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <iostream>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace gladius::tests::bench
 {
@@ -115,6 +120,53 @@ namespace gladius::tests::bench
         return settings;
     }
 
+    /// @brief Timing of one progressive chunk, split into the parts we optimize separately.
+    struct ProgressiveChunkStat
+    {
+        std::uint32_t firstRow{};
+        std::uint32_t endRow{};
+        /// End-to-end latency of the chunk as the application would experience it.
+        double wallMs{};
+        /// CPU time spent building and submitting the chunk (buffer setup, bind group, submit).
+        double submitCallMs{};
+        /// CPU time spent pumping the completion callbacks until the pixels arrived.
+        double pumpMs{};
+        /// Simulated UI frame time spent before the next chunk could be submitted.
+        double paceMs{};
+        /// GPU queue time from submission until the queue signalled work completion.
+        double submitToWorkDoneMs{};
+        /// GPU-internal compute pass duration; zero when timestamp queries are unavailable.
+        double gpuPassMs{};
+        /// Latency between GPU completion and the readback delivering the pixels.
+        double readbackMs{};
+
+        /// @brief GPU-side latency that is not compute-pass time (queue and readback delivery).
+        [[nodiscard]] double gpuSideOverheadMs() const noexcept
+        {
+            return gpuPassMs > 0.0 ? submitToWorkDoneMs - gpuPassMs + readbackMs : submitToWorkDoneMs;
+        }
+
+        /// @brief Everything that is not GPU compute: CPU submit setup plus completion pumping.
+        [[nodiscard]] double fixedOverheadMs() const noexcept
+        {
+            return submitCallMs + pumpMs + gpuSideOverheadMs();
+        }
+    };
+
+    /// @brief Result of filling one frame with progressive chunks.
+    struct ProgressiveRun
+    {
+        std::uint32_t width{};
+        std::uint32_t height{};
+        std::size_t chunkPixels{};
+        std::uint32_t chunks{};
+        /// Wall time from the start of the sequence until the first chunk was delivered.
+        double timeToFirstPixelMs{};
+        /// Wall time from the start of the sequence until the last chunk completed the frame.
+        double timeToHqMs{};
+        std::vector<ProgressiveChunkStat> chunkStats;
+    };
+
     /// @brief A model materialized through the authoritative application render path.
     class BenchScene
     {
@@ -159,9 +211,225 @@ namespace gladius::tests::bench
                                                        bool const collectGpuTiming,
                                                        bool const collectMetrics)
         {
+            auto submission = submitRowRange(width,
+                                             height,
+                                             0u,
+                                             height,
+                                             settings,
+                                             collectGpuTiming,
+                                             collectMetrics);
+            return takeValidFrame(*submission);
+        }
+
+        /**
+         * @brief Fills a frame in row-band chunks the way the progressive scheduler does.
+         *
+         * Chunks are submitted back to back, one at a time, which mirrors the application
+         * constraint of a single in-flight display submission. The measured quantities are the
+         * ones the optimization targets: how long the sequence takes to reach full quality and
+         * how much of each chunk is GPU work versus fixed per-submission overhead.
+         *
+         * @param framePaceMs Simulated UI frame period. The application starts at most one
+         *                    display submission per frame, so a chunk that finishes early still
+         *                    waits for the next frame before its successor is submitted. Zero
+         *                    measures the best case with no UI pacing at all.
+         */
+        [[nodiscard]] ProgressiveRun renderProgressive(std::uint32_t const width,
+                                                       std::uint32_t const height,
+                                                       compute::RenderSettingsSnapshot settings,
+                                                       std::size_t const chunkPixels,
+                                                       double const framePaceMs = 0.0)
+        {
+            if (chunkPixels == 0u)
+            {
+                throw std::invalid_argument("Progressive chunk budget must be greater than zero");
+            }
+
+            ProgressiveRun run{.width = width, .height = height, .chunkPixels = chunkPixels};
+            auto const rowsPerChunk = std::max<std::size_t>(1u, chunkPixels / std::max<std::size_t>(1u, width));
+            auto const diagnostic = std::getenv("GLADIUS_PROGRESSIVE_BENCH_DIAGNOSTIC") != nullptr;
+            auto const sequenceStart = std::chrono::steady_clock::now();
+            std::uint32_t nextRow = 0u;
+            while (nextRow < height)
+            {
+                auto const endRow = std::min<std::uint32_t>(height,
+                                                            nextRow + static_cast<std::uint32_t>(rowsPerChunk));
+                auto const chunkStart = std::chrono::steady_clock::now();
+                auto submission = submitRowRange(width, height, nextRow, endRow, settings, true, diagnostic);
+                auto const submittedAt = std::chrono::steady_clock::now();
+                auto frame = takeValidFrame(*submission);
+                auto const chunkEnd = std::chrono::steady_clock::now();
+
+                if (frame.pixels.size() != static_cast<std::size_t>(width) * (endRow - nextRow))
+                {
+                    throw std::runtime_error("Progressive chunk returned an unexpected pixel count");
+                }
+
+                ProgressiveChunkStat stat{
+                  .firstRow = nextRow,
+                  .endRow = endRow,
+                  .wallMs = std::chrono::duration<double, std::milli>(chunkEnd - chunkStart).count(),
+                  .submitCallMs =
+                    std::chrono::duration<double, std::milli>(submittedAt - chunkStart).count(),
+                  .pumpMs = std::chrono::duration<double, std::milli>(chunkEnd - submittedAt).count()};
+                if (auto const timing = getLastTiming(); timing.has_value())
+                {
+                    stat.submitToWorkDoneMs = timing->submitToWorkDoneMs;
+                    stat.readbackMs = timing->workDoneToReadbackMs;
+                    if (timing->gpuTimestampsAvailable)
+                    {
+                        stat.gpuPassMs = timing->gpuPassMs;
+                    }
+                }
+
+                if (diagnostic)
+                {
+                    if (auto const metrics = getLastMetrics(); metrics.has_value())
+                    {
+                        std::cout << "chunk metrics rows [" << nextRow << ".." << endRow
+                                  << ") rays=" << metrics->totalRays << " steps=" << metrics->totalSteps
+                                  << " hits=" << metrics->totalHits << " refinement=" << metrics->refinementTaps
+                                  << " shadow=" << metrics->shadowTaps << " ao=" << metrics->aoTaps << "\n";
+                    }
+                }
+
+                if (run.chunkStats.empty())
+                {
+                    run.timeToFirstPixelMs = std::chrono::duration<double, std::milli>(chunkEnd - sequenceStart)
+                                              .count();
+                }
+                run.chunkStats.push_back(stat);
+                run.chunks++;
+                nextRow = endRow;
+
+                if (framePaceMs > 0.0 && nextRow < height)
+                {
+                    // The application starts at most one display submission per UI frame, so a
+                    // chunk that finishes early still waits for the next frame before its
+                    // successor is submitted.
+                    auto const frameEnd =
+                        chunkStart + std::chrono::microseconds(static_cast<long long>(framePaceMs * 1000.0));
+                    if (auto const now = std::chrono::steady_clock::now(); now < frameEnd)
+                    {
+                        std::this_thread::sleep_until(frameEnd);
+                        run.chunkStats.back().paceMs =
+                            std::chrono::duration<double, std::milli>(frameEnd - now).count();
+                    }
+                }
+            }
+
+            run.timeToHqMs = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - sequenceStart)
+                               .count();
+            if (std::getenv("GLADIUS_PROGRESSIVE_BENCH_DIAGNOSTIC") != nullptr)
+            {
+                // Re-submit the final band to tell a genuinely expensive band apart from a
+                // one-off cost that happens to land on the last submission.
+                auto const & last = run.chunkStats.back();
+                auto const retryStart = std::chrono::steady_clock::now();
+                auto submission = submitRowRange(width, height, last.firstRow, last.endRow, settings, true, true);
+                auto const retrySubmittedAt = std::chrono::steady_clock::now();
+                auto frame = takeValidFrame(*submission);
+                (void)frame;
+                ProgressiveChunkStat retry{
+                  .firstRow = last.firstRow,
+                  .endRow = last.endRow,
+                  .wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - retryStart)
+                              .count(),
+                  .submitCallMs =
+                    std::chrono::duration<double, std::milli>(retrySubmittedAt - retryStart).count(),
+                  .pumpMs =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - retrySubmittedAt)
+                      .count()};
+                if (auto const timing = getLastTiming(); timing.has_value())
+                {
+                    retry.submitToWorkDoneMs = timing->submitToWorkDoneMs;
+                    retry.readbackMs = timing->workDoneToReadbackMs;
+                    if (timing->gpuTimestampsAvailable)
+                    {
+                        retry.gpuPassMs = timing->gpuPassMs;
+                    }
+                }
+                std::cout << "retry-last rows [" << retry.firstRow << ".." << retry.endRow
+                          << ") wallMs=" << retry.wallMs << " gpuMs=" << retry.gpuPassMs
+                          << " workDoneMs=" << retry.submitToWorkDoneMs
+                          << " fixedMs=" << retry.fixedOverheadMs() << "\n";
+            }
+            if (std::getenv("GLADIUS_PROGRESSIVE_BENCH_VERBOSE") != nullptr)
+            {
+                for (auto const & chunk : run.chunkStats)
+                {
+                    std::cout << "chunk rows [" << chunk.firstRow << ".." << chunk.endRow
+                              << ") wallMs=" << chunk.wallMs << " gpuMs=" << chunk.gpuPassMs
+                              << " submitCallMs=" << chunk.submitCallMs
+                              << " pumpMs=" << chunk.pumpMs
+                              << " paceMs=" << chunk.paceMs
+                              << " workDoneMs=" << chunk.submitToWorkDoneMs
+                              << " readbackMs=" << chunk.readbackMs
+                              << " fixedMs=" << chunk.fixedOverheadMs() << "\n";
+                }
+                std::cout << "sequence chunks=" << run.chunks << " firstPixelMs=" << run.timeToFirstPixelMs
+                          << " hqMs=" << run.timeToHqMs << "\n";
+            }
+            return run;
+        }
+
+        /// @brief Submits one row band exactly like a progressive chunk would.
+        [[nodiscard]] std::unique_ptr<compute::IRenderSubmission>
+        submitRowRange(std::uint32_t const width,
+                       std::uint32_t const height,
+                       std::uint32_t const firstRow,
+                       std::uint32_t const endRow,
+                       compute::RenderSettingsSnapshot settings,
+                       bool const collectGpuTiming,
+                       bool const collectMetrics)
+        {
+            auto const request = buildRequest(width,
+                                              height,
+                                              firstRow,
+                                              endRow,
+                                              settings,
+                                              collectGpuTiming,
+                                              collectMetrics);
+            return m_session->submitFrame(request);
+        }
+
+        /// @brief Waits for a submitted band and returns its validated frame.
+        [[nodiscard]] compute::RenderFrame takeValidFrame(compute::IRenderSubmission & submission)
+        {
+            submission.wait();
+            if (submission.getStatus() != compute::RenderSubmissionStatus::Succeeded)
+            {
+                throw std::runtime_error("Benchmark frame failed: " + submission.getErrorMessage());
+            }
+
+            auto frame = submission.takeFrame();
+            if (!frame.has_value() || !frame->isValid())
+            {
+                throw std::runtime_error("Benchmark frame returned an invalid frame");
+            }
+
+            m_lastTiming = submission.getFrameTiming();
+            m_lastMetrics = submission.getFrameMetrics();
+            return *frame;
+        }
+
+        /// @brief Builds a camera-framed request for one row band of the given viewport.
+        [[nodiscard]] compute::RenderRequest buildRequest(std::uint32_t const width,
+                                                          std::uint32_t const height,
+                                                          std::uint32_t const firstRow,
+                                                          std::uint32_t const endRow,
+                                                          compute::RenderSettingsSnapshot settings,
+                                                          bool const collectGpuTiming,
+                                                          bool const collectMetrics) const
+        {
             if (width == 0u || height == 0u)
             {
                 throw std::invalid_argument("Benchmark frame dimensions must be greater than zero");
+            }
+            if (firstRow >= endRow || endRow > height)
+            {
+                throw std::invalid_argument("Benchmark row range must lie inside the viewport");
             }
 
             BoundingBox const cameraBounds{{m_modelBounds.min[0], m_modelBounds.min[1], m_modelBounds.min[2], 0.0f},
@@ -179,7 +447,7 @@ namespace gladius::tests::bench
 
             auto const eye = orbitalCamera.getEyePosition();
             auto const matrix = orbitalCamera.computeModelViewPerspectiveMatrix();
-            auto const request = compute::RenderRequest{
+            return compute::RenderRequest{
               .camera = {.eyePosition = {eye.x, eye.y, eye.z},
                          .forwardDirection = {matrix.s8, matrix.s9, matrix.sa},
                          .rightDirection = {matrix.s0, matrix.s1, matrix.s2},
@@ -191,27 +459,11 @@ namespace gladius::tests::bench
               .boundsErrorBound = m_boundsErrorBound,
               .viewport = {.width = width,
                            .height = height,
-                           .firstRow = 0u,
-                           .endRow = height},
+                           .firstRow = firstRow,
+                           .endRow = endRow},
               .freshness = {.sceneGeneration = m_session->getSceneGeneration()},
               .collectGpuTiming = collectGpuTiming,
               .collectMetrics = collectMetrics};
-
-            auto submission = m_session->submitFrame(request);
-            submission->wait();
-            if (submission->getStatus() != compute::RenderSubmissionStatus::Succeeded)
-            {
-                throw std::runtime_error("Benchmark frame failed: " + submission->getErrorMessage());
-            }
-
-            auto frame = submission->takeFrame();
-            if (!frame.has_value() || !frame->isValid())
-            {
-                throw std::runtime_error("Benchmark frame returned an invalid frame");
-            }
-            m_lastTiming = submission->getFrameTiming();
-            m_lastMetrics = submission->getFrameMetrics();
-            return *frame;
         }
 
         [[nodiscard]] std::optional<compute::FrameTiming> getLastTiming() const noexcept

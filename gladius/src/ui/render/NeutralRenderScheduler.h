@@ -56,9 +56,24 @@ namespace gladius::ui::async_rendering
     {
       public:
         static constexpr std::size_t MIN_PROGRESSIVE_CHUNK_PIXELS = 2u * 1024u;
-        static constexpr std::size_t MAX_PROGRESSIVE_CHUNK_PIXELS = 16u * 1024u;
+        /// Smallest chunk a settled static view starts with; only slower devices go below this.
+        static constexpr std::size_t INITIAL_PROGRESSIVE_CHUNK_PIXELS = 16u * 1024u;
+        /// Ceiling for one adaptive progressive chunk; equals a full 512x512 frame.
         static constexpr std::size_t MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS = 256u * 1024u;
+        /// Target GPU pass duration of a progressive chunk when no GPU timestamps exist.
         static constexpr float TARGET_PROGRESSIVE_CHUNK_MS = 20.0f;
+        /**
+         * @brief Number of progressive chunks a settled static view is filled in by default.
+         *
+         * The application starts at most one display submission per UI frame, so the chunk count
+         * bounds time-to-full-quality by `chunks * frameInterval`. Measured on the WebGPU backend
+         * (specs/031-webgpu-raymarch-performance): per-chunk CPU submission cost is ~0.1 ms, so
+         * the frame interval, not the submission, dominates. Fewer chunks therefore reach full
+         * quality proportionally faster.
+         */
+        static constexpr std::uint32_t TARGET_PROGRESSIVE_CHUNKS = 8u;
+        /// GPU pass time a single chunk may take before the budget is reduced again.
+        static constexpr float MAX_PROGRESSIVE_CHUNK_GPU_MS = 33.0f;
 
         using RequestFactory = std::function<std::optional<compute::RenderRequest>(RenderTaskRequest const &)>;
 
@@ -83,7 +98,9 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] bool hasInFlightSubmissions() const noexcept;
         [[nodiscard]] ProgressiveRenderProgress progressiveProgress() const noexcept;
         [[nodiscard]] std::size_t currentProgressiveChunkPixels() const noexcept;
-        void adaptProgressiveChunkBudget(std::uint64_t durationNs) noexcept;
+        void adaptProgressiveChunkBudget(RenderTaskResult const & result) noexcept;
+        /// @brief Chunk budget (pixels) the scheduler starts a progressive sequence with.
+        [[nodiscard]] static std::size_t budgetForResolution(std::size_t width, std::size_t height) noexcept;
 
       private:
         [[nodiscard]] static bool isSupportedDisplayTask(RenderTaskType type) noexcept;
@@ -101,6 +118,6 @@ namespace gladius::ui::async_rendering
         std::uint32_t m_progressiveHeight{};
         std::uint32_t m_progressiveNextRow{};
         bool m_progressiveSequenceActive{false};
-        std::size_t m_progressiveChunkPixels{MAX_PROGRESSIVE_CHUNK_PIXELS};
+        std::size_t m_progressiveChunkPixels{MAX_ADAPTIVE_PROGRESSIVE_CHUNK_PIXELS};
     };
 }
