@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../types.h"
+#include "compute/FunctionEvaluatorSnapshot.h"
 #include "compute/RenderSceneSnapshot.h"
 #include "nodes/nodesfwd.h"
 
@@ -55,6 +57,15 @@ namespace gladius::compute
                     nodes::Assembly const & flattenedAssembly,
                     std::uint64_t sceneGeneration,
                     ResourceManager const * resourceManager = nullptr);
+
+        /// @brief Lower one graph function of the assembly into a standalone evaluatable function.
+        /// The function becomes the assembly root, is lowered and flattened, and is emitted with
+        /// its own argument list and all of its outputs instead of the render `evaluateModel` contract.
+        [[nodiscard]] static FunctionEvaluatorSnapshot createFunctionEvaluator(
+            nodes::Assembly const & assembly,
+            gladius::ResourceId functionId,
+            std::uint64_t sceneGeneration,
+            ResourceManager const * resourceManager = nullptr);
 
             private:
                 using ParameterLookupIndices = std::map<nodes::ParameterId, int>;

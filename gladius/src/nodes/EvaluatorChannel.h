@@ -19,8 +19,9 @@ namespace gladius::nodes
      */
     enum class EvaluatorChannel
     {
-        ShapeAndColor, ///< model()/evaluateModel() - the existing shape + color entry point
-        Translucency   ///< translucencyModel()/evaluateTranslucency() - scalar translucency alpha
+        ShapeAndColor,    ///< model()/evaluateModel() - the existing shape + color entry point
+        Translucency,     ///< translucencyModel()/evaluateTranslucency() - scalar translucency alpha
+        FunctionSignature ///< evaluateFunction() - one entry point per graph function
     };
 
     /**

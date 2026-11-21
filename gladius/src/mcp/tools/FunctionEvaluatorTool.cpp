@@ -1,28 +1,39 @@
 /**
  * @file FunctionEvaluatorTool.cpp
- * @brief Implementation of FunctionEvaluatorTool — OpenCL-based function evaluation
+ * @brief Implementation of FunctionEvaluatorTool — backend-agnostic function evaluation
  */
 
 #include "FunctionEvaluatorTool.h"
+#include "FunctionEvaluatorToolWebGPU.h"
 
-#ifdef GLADIUS_ENABLE_OPENCL
 #include "../../Application.h"
-#include "../../CLProgram.h"
 #include "../../Document.h"
-#include "../../ResourceContext.h"
+#include "../../compute/AnalyticRenderSceneSnapshotFactory.h"
+#include "../../compute/ApplicationComputeRuntime.h"
 #include "../../compute/ComputeBackend.h"
-#include "../../compute/ComputeCore.h"
-#include "../../compute/GpuKernelAccessGuard.h"
-#include "../../compute/ProgramManager.h"
-#include "../../compute/RenderPayloadSnapshot.h"
+#include "../../compute/FunctionEvaluatorSnapshot.h"
+#include "../../compute/SdfEvaluation.h"
 #include "../../nodes/Assembly.h"
 #include "../../nodes/Model.h"
 #include "../../nodes/Parameter.h"
 #include "../../nodes/Port.h"
-#include "../../nodes/ToOCLVisitor.h"
+#include "../../types.h"
+#include "FunctionEvaluationSupport.h"
 
-#include <filesystem>
+#ifdef GLADIUS_ENABLE_OPENCL
+#include "../../CLProgram.h"
+#include "../../ResourceContext.h"
+#include "../../compute/ComputeCore.h"
+#include "../../compute/GpuKernelAccessGuard.h"
+#include "../../compute/ProgramManager.h"
+#include "../../compute/RenderPayloadSnapshot.h"
+#include "../../nodes/ToOCLVisitor.h"
+#endif
+
 #include <fmt/format.h>
+
+#ifdef GLADIUS_ENABLE_OPENCL
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <variant>
@@ -36,9 +47,40 @@
 
 namespace gladius::mcp::tools
 {
-#ifdef GLADIUS_ENABLE_OPENCL
     namespace
     {
+        /// @brief Describe why no compute backend could serve the evaluation request.
+        std::string noBackendMessage(Document const & document)
+        {
+            auto const backend = document.getBackendKind();
+            auto const backendName = backend ? std::string(compute::toString(*backend)) : std::string("unknown");
+#ifdef GLADIUS_ENABLE_OPENCL
+            (void)backendName;
+            return "Function evaluation requires an active OpenCL compute core. "
+                   "The selected backend (" + (backend ? std::string(compute::toString(*backend)) : std::string("unknown")) +
+                   ") does not support this evaluation tool.";
+#else
+            return "Function evaluation requires an active compute backend with function support. "
+                   "No usable WebGPU compute context is available (active backend: " + backendName + ").";
+#endif
+        }
+
+        /// @brief Validate the shape of the JSON sample array before flattening.
+        /// @return Error JSON on failure, empty JSON on success.
+        nlohmann::json validateSamples(nlohmann::json const & samples)
+        {
+            if (!samples.is_array() || samples.empty())
+            {
+                return {{"error", "'samples' must be a non-empty array."}};
+            }
+            if (samples.size() > 1000)
+            {
+                return {{"error", "Maximum 1000 sample points allowed."}};
+            }
+            return {};
+        }
+
+#ifdef GLADIUS_ENABLE_OPENCL
         /// Map a node type_index to the OpenCL type name.
         std::string typeIndexToOclString(std::type_index typeIndex)
         {
@@ -57,150 +99,9 @@ namespace gladius::mcp::tools
             return "float";
         }
 
-        /// Return the number of float components for a given type (1 for float, 3 for float3).
-        int componentCount(std::type_index typeIndex)
-        {
-            if (typeIndex == nodes::ParameterTypeIndex::Float3)
-            {
-                return 3;
-            }
-            if (typeIndex == nodes::ParameterTypeIndex::Matrix4)
-            {
-                return 16;
-            }
-            return 1;
-        }
-
-        /// User-facing type name.
-        std::string typeIndexToUserString(std::type_index typeIndex)
-        {
-            if (typeIndex == nodes::ParameterTypeIndex::Float)
-            {
-                return "float";
-            }
-            if (typeIndex == nodes::ParameterTypeIndex::Float3)
-            {
-                return "vec3";
-            }
-            return "float";
-        }
-
-        struct InputInfo
-        {
-            std::string name;      ///< Unique name in the OpenCL signature.
-            std::string shortName; ///< User-facing short name (e.g. "pos").
-            std::string oclType;   ///< "float" | "float3"
-            int components;        ///< 1 or 3
-            std::type_index type;  ///< Original type index.
-        };
-
-        struct OutputInfo
-        {
-            std::string name;
-            std::string oclType;
-            int components;
-            std::type_index type;
-        };
-
-        /// @brief Validate and flatten sample data into a contiguous float buffer.
-        /// @return Error JSON on failure, or empty JSON on success (populates inputBuffer).
-        nlohmann::json flattenSamples(nlohmann::json const & samples,
-                                      std::vector<InputInfo> const & inputs,
-                                      int totalInputComponents,
-                                      std::vector<float> & inputBuffer)
-        {
-            if (!samples.is_array() || samples.empty())
-            {
-                return {{"error", "'samples' must be a non-empty array."}};
-            }
-
-            auto const sampleCount = samples.size();
-            if (sampleCount > 1000)
-            {
-                return {{"error", "Maximum 1000 sample points allowed."}};
-            }
-
-            inputBuffer.reserve(sampleCount * static_cast<size_t>(totalInputComponents));
-
-            for (size_t si = 0; si < sampleCount; ++si)
-            {
-                auto const & sample = samples[si];
-                if (!sample.is_object())
-                {
-                    return {{"error",
-                             fmt::format("Sample {} must be a JSON object mapping argument "
-                                         "names to values.", si)}};
-                }
-
-                for (auto const & inp : inputs)
-                {
-                    std::string key;
-                    if (sample.contains(inp.shortName))
-                    {
-                        key = inp.shortName;
-                    }
-                    else if (sample.contains(inp.name))
-                    {
-                        key = inp.name;
-                    }
-
-                    if (key.empty())
-                    {
-                        std::string expected;
-                        for (auto const & i : inputs)
-                        {
-                            if (!expected.empty())
-                            {
-                                expected += ", ";
-                            }
-                            expected += fmt::format("\"{}\" ({})", i.shortName,
-                                                    typeIndexToUserString(i.type));
-                        }
-                        return {{"error",
-                                 fmt::format("Sample {} is missing argument \"{}\". "
-                                             "Expected arguments: {}",
-                                             si, inp.shortName, expected)}};
-                    }
-
-                    auto const & val = sample[key];
-                    if (inp.components == 1)
-                    {
-                        if (!val.is_number())
-                        {
-                            return {{"error",
-                                     fmt::format("Sample {} argument \"{}\" must be a number.",
-                                                 si, key)}};
-                        }
-                        inputBuffer.push_back(val.get<float>());
-                    }
-                    else if (inp.components == 3)
-                    {
-                        if (!val.is_array() || val.size() != 3)
-                        {
-                            return {{"error",
-                                     fmt::format("Sample {} argument \"{}\" must be an array "
-                                                 "of 3 numbers.", si, key)}};
-                        }
-                        for (int c = 0; c < 3; ++c)
-                        {
-                            if (!val[c].is_number())
-                            {
-                                return {{"error",
-                                         fmt::format("Sample {} argument \"{}\"[{}] must be "
-                                                     "a number.", si, key, c)}};
-                            }
-                            inputBuffer.push_back(val[c].get<float>());
-                        }
-                    }
-                }
-            }
-
-            return {};
-        }
-
         /// @brief Generate the OpenCL eval kernel source code.
-        std::string generateEvalKernel(std::vector<InputInfo> const & inputs,
-                                       std::vector<OutputInfo> const & outputInfos,
+        std::string generateEvalKernel(std::vector<FunctionInputInfo> const & inputs,
+                                       std::vector<FunctionOutputInfo> const & outputInfos,
                                        int totalInputComponents,
                                        int totalOutputComponents,
                                        std::string const & oclFuncName,
@@ -224,13 +125,13 @@ namespace gladius::mcp::tools
                 {
                     kernelSrc << fmt::format(
                       "    {0} const {1} = vload3(0, evalInputBuf + gid * {2} + {3});\n",
-                      inp.oclType, inp.name, totalInputComponents, bufferOffset);
+                      typeIndexToOclString(inp.type), inp.name, totalInputComponents, bufferOffset);
                 }
                 else
                 {
                     kernelSrc << fmt::format(
                       "    {0} const {1} = evalInputBuf[gid * {2} + {3}];\n",
-                      inp.oclType, inp.name, totalInputComponents, bufferOffset);
+                      typeIndexToOclString(inp.type), inp.name, totalInputComponents, bufferOffset);
                 }
                 bufferOffset += inp.components;
             }
@@ -248,7 +149,7 @@ namespace gladius::mcp::tools
             {
                 for (auto const & out : outputInfos)
                 {
-                    kernelSrc << fmt::format("    {0} evalOut_{1};\n", out.oclType, out.name);
+                    kernelSrc << fmt::format("    {0} evalOut_{1};\n", typeIndexToOclString(out.type), out.name);
                 }
 
                 std::ostringstream callArgs;
@@ -291,154 +192,9 @@ namespace gladius::mcp::tools
             kernelSrc << "}\n";
             return kernelSrc.str();
         }
-
-        /// @brief Format evaluation results into the response JSON.
-        nlohmann::json formatResults(std::vector<float> const & outputData,
-                                     std::vector<OutputInfo> const & outputInfos,
-                                     int totalOutputComponents,
-                                     size_t sampleCount,
-                                     uint32_t functionId)
-        {
-            using json = nlohmann::json;
-            json result;
-            result["success"] = true;
-            result["function_id"] = functionId;
-
-            json warnings = json::array();
-            json results = json::array();
-
-            bool const singleOutput = (outputInfos.size() == 1);
-
-            for (size_t i = 0; i < sampleCount; ++i)
-            {
-                auto const sampleBase =
-                  i * static_cast<size_t>(totalOutputComponents);
-
-                if (singleOutput)
-                {
-                    auto const & out = outputInfos.front();
-                    if (out.components == 1)
-                    {
-                        float const v = outputData[sampleBase];
-                        if (std::isnan(v) || std::isinf(v))
-                        {
-                            results.push_back(nullptr);
-                            warnings.push_back(
-                              {{"sample_index", i},
-                               {"message",
-                                std::isnan(v) ? "NaN result" : "Infinity result"}});
-                        }
-                        else
-                        {
-                            results.push_back(v);
-                        }
-                    }
-                    else
-                    {
-                        bool hasAnomalies = false;
-                        for (int c = 0; c < out.components; ++c)
-                        {
-                            float const v = outputData[sampleBase + c];
-                            if (std::isnan(v) || std::isinf(v))
-                            {
-                                hasAnomalies = true;
-                            }
-                        }
-                        if (hasAnomalies)
-                        {
-                            results.push_back(nullptr);
-                            warnings.push_back(
-                              {{"sample_index", i},
-                               {"message", "NaN/Infinity in vec3 result"}});
-                        }
-                        else
-                        {
-                            results.push_back({outputData[sampleBase],
-                                               outputData[sampleBase + 1],
-                                               outputData[sampleBase + 2]});
-                        }
-                    }
-                }
-                else
-                {
-                    json sampleResult;
-                    int offset = 0;
-                    for (auto const & out : outputInfos)
-                    {
-                        if (out.components == 1)
-                        {
-                            float const v = outputData[sampleBase + offset];
-                            if (std::isnan(v) || std::isinf(v))
-                            {
-                                sampleResult[out.name] = nullptr;
-                                warnings.push_back(
-                                  {{"sample_index", i},
-                                   {"output", out.name},
-                                   {"message",
-                                    std::isnan(v) ? "NaN result" : "Infinity result"}});
-                            }
-                            else
-                            {
-                                sampleResult[out.name] = v;
-                            }
-                        }
-                        else
-                        {
-                            bool hasAnomalies = false;
-                            for (int c = 0; c < out.components; ++c)
-                            {
-                                float const v = outputData[sampleBase + offset + c];
-                                if (std::isnan(v) || std::isinf(v))
-                                {
-                                    hasAnomalies = true;
-                                }
-                            }
-                            if (hasAnomalies)
-                            {
-                                sampleResult[out.name] = nullptr;
-                                warnings.push_back(
-                                  {{"sample_index", i},
-                                   {"output", out.name},
-                                   {"message", "NaN/Infinity in vec3 result"}});
-                            }
-                            else
-                            {
-                                sampleResult[out.name] = {
-                                  outputData[sampleBase + offset],
-                                  outputData[sampleBase + offset + 1],
-                                  outputData[sampleBase + offset + 2]};
-                            }
-                        }
-                        offset += out.components;
-                    }
-                    results.push_back(std::move(sampleResult));
-                }
-            }
-
-            result["results"] = std::move(results);
-            if (!warnings.empty())
-            {
-                result["warnings"] = std::move(warnings);
-            }
-
-            if (singleOutput)
-            {
-                result["output_type"] = typeIndexToUserString(outputInfos.front().type);
-            }
-            else
-            {
-                json outputTypes;
-                for (auto const & out : outputInfos)
-                {
-                    outputTypes[out.name] = typeIndexToUserString(out.type);
-                }
-                result["output_types"] = std::move(outputTypes);
-            }
-            return result;
-        }
+#endif
 
     } // anonymous namespace
-#endif
 
     FunctionEvaluatorTool::FunctionEvaluatorTool(Application * app)
         : MCPToolBase(app)
@@ -448,13 +204,6 @@ namespace gladius::mcp::tools
     nlohmann::json FunctionEvaluatorTool::evaluateFunction(uint32_t functionId,
                                                            nlohmann::json const & samples)
     {
-#ifndef GLADIUS_ENABLE_OPENCL
-                (void)functionId;
-                (void)samples;
-                return createToolError(
-                    "Function evaluation is unavailable in a pure WebGPU build. "
-                    "Use WebGPU rendering or provide a backend with host-side evaluation support.");
-#else
         using json = nlohmann::json;
 
         if (!validateApplication())
@@ -468,292 +217,279 @@ namespace gladius::mcp::tools
             return createToolError("No active document. Open or create a document first.");
         }
 
-        auto const core = document->getCore();
-        if (!core)
-        {
-                        auto const backend = document->getBackendKind();
-            return createToolError(
-              "Function evaluation requires an active OpenCL compute core. "
-              "The selected backend does not support this evaluation tool.",
-              {},
-                            {{"reason", "backend_unsupported"},
-                             {"phase", "backend_validation"},
-                             {"backend", backend ? std::string(compute::toString(*backend)) : "unknown"}});
-        }
-
         auto assembly = document->getAssembly();
         if (!assembly)
         {
             return createToolError("Document has no assembly.");
         }
 
+        if (auto const sampleError = validateSamples(samples); !sampleError.empty())
+        {
+            return createToolError(sampleError["error"].get<std::string>());
+        }
+
         // --- Locate the function model ------------------------------------------------
         auto const assemblyModelId = assembly->getAssemblyModelId();
         bool const isAssembly = (functionId == assemblyModelId);
-        nodes::SharedModel functionModel;
-
-        if (isAssembly)
-        {
-            functionModel = assembly->assemblyModel();
-        }
-        else
-        {
-            functionModel = assembly->findModel(functionId);
-        }
+        nodes::SharedModel functionModel = isAssembly
+                                             ? assembly->assemblyModel()
+                                             : assembly->findModel(functionId);
 
         if (!functionModel)
         {
-            return createToolError(
-              fmt::format("Function with resource ID {} not found.", functionId));
+            return createToolError(fmt::format("Function with resource ID {} not found.", functionId));
         }
 
         // --- Collect input / output metadata ------------------------------------------
-        std::vector<InputInfo> inputs;
+        std::vector<FunctionInputInfo> inputs;
+        std::vector<FunctionOutputInfo> outputInfos;
         int totalInputComponents = 0;
+        int totalOutputComponents = 0;
 
         if (isAssembly)
         {
-            // Assembly model always has a single float3 pos input.
-            inputs.push_back(
-              {"pos", "pos", "float3", 3, nodes::ParameterTypeIndex::Float3});
+            // The assembly model always has a single float3 pos input and a single scalar result.
+            inputs.push_back({"pos", "pos", 3, nodes::ParameterTypeIndex::Float3});
             totalInputComponents = 3;
+            outputInfos.push_back({"result", 1, nodes::ParameterTypeIndex::Float});
+            totalOutputComponents = 1;
         }
         else
         {
-            // Sort inputs by definition order (sort index) to match the function signature
-            // generated by ToOclVisitor::visit(Begin &), which also sorts by sort index.
-            auto const & rawInputs = functionModel->getInputs();
-            std::vector<std::pair<int, std::string>> sortableInputs;
-            sortableInputs.reserve(rawInputs.size());
-            for (auto const & [name, port] : rawInputs)
+            inputs = collectFunctionInputs(*functionModel);
+            for (auto const & input : inputs)
             {
-                sortableInputs.emplace_back(port.getSortIndex(), name);
+                totalInputComponents += input.components;
             }
-            std::sort(sortableInputs.begin(), sortableInputs.end());
 
-            for (auto const & [sortIdx, name] : sortableInputs)
+            outputInfos = collectFunctionOutputs(*functionModel);
+            for (auto const & output : outputInfos)
             {
-                auto const & port = rawInputs.at(name);
-                auto const & typeIdx = port.getTypeIndex();
-                int const comps = componentCount(typeIdx);
-                inputs.push_back(
-                  {std::string(port.getUniqueName()),
-                   std::string(port.getShortName().empty() ? name : port.getShortName()),
-                   typeIndexToOclString(typeIdx), comps, typeIdx});
-                totalInputComponents += comps;
+                totalOutputComponents += output.components;
             }
         }
 
         if (inputs.empty())
         {
-            return createToolError("Function has no inputs — nothing to evaluate.");
+            return createToolError("Function has no inputs - nothing to evaluate.");
         }
 
-        // Collect all output metadata. For assembly model it's always a single float
-        // (the .w component). For sub-functions, collect all outputs.
-        std::vector<OutputInfo> outputInfos;
-        int totalOutputComponents = 0;
-
-        if (isAssembly)
+        if (outputInfos.empty())
         {
-            outputInfos.push_back({"result", "float", 1, nodes::ParameterTypeIndex::Float});
-            totalOutputComponents = 1;
-        }
-        else
-        {
-            auto & outputs = functionModel->getOutputs();
-            if (outputs.empty())
-            {
-                return createToolError("Function has no outputs.");
-            }
-            for (auto const & [oName, oParam] : outputs)
-            {
-                int const comps = componentCount(oParam.getTypeIndex());
-                outputInfos.push_back(
-                  {oName,
-                   typeIndexToOclString(oParam.getTypeIndex()),
-                   comps,
-                   oParam.getTypeIndex()});
-                totalOutputComponents += comps;
-            }
+            return createToolError("Function has no outputs.");
         }
 
-        // --- Validate and flatten sample data -----------------------------------------
+        // --- Flatten samples into a contiguous float buffer ---------------------------
         std::vector<float> inputBuffer;
-        auto flattenError = flattenSamples(samples, inputs, totalInputComponents, inputBuffer);
-        if (flattenError.contains("error"))
+        if (auto const flattenError = flattenFunctionSamples(samples, inputs, totalInputComponents, inputBuffer);
+            !flattenError.empty())
         {
             return createToolError(flattenError["error"].get<std::string>());
         }
-        auto const sampleCount = samples.size();
 
-        // --- Ensure model is compiled -------------------------------------------------
-        document->refreshModelBlocking();
+#ifdef GLADIUS_ENABLE_OPENCL
+        if (auto const core = document->getCore(); core != nullptr)
+        {
+            return evaluateFunctionOpenCL(*document, *core, *assembly, functionId, isAssembly,
+                                          *functionModel, inputs, outputInfos, inputBuffer,
+                                          totalInputComponents, totalOutputComponents);
+        }
+#endif
 
-        // For assembly (root) evaluation, use the pre-compiled flat assembly source.
-        // For sub-function evaluation, generate OCL from the original assembly so
-        // individual function definitions (function_N) are available — the flat
-        // assembly inlines everything into model() and omits them.
+#if defined(GLADIUS_ENABLE_WEBGPU)
+        if (auto const webgpuResult = evaluateFunctionWebGPU(
+              *document, *assembly, functionId, isAssembly, samples.size(),
+              outputInfos, inputBuffer, totalInputComponents, totalOutputComponents);
+            !webgpuResult.is_null())
+        {
+            return webgpuResult;
+        }
+#endif
+
+        return createToolError(noBackendMessage(*document));
+    }
+
+
+#ifdef GLADIUS_ENABLE_OPENCL
+    namespace
+    {
+        /// @brief Compile and evaluate the function with the OpenCL compute backend.
+        nlohmann::json evaluateFunctionOpenCL(
+        Document & document,
+        ComputeCore & core,
+        nodes::Assembly & assembly,
+        uint32_t functionId,
+        bool isAssembly,
+        nodes::Model & functionModel,
+        std::vector<FunctionInputInfo> const & inputs,
+        std::vector<FunctionOutputInfo> const & outputInfos,
+        std::vector<float> const & inputBuffer,
+        int totalInputComponents,
+        int totalOutputComponents)
+    {
+        using json = nlohmann::json;
+
+        auto computeContext = core.getComputeContext();
+        if (!computeContext)
+        {
+            return MCPToolBase::createToolError("OpenCL compute context is not available. "
+                                   "An OpenCL device (GPU or CPU) is required for function evaluation.");
+        }
+
+        // --- Build the model source --------------------------------------------------
         std::string modelSource;
+        std::string oclFuncName;
+
         if (isAssembly)
         {
-            modelSource = core->getProgramManager().getModelSource();
+            document.refreshModelBlocking();
+            modelSource = core.getProgramManager().getModelSource();
+            oclFuncName = "model";
         }
         else
         {
-            std::stringstream oclStream;
-            nodes::ToOclVisitor visitor;
-            visitor.setStandaloneMode(true);
-            assembly->visitNodes(visitor);
-            visitor.write(oclStream);
-            modelSource = oclStream.str();
+            // Visitor walks the entire assembly to pull in all function definitions,
+            // but we invoke the specific function directly.
+            nodes::ToOCLVisitor oclVisitor(assembly);
+            oclVisitor.setStandaloneMode(true);
+            assembly.visitNodes(oclVisitor);
+            oclVisitor.write(modelSource);
+
+            if (modelSource.empty())
+            {
+                return MCPToolBase::createToolError("Model source is empty - the function graph could not be compiled. "
+                                       "Check that the document contains valid functions.");
+            }
+
+            oclFuncName = fmt::format("graphFunction_{}", functionId);
         }
 
-        if (modelSource.empty())
-        {
-            return createToolError(
-              "Model source is empty — the function graph could not be compiled. "
-              "Check that the document contains valid functions.");
-        }
+        // --- Generate eval kernel ----------------------------------------------------
+        std::string const kernelSource = generateEvalKernel(inputs, outputInfos,
+                                                            totalInputComponents, totalOutputComponents,
+                                                            oclFuncName, isAssembly);
 
-        auto computeContext = core->getComputeContext();
-        if (!computeContext || !computeContext->isValid())
-        {
-            return createToolError(
-              "OpenCL compute context is not available. "
-              "An OpenCL device (GPU or CPU) is required for function evaluation.");
-        }
+        // --- Compile ------------------------------------------------------------------
+        // The kernel is appended directly to modelSource - no separate include needed.
+        std::string fullSource = modelSource + "\n" + kernelSource;
 
-        auto resources = core->getResourceContext();
-        if (!resources)
-        {
-            return createToolError("Resource context not available.");
-        }
+        std::vector<std::string> const fileNames{
+            "arguments.h", "types.h", "sdf.h", "sampler.h", "rendering.h", "sdf_generator.h",
+            "mesh_sdf.cl", "sdf.cl", "rendering.cl", "sdf_generator.cl"};
 
-        // --- Generate eval kernel source ----------------------------------------------
-        std::string const oclFuncName =
-          isAssembly ? "model" : functionModel->getModelName();
-
-        auto const kernelSrcStr = generateEvalKernel(
-          inputs, outputInfos, totalInputComponents, totalOutputComponents,
-          oclFuncName, isAssembly);
-
-        std::string const fullDynamic = modelSource + kernelSrcStr;
-
-        // --- Compile the eval program -------------------------------------------------
-        FileNames const sourceFiles = {"arguments.h",
-                                       "types.h",
-                                       "sdf.h",
-                                       "sampler.h",
-                                       "rendering.h",
-                                       "sdf_generator.h",
-                                       "mesh_sdf.cl",
-                                       "sdf.cl",
-                                       "rendering.cl",
-                                       "sdf_generator.cl"};
-
-        CLProgram evalProg(computeContext);
-        BuildCallBack noCallback;
         try
         {
-            evalProg.buildFromSourceAndLinkWithLib(sourceFiles, fullDynamic, noCallback);
+            core.getProgramManager().buildFromSourceAndLinkWithLib(fileNames, fullSource, nullptr);
         }
         catch (std::exception const & e)
         {
-            return createToolError(
-              fmt::format("OpenCL compilation failed: {}", e.what()));
+            // Dump the failing source to a temp file for debugging
+            auto dumpPath = std::filesystem::temp_directory_path() /
+                            ("gladius_eval_debug_" + std::to_string(static_cast<int>(getpid())) + ".cl");
+            std::ofstream(dumpPath) << fullSource;
+            return MCPToolBase::createToolError(fmt::format("OpenCL compilation failed: {}\n"
+                                               "OpenCL compilation failed. Source dumped to {}. Generated eval kernel:\n{}",
+                                               e.what(), dumpPath.string(), kernelSource));
         }
 
-        if (!evalProg.isValid())
+        auto program = core.getProgramManager().getProgram();
+        if (!program)
         {
-            // Dump source to temp file for debugging
-            auto const dumpPath =
-              std::filesystem::temp_directory_path() /
-              fmt::format("gladius_eval_debug_{}.cl", getpid());
-            {
-                std::ofstream dump(dumpPath);
-                dump << fullDynamic;
-            }
-            return createToolError(
-              fmt::format("OpenCL compilation failed. Source dumped to {}. "
-                          "Generated eval kernel:\n{}",
-                          dumpPath.string(),
-                          kernelSrcStr));
+            return MCPToolBase::createToolError("Compiled OpenCL program is not available.");
         }
 
-        // --- Create buffers and dispatch ----------------------------------------------
-        auto const inputByteSize = inputBuffer.size() * sizeof(float);
-        auto const outputFloatCount =
-          sampleCount * static_cast<size_t>(totalOutputComponents);
-        auto const outputByteSize = outputFloatCount * sizeof(float);
+        // --- Create buffers -----------------------------------------------------------
+        auto const sampleCount = static_cast<uint32_t>(inputBuffer.size() / totalInputComponents);
+
+        std::vector<float> outputData(static_cast<size_t>(sampleCount) * totalOutputComponents, 0.0f);
+
+        cl::CommandQueue queue = computeContext->getCommandQueue();
+
+        auto inputBufferPtr = computeContext->createBufferChecked(
+          CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+          sizeof(float) * inputBuffer.size(),
+          inputBuffer.data());
+
+        auto outputBufferPtr = computeContext->createBufferChecked(
+          CL_MEM_WRITE_ONLY,
+          sizeof(float) * outputData.size(),
+          nullptr);
+
+        // --- Build payload bundle ------------------------------------------------------
+        // Resource paths (Mesh, Image) are active if the model was compiled with them.
+        // We capture all payloads; unused kernel arguments are harmless in OpenCL.
+        auto resources = document.getResourceManager();
+        auto const & resourceContext = core.getResourceContext();
+        auto const * primitives = core.getPrimitiveManagerPtr();
+
+        if (!primitives)
+        {
+            return MCPToolBase::createToolError("Primitive buffers are not available.");
+        }
+
+        compute::RenderPayloadSnapshot const payloadSnapshot =
+            compute::RenderPayloadSnapshot::capture(resources, *primitives);
+        if (!payloadSnapshot.isValid())
+        {
+            return MCPToolBase::createToolError("GPU resources are not available for evaluation.");
+        }
+
+        // --- Launch kernel -------------------------------------------------------------
+        const uint32_t evalSampleCount = sampleCount;
+        auto & meshBuffer = payloadSnapshot.meshBuffer;
+        auto & beamBuffer = payloadSnapshot.beamBuffer;
+        auto & imageBuffer = payloadSnapshot.imageBuffer;
+        uint32_t meshCount = payloadSnapshot.meshCount;
+        uint32_t beamCount = payloadSnapshot.beamCount;
+        uint32_t imageCount = payloadSnapshot.imageCount;
+        uint32_t meshSdfCapacity = primitives->getMeshSdfCellCapacity();
+        uint32_t meshBeamLatticeCapacity = primitives->getBeamLatticeCellCapacity();
+        uint32_t meshMaxFaces = primitives->getMeshMaxFaceCount();
+        uint32_t meshMaxVertexIndex = primitives->getMaxVertexIndex();
 
         try
         {
-            auto clInputBuffer = computeContext->createBufferChecked(
-              CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, inputByteSize, inputBuffer.data());
-
-            auto clOutputBuffer =
-              computeContext->createBufferChecked(CL_MEM_WRITE_ONLY, outputByteSize);
-
-            auto queue = computeContext->createQueue();
-
-            auto primitives = core->getPrimitives();
-                        if (!primitives)
-                        {
-                                return createToolError("Primitive buffers are not available.");
-                        }
-
-                        auto payloadSnapshot = RenderPayloadSnapshot::capture(resources, *primitives);
-                        GpuKernelAccessGuard gpuAccess(
-                            *computeContext,
-                            queue,
-                            "gladius_eval",
-                            payloadSnapshot.readAccesses());
-                        if (!gpuAccess.granted())
-                        {
-                                return createToolError("GPU resources are not available for evaluation.");
-                        }
-
-                        cl::Event const evalEvent = evalProg.runNonBlockingWithWaitList(
+            compute::GpuKernelAccessGuard gpuAccess(*computeContext, queue, "gladius_eval",
+                                                    payloadSnapshot.readAccesses());
+            auto evalEvent = program->runNonBlockingWithWaitList(
               queue,
               "gladius_eval",
               cl::NullRange,
               cl::NDRange(sampleCount),
-                            gpuAccess.waitEvents(),
-              *clInputBuffer,
-              *clOutputBuffer,
-              static_cast<cl_uint>(sampleCount),
-              resources->getBuildArea(),
-              primitives->primitives.getBuffer(),
-              static_cast<cl_int>(primitives->primitives.getSize()),
-              primitives->data.getBuffer(),
-              static_cast<cl_int>(primitives->data.getSize()),
-              resources->getRenderingSettings(),
-              resources->getPrecompSdfBuffer().getBuffer(),
-              resources->getParameterBuffer().getBuffer(),
-              resources->getCommandBuffer().getBuffer(),
-              static_cast<cl_int>(resources->getCommandBuffer().getData().size()),
-              resources->getPreCompSdfBBox());
-                        gpuAccess.complete(evalEvent);
-                        if (evalEvent())
-                        {
-                                evalEvent.wait();
-                        }
-                        CL_ERROR(queue.finish());
+              gpuAccess.waitEvents(),
+              *inputBufferPtr,
+              *outputBufferPtr,
+              evalSampleCount,
+              meshBuffer,
+              beamBuffer,
+              imageBuffer,
+              meshCount,
+              beamCount,
+              imageCount,
+              meshSdfCapacity,
+              meshBeamLatticeCapacity,
+              meshMaxFaces,
+              meshMaxVertexIndex);
+            gpuAccess.complete(evalEvent);
 
-            // Read back results.
-            std::vector<float> outputData(outputFloatCount);
-            queue.enqueueReadBuffer(*clOutputBuffer, CL_TRUE, 0, outputByteSize, outputData.data());
+            // Wait for all work
+            CL_ERROR(queue.finish());
 
-            return formatResults(outputData, outputInfos, totalOutputComponents,
-                                 sampleCount, functionId);
+            // Readback
+            CL_ERROR(queue.enqueueReadBuffer(*outputBufferPtr, CL_TRUE, 0,
+                                             sizeof(float) * outputData.size(),
+                                             outputData.data()));
         }
-        catch (std::exception const & e)
+        catch (cl::Error const & e)
         {
-            return createToolError(
-              fmt::format("Evaluation failed: {}", e.what()));
+            return MCPToolBase::createToolError(fmt::format("OpenCL runtime error: {} ({})",
+                                               compute::clErrorMessage(e), e.what()));
         }
-#endif
+
+        return formatFunctionResults(outputData, outputInfos, totalOutputComponents,
+                                     static_cast<std::size_t>(sampleCount), functionId);
     }
+    } // anonymous namespace
+#endif
 
 } // namespace gladius::mcp::tools

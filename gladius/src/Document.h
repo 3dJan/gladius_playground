@@ -157,6 +157,12 @@ namespace gladius
             m_backendRuntime = runtime;
         }
 
+        /// @return The application-selected backend runtime, or null when none is set.
+        [[nodiscard]] compute::IBackendRuntime * getBackendRuntime() const noexcept
+        {
+            return m_backendRuntime;
+        }
+
         /// Blocks until any in-flight asynchronous file-load / model-refresh worker
         /// has finished before member teardown begins. Without this, the implicit
         /// std::future destructors join the workers only after members declared after
@@ -248,6 +254,22 @@ namespace gladius
         void newModel();
         void newEmptyModel();
         void newFromTemplate();
+
+        /// @brief Backend-neutral result of compiling the current model's GPU program.
+        struct ProgramCompileResult
+        {
+            bool ok{};
+            std::string backend;
+            std::string message;
+        };
+
+        /// @brief Refreshes the model and compiles its GPU program on the selected backend.
+        /// OpenCL compiles the slicer program; WebGPU lowers the flattened graph to WGSL and
+        /// compiles it inside a Dawn validation error scope.
+        [[nodiscard]] ProgramCompileResult compileModelProgramBlocking();
+
+        /// @return The domain the selected backend evaluates the model on.
+        [[nodiscard]] compute::RenderEvaluationDomain getEvaluationDomain() const;
 
         /// @return true if the parameter values were successfully pushed to the GPU
         bool updateParameter();

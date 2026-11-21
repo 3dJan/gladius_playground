@@ -27,6 +27,27 @@ namespace gladius::webgpu
             return std::string{file.begin(), file.end()};
         }
 
+        void replaceMarker(std::string & shader, std::string_view const marker, std::string_view const replacement)
+        {
+            auto const markerPosition = shader.find(marker);
+            if (markerPosition == std::string::npos)
+            {
+                throw std::runtime_error(fmt::format("WebGPU SDF evaluation shader has no insertion point: {}", marker));
+            }
+
+            shader.replace(markerPosition, marker.size(), replacement);
+        }
+
+        std::string modulesPrefix(std::vector<std::string> const & modules)
+        {
+            std::string replacement;
+            for (auto const & module : modules)
+            {
+                replacement += module + "\n";
+            }
+            return replacement;
+        }
+
         std::string insertEvaluator(std::string_view const shaderPath,
                                     std::string_view const modelEvaluator,
                                     std::vector<std::string> const & modules)
@@ -39,19 +60,7 @@ namespace gladius::webgpu
             }
 
             std::string shader = loadEmbeddedShader(shaderPath);
-            auto const markerPosition = shader.find(evaluatorMarker);
-            if (markerPosition == std::string::npos)
-            {
-                throw std::runtime_error("WebGPU SDF evaluation shader has no evaluator insertion point");
-            }
-
-            std::string replacement;
-            for (auto const & module : modules)
-            {
-                replacement += module + "\n";
-            }
-            replacement += std::string{modelEvaluator};
-            shader.replace(markerPosition, evaluatorMarker.size(), replacement);
+            replaceMarker(shader, evaluatorMarker, modulesPrefix(modules) + std::string{modelEvaluator});
             return shader;
         }
 
@@ -66,6 +75,29 @@ namespace gladius::webgpu
                 module.erase(markerPosition, moduleMarker.size());
             }
             return module;
+        }
+
+        std::vector<std::string> collectResourceModules(bool const includeMesh,
+                                                        bool const includeBeam,
+                                                        bool const includeImage)
+        {
+            std::vector<std::string> modules;
+            if (includeMesh)
+            {
+                modules.push_back(
+                  loadEmbeddedModule("src/webgpu/shaders/mesh_sdf.wgsl", "// GLADIUS_MESH_SDF_MODULE"));
+            }
+            if (includeBeam)
+            {
+                modules.push_back(
+                  loadEmbeddedModule("src/webgpu/shaders/beam_sdf.wgsl", "// GLADIUS_BEAM_SDF_MODULE"));
+            }
+            if (includeImage)
+            {
+                modules.push_back(
+                  loadEmbeddedModule("src/webgpu/shaders/image_sampling.wgsl", "// GLADIUS_IMAGE_SAMPLING_MODULE"));
+            }
+            return modules;
         }
     }
 
@@ -84,65 +116,54 @@ namespace gladius::webgpu
         return composeWithResourceSupport(modelEvaluator, false, true, false);
     }
 
-    std::string WebGPUSdfShaderComposer::composeWithMeshAndBeamSupport(
-      std::string_view const modelEvaluator)
+
+    std::string WebGPUSdfShaderComposer::composeWithMeshAndBeamSupport(std::string_view const modelEvaluator)
     {
-                return composeWithResourceSupport(modelEvaluator, true, true, false);
-        }
-
-        std::string WebGPUSdfShaderComposer::composeWithImageSupport(
-            std::string_view const modelEvaluator)
-        {
-                return composeWithResourceSupport(modelEvaluator, false, false, true);
-        }
-
-        std::string WebGPUSdfShaderComposer::composeWithResourceSupport(
-            std::string_view const modelEvaluator,
-            bool const includeMesh,
-            bool const includeBeam,
-            bool const includeImage)
-        {
-                std::vector<std::string> modules;
-                if (includeMesh)
-        {
-                        modules.push_back(loadEmbeddedModule(
-                            "src/webgpu/shaders/mesh_sdf.wgsl", "// GLADIUS_MESH_SDF_MODULE"));
-                }
-                if (includeBeam)
-                {
-                        modules.push_back(loadEmbeddedModule(
-                            "src/webgpu/shaders/beam_sdf.wgsl", "// GLADIUS_BEAM_SDF_MODULE"));
-                }
-                if (includeImage)
-                {
-                        modules.push_back(loadEmbeddedModule(
-                            "src/webgpu/shaders/image_sampling.wgsl", "// GLADIUS_IMAGE_SAMPLING_MODULE"));
-                }
-        return insertEvaluator("src/webgpu/shaders/sdf_evaluate.wgsl", modelEvaluator, modules);
+        return composeWithResourceSupport(modelEvaluator, true, true, false);
     }
 
-        std::string WebGPUSdfShaderComposer::composeColorWithResourceSupport(
-            std::string_view const modelEvaluator,
-            bool const includeMesh,
-            bool const includeBeam,
-            bool const includeImage)
+    std::string WebGPUSdfShaderComposer::composeWithImageSupport(std::string_view const modelEvaluator)
+    {
+        return composeWithResourceSupport(modelEvaluator, false, false, true);
+    }
+
+    std::string WebGPUSdfShaderComposer::composeWithResourceSupport(std::string_view const modelEvaluator,
+                                                                   bool const includeMesh,
+                                                                   bool const includeBeam,
+                                                                   bool const includeImage)
+    {
+        return insertEvaluator("src/webgpu/shaders/sdf_evaluate.wgsl",
+                               modelEvaluator,
+                               collectResourceModules(includeMesh, includeBeam, includeImage));
+    }
+
+    std::string WebGPUSdfShaderComposer::composeColorWithResourceSupport(std::string_view const modelEvaluator,
+                                                                        bool const includeMesh,
+                                                                        bool const includeBeam,
+                                                                        bool const includeImage)
+    {
+        return insertEvaluator("src/webgpu/shaders/sdf_evaluate_color.wgsl",
+                               modelEvaluator,
+                               collectResourceModules(includeMesh, includeBeam, includeImage));
+    }
+
+    std::string WebGPUSdfShaderComposer::composeFunctionWithResourceSupport(std::string_view const modelEvaluator,
+                                                                           std::string_view const abiDeclarations,
+                                                                           bool const includeMesh,
+                                                                           bool const includeBeam,
+                                                                           bool const includeImage)
+    {
+        constexpr std::string_view abiMarker = "// GLADIUS_FUNCTION_ABI";
+
+        if (abiDeclarations.empty())
         {
-                std::vector<std::string> modules;
-                if (includeMesh)
-                {
-                        modules.push_back(
-                            loadEmbeddedModule("src/webgpu/shaders/mesh_sdf.wgsl", "// GLADIUS_MESH_SDF_MODULE"));
-                }
-                if (includeBeam)
-                {
-                        modules.push_back(
-                            loadEmbeddedModule("src/webgpu/shaders/beam_sdf.wgsl", "// GLADIUS_BEAM_SDF_MODULE"));
-                }
-                if (includeImage)
-                {
-                        modules.push_back(loadEmbeddedModule(
-                            "src/webgpu/shaders/image_sampling.wgsl", "// GLADIUS_IMAGE_SAMPLING_MODULE"));
-                }
-                return insertEvaluator("src/webgpu/shaders/sdf_evaluate_color.wgsl", modelEvaluator, modules);
+            throw std::invalid_argument("WGSL function evaluation ABI must not be empty");
         }
+
+        auto shader = insertEvaluator("src/webgpu/shaders/sdf_evaluate_function.wgsl",
+                                      modelEvaluator,
+                                      collectResourceModules(includeMesh, includeBeam, includeImage));
+        replaceMarker(shader, abiMarker, abiDeclarations);
+        return shader;
+    }
 }

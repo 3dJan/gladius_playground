@@ -1074,7 +1074,7 @@ namespace gladius::mcp
                   return m_application->setProgramSnippet(snippet);
               });
 
-            // evaluate_function: evaluate a function at sample points via OpenCL
+            // evaluate_function: evaluate a function at sample points on the active compute backend
             json evalFuncSchema;
             evalFuncSchema["type"] = "object";
             json evalProps;
@@ -1095,7 +1095,7 @@ namespace gladius::mcp
             registerTool(
               "evaluate_function",
               "Evaluate a volumetric function at 3D sample points and return numeric results. "
-              "Useful for verifying SDF values without rendering. Uses OpenCL.",
+              "Runs on the active compute backend (OpenCL or WebGPU).",
               evalFuncSchema,
               [this](json const & params) -> json
               {
@@ -1383,15 +1383,16 @@ namespace gladius::mcp
                          }
                      });
 
-        // MODEL VALIDATION (Two-phase: graph sync + OpenCL compile)
+        // MODEL VALIDATION (Two-phase: graph sync + compute backend shader compile)
         registerTool("validate_model",
-                     "Validate the model in two phases: 1) graphs/lib3mf update, 2) OpenCL "
-                     "compile; returns diagnostics",
+                     "Validate the model in two phases: 1) graphs/lib3mf update, 2) compute "
+                     "backend shader compile; returns diagnostics",
                      {{"type", "object"},
                       {"properties",
                        {{"compile",
                          {{"type", "boolean"},
-                          {"description", "If true, run OpenCL compile phase (default true)"}}},
+                          {"description", "If true, run the compute backend compile phase "
+                                          "(default true)"}}},
                         {"max_messages",
                          {{"type", "integer"},
                           {"description", "Max diagnostic messages to include (default 50)"}}}}},

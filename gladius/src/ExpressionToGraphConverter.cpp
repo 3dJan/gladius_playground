@@ -1827,7 +1827,7 @@ namespace gladius
             return nodes::FieldNames::Value; // Fallback
         }
 
-        // Check if this is a DecomposeVector node with component information
+        // Check if this is a DecomposeVector or FunctionCall node with component/port information
         auto componentIt = s_componentMap.find(nodeId);
         if (componentIt != s_componentMap.end())
         {
@@ -1838,6 +1838,8 @@ namespace gladius
                 return nodes::FieldNames::Y;
             else if (component == "z")
                 return nodes::FieldNames::Z;
+            else if (node->findOutputPort(component) != nullptr)
+                return component;
         }
 
         // Check if the node has a "Result" output port (math operations)
@@ -2371,8 +2373,8 @@ namespace gladius
     bool
     ExpressionToGraphConverter::isFunctionCallWithComponentAccess(std::string const & expression)
     {
-        // Look for pattern: functionName(...).component
-        // e.g., "sin(pos).x", "cos(velocity).y"
+        // Look for pattern: functionName(...).component or functionName(...).outputPort
+        // e.g., "sin(pos).x", "cos(velocity).y", "window_20(pos).shape"
 
         // Find the last dot in the expression
         size_t lastDot = expression.rfind('.');
@@ -2381,11 +2383,19 @@ namespace gladius
             return false; // No dot found
         }
 
-        // Check if what follows the dot is a valid component
+        // Check if what follows the dot is a valid identifier (component x/y/z or named output port)
         std::string component = expression.substr(lastDot + 1); // Skip the dot itself
-        if (component != "x" && component != "y" && component != "z")
+        if (component.empty() ||
+            !(std::isalpha(static_cast<unsigned char>(component[0])) || component[0] == '_'))
         {
-            return false; // Not a valid component
+            return false;
+        }
+        for (size_t i = 1; i < component.size(); ++i)
+        {
+            if (!(std::isalnum(static_cast<unsigned char>(component[i])) || component[i] == '_'))
+            {
+                return false;
+            }
         }
 
         // Check if what precedes the dot looks like a function call
@@ -2398,72 +2408,52 @@ namespace gladius
     bool ExpressionToGraphConverter::containsFunctionCallWithComponentAccess(
       std::string const & expression)
     {
-        // Look for patterns like function(...).x anywhere in the expression
-        std::vector<std::string> components = {"x", "y", "z"};
+        // Look for patterns like function(...).x or function(...).outputPort anywhere in the expression
+        size_t pos = 0;
 
-        for (const auto & component : components)
+        while ((pos = expression.find(").", pos)) != std::string::npos)
         {
-            std::string pattern = "." + component;
-            size_t pos = 0;
-
-            while ((pos = expression.find(pattern, pos)) != std::string::npos)
+            size_t identStart = pos + 2;
+            if (identStart < expression.length() &&
+                (std::isalpha(static_cast<unsigned char>(expression[identStart])) ||
+                 expression[identStart] == '_'))
             {
-                // Found a component access, now check if it's preceded by a function call
-                if (pos > 0)
+                // Found ').ident', now walk backwards from ')' to verify matching '(' and function name
+                size_t closeParen = pos;
+                int parenCount = 1;
+                size_t openParen = closeParen;
+
+                while (openParen > 0 && parenCount > 0)
                 {
-                    // Look backwards to find the matching closing parenthesis
-                    size_t closeParen = pos;
-                    while (closeParen > 0 && expression[closeParen - 1] != ')')
+                    openParen--;
+                    if (expression[openParen] == ')')
                     {
-                        closeParen--;
+                        parenCount++;
                     }
-
-                    if (closeParen > 0 && expression[closeParen - 1] == ')')
+                    else if (expression[openParen] == '(')
                     {
-                        // Found a closing paren, now look for the matching opening paren and
-                        // function name
-                        int parenCount = 1;
-                        size_t openParen = closeParen - 1;
-
-                        while (openParen > 0 && parenCount > 0)
-                        {
-                            openParen--;
-                            if (expression[openParen] == ')')
-                            {
-                                parenCount++;
-                            }
-                            else if (expression[openParen] == '(')
-                            {
-                                parenCount--;
-                            }
-                        }
-
-                        if (parenCount == 0)
-                        {
-                            // Found matching parentheses, check if there's a function name before
-                            // the opening paren
-                            if (openParen > 0)
-                            {
-                                size_t funcStart = openParen;
-                                while (funcStart > 0 && (std::isalnum(expression[funcStart - 1]) ||
-                                                         expression[funcStart - 1] == '_'))
-                                {
-                                    funcStart--;
-                                }
-
-                                if (funcStart < openParen)
-                                {
-                                    // Found a function name, this is a function call with component
-                                    // access
-                                    return true;
-                                }
-                            }
-                        }
+                        parenCount--;
                     }
                 }
 
-                pos += pattern.length();
+                if (parenCount == 0 && openParen > 0)
+                {
+                    size_t funcStart = openParen;
+                    while (funcStart > 0 &&
+                           (std::isalnum(static_cast<unsigned char>(expression[funcStart - 1])) ||
+                            expression[funcStart - 1] == '_'))
+                    {
+                        funcStart--;
+                    }
+
+                    if (funcStart < openParen)
+                    {
+                        return true;
+                    }
+                }
             }
+
+            pos += 2;
         }
 
         return false;
@@ -2494,6 +2484,22 @@ namespace gladius
         if (functionResult == 0)
         {
             return 0;
+        }
+
+        // If the function call node directly exposes an output port with this name (multi-output
+        // function call such as f_20(pos).shape or f_20(pos).cut), select that port directly
+        // instead of inserting a DecomposeVector node.
+        if (auto nodeOpt = model.getNode(functionResult);
+            nodeOpt.has_value() && *nodeOpt != nullptr &&
+            (*nodeOpt)->findOutputPort(component) != nullptr)
+        {
+            s_componentMap[functionResult] = component;
+            return functionResult;
+        }
+
+        if (component != "x" && component != "y" && component != "z")
+        {
+            return 0; // Named port does not exist on the node and is not a vector swizzle
         }
 
         // Create a DecomposeVector node to extract the component
@@ -2593,14 +2599,20 @@ namespace gladius
             {
                 closeParen--; // Point to the actual closing parenthesis
 
-                // Check if followed by .x, .y, or .z
+                // Check if followed by .identifier (component x/y/z or named output port)
                 if (closeParen + 2 < expression.length() && expression[closeParen + 1] == '.' &&
-                    (expression[closeParen + 2] == 'x' || expression[closeParen + 2] == 'y' ||
-                     expression[closeParen + 2] == 'z'))
+                    (std::isalpha(static_cast<unsigned char>(expression[closeParen + 2])) ||
+                     expression[closeParen + 2] == '_'))
                 {
-
-                    std::string fullMatch = expression.substr(start, closeParen + 3 - start);
-                    functionMatches.emplace_back(fullMatch, start, closeParen + 3);
+                    size_t compEnd = closeParen + 3;
+                    while (compEnd < expression.length() &&
+                           (std::isalnum(static_cast<unsigned char>(expression[compEnd])) ||
+                            expression[compEnd] == '_'))
+                    {
+                        ++compEnd;
+                    }
+                    std::string fullMatch = expression.substr(start, compEnd - start);
+                    functionMatches.emplace_back(fullMatch, start, compEnd);
                 }
             }
         }
@@ -2611,137 +2623,57 @@ namespace gladius
             return parseAndBuildGraph(expression, model, variableNodes);
         }
 
-        // Process function calls from right to left to handle nested cases properly
+        // Drop inner matches that lie completely inside an outer match;
+        // parseFunctionCallWithComponentAccess recurses into its arguments.
+        std::vector<std::tuple<std::string, size_t, size_t>> topLevelMatches;
+        for (size_t i = 0; i < functionMatches.size(); ++i)
+        {
+            auto const s1 = std::get<1>(functionMatches[i]);
+            auto const e1 = std::get<2>(functionMatches[i]);
+            bool contained = false;
+            for (size_t j = 0; j < functionMatches.size(); ++j)
+            {
+                if (i == j)
+                {
+                    continue;
+                }
+                auto const s2 = std::get<1>(functionMatches[j]);
+                auto const e2 = std::get<2>(functionMatches[j]);
+                if (s2 <= s1 && e1 <= e2 && (s2 < s1 || e1 < e2))
+                {
+                    contained = true;
+                    break;
+                }
+            }
+            if (!contained)
+            {
+                topLevelMatches.push_back(functionMatches[i]);
+            }
+        }
+
+        // Process top-level matches from right to left so string offsets stay valid
         std::string workingExpression = expression;
         std::map<std::string, nodes::NodeId> substitutions;
         int substitutionCounter = 0;
 
-        // Sort matches by position in reverse order
-        std::sort(functionMatches.begin(),
-                  functionMatches.end(),
+        std::sort(topLevelMatches.begin(),
+                  topLevelMatches.end(),
                   [](const auto & a, const auto & b) { return std::get<1>(a) > std::get<1>(b); });
 
-        for (auto & [fullMatch, start, endPos] : functionMatches)
+        for (auto & [fullMatch, start, endPos] : topLevelMatches)
         {
-            // Parse the function call components
-            size_t openParen = fullMatch.find('(');
-            size_t closeParen = fullMatch.rfind(')');
-            size_t dot = fullMatch.rfind('.');
-
-            std::string functionName = fullMatch.substr(0, openParen);
-            std::string argument = fullMatch.substr(openParen + 1, closeParen - openParen - 1);
-            std::string component = fullMatch.substr(dot + 1);
-
-            // First, recursively parse the argument (which might contain more function calls)
-            nodes::NodeId argumentNode = parseComplexExpression(argument, model, variableNodes);
-            if (argumentNode == 0)
-            {
-                return 0; // Failed to parse argument
-            }
-
-            // Create the function call node using the same logic as parseFunctionCall
-            std::string nodeTypeName;
-            if (functionName == "sin")
-                nodeTypeName = "Sine";
-            else if (functionName == "cos")
-                nodeTypeName = "Cosine";
-            else if (functionName == "tan")
-                nodeTypeName = "Tangent";
-            else if (functionName == "asin")
-                nodeTypeName = "ArcSin";
-            else if (functionName == "acos")
-                nodeTypeName = "ArcCos";
-            else if (functionName == "atan")
-                nodeTypeName = "ArcTan";
-            else if (functionName == "sinh")
-                nodeTypeName = "SinH";
-            else if (functionName == "cosh")
-                nodeTypeName = "CosH";
-            else if (functionName == "tanh")
-                nodeTypeName = "TanH";
-            else if (functionName == "exp")
-                nodeTypeName = "Exp";
-            else if (functionName == "log")
-                nodeTypeName = "Log";
-            else if (functionName == "log2")
-                nodeTypeName = "Log2";
-            else if (functionName == "log10")
-                nodeTypeName = "Log10";
-            else if (functionName == "sqrt")
-                nodeTypeName = "Sqrt";
-            else if (functionName == "abs")
-                nodeTypeName = "Abs";
-            else if (functionName == "sign")
-                nodeTypeName = "Sign";
-            else if (functionName == "floor")
-                nodeTypeName = "Floor";
-            else if (functionName == "ceil")
-                nodeTypeName = "Ceil";
-            else if (functionName == "round")
-                nodeTypeName = "Round";
-            else if (functionName == "fract")
-                nodeTypeName = "Fract";
-            else if (functionName == "length")
-                nodeTypeName = "Length";
-            else if (functionName == "pow")
-                nodeTypeName = "Pow";
-            else if (functionName == "atan2")
-                nodeTypeName = "ArcTan2";
-            else if (functionName == "fmod")
-                nodeTypeName = "Fmod";
-            else if (functionName == "mod")
-                nodeTypeName = "Mod";
-            else if (functionName == "min")
-                nodeTypeName = "Min";
-            else if (functionName == "max")
-                nodeTypeName = "Max";
-            else if (functionName == "clamp")
-                nodeTypeName = "Clamp";
-            else
-            {
-                return 0; // Unsupported function
-            }
-
-            nodes::NodeId functionNodeId = createMathOperationNode(nodeTypeName, model);
-            if (functionNodeId == 0)
+            nodes::NodeId compNode =
+              parseFunctionCallWithComponentAccess(fullMatch, model, variableNodes);
+            if (compNode == 0)
             {
                 return 0;
             }
-
-            // Connect the argument to the function
-            std::string argumentOutputPort = getOutputPortName(model, argumentNode);
-            if (!connectNodes(
-                  model, argumentNode, argumentOutputPort, functionNodeId, nodes::FieldNames::A))
-            {
-                return 0; // Failed to connect
-            }
-
-            // Create a DecomposeVector node to extract the component
-            nodes::NodeBase * decomposeNode = nodes::createNodeFromName("DecomposeVector", model);
-            if (!decomposeNode)
-            {
-                return 0; // Failed to create DecomposeVector node
-            }
-
-            // Connect the function result to the DecomposeVector node
-            std::string functionOutputPort = getOutputPortName(model, functionNodeId);
-            if (!connectNodes(model,
-                              functionNodeId,
-                              functionOutputPort,
-                              decomposeNode->getId(),
-                              nodes::FieldNames::A))
-            {
-                return 0; // Failed to connect
-            }
-
-            // Store the component mapping
-            s_componentMap[decomposeNode->getId()] = component;
 
             // Create a unique placeholder
             std::string placeholder = "SUB" + std::to_string(substitutionCounter++);
 
             // Store the substitution
-            substitutions[placeholder] = decomposeNode->getId();
+            substitutions[placeholder] = compNode;
 
             // Replace the function call with the placeholder in the working expression
             workingExpression.replace(start, endPos - start, placeholder);
@@ -2934,7 +2866,7 @@ namespace gladius
 
             // For DecomposeVector nodes, include port name in the key
             std::string cacheKey = std::to_string(nodeId);
-            if (nodeType == "DecomposeVector")
+            if (nodeType == "DecomposeVector" || nodeType == "FunctionCall")
             {
                 cacheKey += "." + portName;
             }
@@ -3286,6 +3218,10 @@ namespace gladius
                           varCounter, 0, assembly);
                     }
                     expr = funcName + "(" + args + ")";
+                    if (fc->getOutputs().size() > 1 && !portName.empty())
+                    {
+                        expr += "." + portName;
+                    }
                 }
                 else
                 {
