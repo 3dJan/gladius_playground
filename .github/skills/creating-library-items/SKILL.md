@@ -90,25 +90,6 @@ Use `rtk proxy`, not an output-filtering wrapper: the server speaks MCP over
 stdio, so never pipe its stdout through `rtk err` or another filter. Restart it
 from your MCP client configuration.
 
-### Build variants: pure WebGPU MCP builds
-
-Some MCP binaries are built with `GLADIUS_ENABLE_OPENCL=OFF` (e.g. the
-`macos-webgpu-releaseWithDebug` preset). In that build `list_library`,
-`get_library_entry_info`, `import_library_entry`, `create_library_entry`,
-`export_to_library`, `set_library_metadata`, the bin tools, `evaluate_function`,
-and `validate_model`'s compile phase all return
-`"... unavailable in a pure WebGPU MCP build."` Renders
-(`render_to_file`, `render_with_camera`, `generate_thumbnail`,
-`get_optimal_camera_position`) still work — they fall back to WebGPU.
-
-So on such a build you cannot create or import library entries through MCP. Do
-not retry or assume a bad argument list: check `get_status()` and the build's
-`GLADIUS_ENABLE_OPENCL` cache entry, then run the OpenCL-enabled binary or read
-the inventory from the filesystem. The repo's `gladius/library/` has identical
-contents and is the authoritative inventory; inspect any entry with
-`open_document` + `get_program_snippet`, or unzip the `.3mf` and read
-`3D/3dmodel.model` (see [LIBRARY.md](LIBRARY.md)).
-
 ## Workflow Overview
 
 ### Quick Path (Recommended): one-step creation
@@ -228,9 +209,9 @@ ZIP integrity alone does not prove Gladius can load it.
 ### Step 3 — Evaluate (optional)
 
 `evaluate_function(function_id=1, samples=[{"pos": [0, 0, 0], "radius": 5.0}])`
-runs the function on the GPU (OpenCL) at sample points — `[x,y,z]` arrays for
-`vec3`, numbers for `float`. Use it to confirm the SDF is ~0 on the surface. Not
-available in pure WebGPU builds; verify with a small render instead.
+runs the function on the active GPU backend (OpenCL or WebGPU) at sample points —
+`[x,y,z]` arrays for `vec3`, numbers for `float`. Use it to confirm the SDF is
+~0 on the surface.
 
 ### Step 4 — Validate
 
@@ -253,8 +234,7 @@ render_to_file(output_path="/tmp/preview.png", width=512, height=512)
 ```
 
 For an explicit camera, call `get_optimal_camera_position()` first and pass
-`eye_position` / `target_position` to `render_with_camera`. Renders fall back to
-WebGPU, so they work even when the library tools do not.
+`eye_position` / `target_position` to `render_with_camera`.
 
 ### Step 6 — Export to Library
 

@@ -1,8 +1,7 @@
 # Gladius MCP Tool Reference
 
 Complete list of Gladius MCP tools. Load this file when you need the exact tool name for an
-operation. Availability of the OpenCL-backed tools depends on the build variant
-— see [SKILL.md](SKILL.md) "Build variants: pure WebGPU MCP builds".
+operation. All tools work in both OpenCL and pure-WebGPU MCP builds.
 
 ## Complete Tool Reference
 
@@ -38,8 +37,8 @@ operation. Availability of the OpenCL-backed tools depends on the build variant
 
 | Tool | Purpose |
 |------|---------|
-| `evaluate_function` | Run a function on sample points via OpenCL (returns float or vec3 results) |
-| `validate_model` | Check graph connectivity + OpenCL compilation |
+| `evaluate_function` | Run a function on sample points on the active GPU backend (OpenCL or WebGPU; returns float, vec3, or multi-output results) |
+| `validate_model` | Check graph connectivity + GPU shader compilation (OpenCL or WebGPU/WGSL) |
 | `get_model_bounding_box` | Get the model's world-space bounding box |
 
 ### Rendering

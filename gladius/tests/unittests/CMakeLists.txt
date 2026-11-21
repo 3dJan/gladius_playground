@@ -75,7 +75,7 @@ set(SOURCES ${TEST_SOURCES})
 add_executable(${BINARY} ${TEST_SOURCES})
 
 # Include MCP sources for tests that validate MCP behavior
-if(GLADIUS_ENABLE_OPENCL)
+if(GLADIUS_ENABLE_OPENCL OR GLADIUS_ENABLE_WEBGPU)
   file(GLOB TEST_MCP_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/mcp/*.h" "${CMAKE_SOURCE_DIR}/src/mcp/*.cpp"
     "${CMAKE_SOURCE_DIR}/src/mcp/tools/*.h" "${CMAKE_SOURCE_DIR}/src/mcp/tools/*.cpp"
