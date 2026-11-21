@@ -1,6 +1,7 @@
 #include "DesignTools.h"
 
 #include "../Document.h"
+#include "../EventLogger.h"
 #include "../ExpressionParser.h"
 #include "../ExpressionToGraphConverter.h"
 #include "../ProgramSnippetApplier.h"
@@ -537,6 +538,9 @@ namespace gladius::design
                       normalizedSnippet =
                         ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
                   }
+                  auto const logger = ctx.document->getSharedLogger();
+                  std::size_t const prevLogSize = logger ? logger->size() : 0u;
+
                   ctx.document->update3mfModel();
                   ctx.document->rebuildResourceDependencyGraph();
                   ctx.document->refreshModelBlocking();
@@ -545,6 +549,29 @@ namespace gladius::design
                   if (ctx.onDocumentModified)
                   {
                       ctx.onDocumentModified();
+                  }
+
+                  std::vector<std::string> errors;
+                  if (logger && logger->size() > prevLogSize)
+                  {
+                      for (auto it = logger->cbegin() + static_cast<long>(prevLogSize);
+                           it != logger->cend();
+                           ++it)
+                      {
+                          if (it->getSeverity() == events::Severity::Error
+                              || it->getSeverity() == events::Severity::FatalError)
+                          {
+                              errors.push_back(it->getMessage());
+                          }
+                      }
+                  }
+                  if (!errors.empty())
+                  {
+                      return {{"success", false},
+                              {"error", errors.front()},
+                              {"errors", errors},
+                              {"appliedFunctions", appliedCount},
+                              {"snippet", normalizedSnippet}};
                   }
                   return {{"success", true},
                           {"appliedFunctions", appliedCount},

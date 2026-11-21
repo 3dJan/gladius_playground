@@ -217,6 +217,12 @@ namespace gladius::ui
             return;
         }
         m_providerIndex = m_configManager->getValue<int>("Agent", "providerIndex", 0);
+        int const autonomyInt = std::clamp(
+          m_configManager->getValue<int>(
+            "Agent", "autonomy", static_cast<int>(agent::AutonomyLevel::AskAtMajorDecisions)),
+          0,
+          2);
+        m_policy.setAutonomy(static_cast<agent::AutonomyLevel>(autonomyInt));
         std::string const ep =
           m_configManager->getValue<std::string>("Agent", "endpoint", "https://api.openai.com/v1");
         std::string const mdl = m_configManager->getValue<std::string>("Agent", "model", "gpt-4o");
@@ -250,6 +256,8 @@ namespace gladius::ui
         if (m_configManager != nullptr)
         {
             m_configManager->setValue<int>("Agent", "providerIndex", m_providerIndex);
+            m_configManager->setValue<int>(
+              "Agent", "autonomy", static_cast<int>(m_policy.autonomy()));
             m_configManager->setValue<std::string>("Agent", "endpoint", m_endpointBuf);
             m_configManager->setValue<std::string>("Agent", "model", m_modelBuf);
 
@@ -908,6 +916,11 @@ namespace gladius::ui
         if (ImGui::Combo("Autonomy", &autonomy, autonomyLabels, 3))
         {
             m_policy.setAutonomy(static_cast<agent::AutonomyLevel>(autonomy));
+            if (m_configManager != nullptr)
+            {
+                m_configManager->setValue<int>("Agent", "autonomy", autonomy);
+                m_configManager->save();
+            }
         }
 
         ImGui::Separator();

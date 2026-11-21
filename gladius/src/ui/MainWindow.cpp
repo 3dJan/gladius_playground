@@ -1569,7 +1569,7 @@ namespace gladius::ui
                     if (m_agentPanels.isVisible())
                     {
                         if (ImGui::Button(
-                              reinterpret_cast<const char *>(ICON_FA_ROBOT "\tAI")))
+                              reinterpret_cast<const char *>(ICON_FA_MAGIC "\tAI")))
                         {
                             m_agentPanels.setVisible(false);
                         }
@@ -1577,7 +1577,7 @@ namespace gladius::ui
                     else
                     {
                         if (bigMenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_ROBOT "\tAI")))
+                              reinterpret_cast<const char *>(ICON_FA_MAGIC "\tAI")))
                         {
                             m_agentPanels.setVisible(true);
                         }
@@ -2272,7 +2272,9 @@ namespace gladius::ui
             closeMenu();
             showWelcomeScreen();
         }
-        if (ImGui::MenuItem("Design Agent", nullptr, m_agentPanels.isVisible()))
+        if (ImGui::MenuItem(reinterpret_cast<const char *>(ICON_FA_MAGIC "\tDesign Agent"),
+                            nullptr,
+                            m_agentPanels.isVisible()))
         {
             closeMenu();
             m_agentPanels.toggleVisible();
