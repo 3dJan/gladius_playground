@@ -67,13 +67,14 @@ After building, executables are produced under the build directory, typically:
 
 ### CLI options
 
-The main binary supports:
+The main `gladius` binary supports:
 
 - `--help` — show usage
 - `--headless` — run without starting the UI
+- `--compute-backend=<opencl|webgpu>` — prefer this backend, fall back to the other on init failure
 - `--debug-opencl` — enable OpenCL debug output (kernel validation/buffer checks)
 
-If built with MCP support (`GLADIUS_ENABLE_MCP`):
+The MCP-capable `gladiusmcp` binary additionally accepts:
 
 - `--mcp-server [port]` — start MCP server using HTTP transport (default port 8080)
 - `--mcp-stdio` — start MCP server using stdio transport (intended for editor/agent integration)
@@ -84,6 +85,38 @@ See `gladius/src/main.cpp` for the canonical argument parsing.
 
 - `gladius/MCP_IMPLEMENTATION.md` — architectural overview and protocol examples
 - `gladius/documentation/manuals/MCP_IMPLEMENTATION_SUMMARY.md` — shorter summary
+
+### Connecting an agent over HTTP
+
+`gladius/.mcp.json` (repository root) declares the server for Copilot / VS Code. The
+`gladius` entry uses the HTTP transport:
+
+```json
+"gladius": { "type": "http", "url": "http://localhost:8080/", "tools": ["*"] }
+```
+
+A client never launches an `http` entry, so you start the server yourself, via a task:
+
+- **Start Gladius MCP Server (HTTP)** — Gladius window plus MCP server, so the human sees the
+  agent's changes live in the viewport
+- **Start Gladius MCP Server (HTTP, headless)** — background server, no window
+
+Verify it is up before using it:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Use `localhost`, not `127.0.0.1`: the server binds the IPv6 loopback only. JSON-RPC is served
+on `POST /` (not `/mcp`) and supports only `initialize`, `tools/list` and `tools/call`; other
+methods return `-32601`. Tools are invoked through `tools/call`, e.g. `get_status` reports
+whether the server is in UI or headless mode (`headless: false` means the UI-only tools
+`ui_click`, `ui_dump_windows`, `ui_dump_items` and `capture_screenshot` are available). A
+UI-mode server exits when its window is closed.
+
+The `gladius-stdio` entry in `.mcp.json` is the fallback transport: the client launches
+`gladiusmcp --mcp-stdio` itself. After rebuilding, force-kill the process (`pkill -9 -f
+gladiusmcp`, it ignores `SIGTERM`) so the client relaunches the new binary.
 
 ## Tests
 

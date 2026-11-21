@@ -40,11 +40,18 @@ bool success = m_mcpServer->start(port);
 
 ## Available Tools
 
-### Built-in Tools
-1. **ping** - Connectivity test
-2. **get_status** - Application state information
-3. **list_tools** - Enumerate available tools
-4. **test_computation** - Mathematical computation testing
+The adapter-registered tool set (44 tools as of this writing) is what `tools/list` returns:
+document lifecycle, function authoring, evaluation/validation, rendering, build items, library
+management, change tracking, and - UI mode only - the UI interaction tools. Inspect the live
+list with:
+
+```bash
+curl -s -X POST http://localhost:8080/ -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+There are no `ping`, `list_tools` or `test_computation` tools: connectivity is checked with
+`GET /health`, enumeration with the `tools/list` method, and state with the `get_status` tool.
 
 ### Tool Extension
 New tools can be added by:
@@ -55,75 +62,84 @@ New tools can be added by:
 ## HTTP Endpoints
 
 ### MCP Protocol
-- `POST /mcp` - JSON-RPC 2.0 endpoint
-- `OPTIONS /mcp` - CORS preflight support
+- `POST /` - JSON-RPC 2.0 endpoint (the only JSON-RPC route; `POST /mcp` returns 404)
+- `OPTIONS /.*` - CORS preflight support
 
 ### Monitoring
 - `GET /health` - Health check endpoint
 
+The server supports only `initialize`, `tools/list` and `tools/call`. Any other method is
+answered with JSON-RPC error `-32601` over an HTTP `200` response. It is stateless: no
+`mcp-session-id` header and no SSE streaming.
+
+`listen("localhost", port)` binds the IPv6 loopback only, so clients must use
+`http://localhost:8080/` rather than `http://127.0.0.1:8080/`.
+
 ## Usage Modes
 
-### 1. HTTP Mode (Default)
+### 1. HTTP Mode
 ```bash
-./gladius --enable-mcp --port 8080
+./gladiusmcp --mcp-server 8080            # Gladius window + MCP server
+./gladiusmcp --mcp-server 8080 --headless # background server, no window
 ```
 - Web-accessible for browser-based AI agents
 - CORS enabled for cross-origin requests
 - RESTful health endpoints
+- A UI-mode server exits when its window is closed
 
 ### 2. STDIO Mode
 ```bash
-./gladius --mcp-stdio
+./gladiusmcp --mcp-stdio
 ```
 - Direct stdin/stdout communication
 - For embedded MCP client integration
 - No HTTP overhead
 
+There is no `--enable-mcp` or `--port` flag; `--mcp-server [port]` is the HTTP switch.
+
 ## AI Agent Integration
 
-### Claude Desktop Configuration
+### Copilot / VS Code
+Configure in the repository-root `.mcp.json` (portable `mcpServers` schema):
 ```json
 {
   "mcpServers": {
     "gladius": {
-      "command": "/path/to/gladius",
-      "args": ["--mcp-stdio"],
-      "env": {}
+      "type": "http",
+      "url": "http://localhost:8080/",
+      "tools": ["*"]
+    },
+    "gladius-stdio": {
+      "type": "stdio",
+      "command": "/path/to/gladiusmcp",
+      "args": ["--mcp-stdio", "--headless"],
+      "tools": ["*"],
+      "env": { "DISPLAY": ":0" }
     }
   }
 }
 ```
-
-### VS Code MCP Extension
-Configure in workspace `.vscode/mcp.json`:
-```json
-{
-  "servers": {
-    "gladius": {
-      "command": "/path/to/gladius",
-      "args": ["--mcp-stdio"],
-      "type": "stdio"
-    }
-  }
-}
-```
+A client never launches an `http` entry: start the server with the VS Code tasks
+**"Start Gladius MCP Server (HTTP)"** or **"Start Gladius MCP Server (HTTP, headless)"**.
+Only `stdio` entries are launched and auto-relaunched by the MCP host.
 
 ## Testing and Compliance
 
 ### Protocol Compliance
 - JSON-RPC 2.0 specification compliance
-- Official MCP protocol version 2025-06-18
+- Advertises MCP protocol version `2024-11-05` and ignores the client's requested version
 - Schema validation for requests/responses
 
 ### Testing Tools
 ```bash
 # Manual testing
-curl -X POST http://localhost:8080/mcp \
+curl -X POST http://localhost:8080/ \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 
-# Automated compliance tests
-./src/mcp_compliance_test
+# Automated transport tests
+cd out/build/linux-releaseWithDebug/tests/apitests
+./gladius_apitest --gtest_filter='MCPHTTPTransportTest.*'
 ```
 
 ## Benefits for AI Agents

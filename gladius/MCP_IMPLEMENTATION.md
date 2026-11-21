@@ -15,7 +15,7 @@ The Model Context Protocol (MCP) server for Gladius has been successfully implem
 2. **MCPServer** (`mcp/MCPServer.h`, `mcp/MCPServer.cpp`)
    - Complete HTTP server with JSON-RPC protocol support
    - Dual constructor pattern: accepts both `shared_ptr` and raw pointer
-   - Built-in tools: ping, get_status, list_tools, test_computation
+   - Tools are registered through `registerTool()`; `tools/list` reports them
    - CORS support, health endpoints, proper error handling
 
 3. **ApplicationMCPAdapter** (`mcp/ApplicationMCPAdapter.h`, `mcp/ApplicationMCPAdapter.cpp`)
@@ -44,40 +44,50 @@ bool success = m_mcpServer->start(port);
 - **Tool System**: Extensible tool registration and execution system
 - **CORS Support**: Cross-origin requests for web-based AI agents
 - **Health Endpoints**: `/health` for server monitoring
-- **Built-in Tools**: 4 core tools ready for AI agent interaction
+- **Tools**: everything the adapter registers, enumerated by `tools/list`
 - **Raw Pointer Constructor**: Enables clean adapter pattern
 - **Error Handling**: Proper exception handling and error responses
 
 ### 🧪 Test Results
+
+`tests/apitests/MCP_tests.cpp`, `MCP_LibraryTool_tests.cpp`, `MCP_HTTP_transport_tests.cpp`
+and the `ApplicationMCPAdapter` suites run against `MockMCPApplication` (shared header
+`tests/apitests/MockMCPApplication.h`):
+
 ```bash
-# Raw pointer constructor test
-✓ MCP Server created with raw pointer
-✓ MCP Server has 4 registered tools
-✓ Status tool result: {
-    "application": "MockGladius",
-    "version": "1.0.0-mock", 
-    "status": "mock_running",
-    "is_running": true,
-    "available_tools": 4
-}
+cd out/build/linux-releaseWithDebug/tests/apitests
+./gladius_apitest --gtest_filter='MCP*:ApplicationMCPAdapter*'
+# [==========] 106 tests from 6 test suites ran.
+# [  PASSED  ] 106 tests.
 ```
 
 ## MCP Protocol Implementation
 
 ### Supported Methods
+The HTTP transport handles exactly three JSON-RPC methods:
 - `initialize`: Server capability negotiation
-- `tools/list`: List available tools  
-- `tools/call`: Execute specific tools
-- Custom tools: `ping`, `get_status`, `test_computation`, `list_tools`
+- `tools/list`: List available tools
+- `tools/call`: Execute a tool
+
+Any other method (`ping`, `notifications/initialized`, `resources/list`, ...) is answered
+with JSON-RPC error `-32601 Method not found` over an HTTP `200` response, so clients that
+send notifications simply ignore the reply. Tools such as `get_status` or `list_tools` are not
+methods: they are invoked through `tools/call`.
 
 ### HTTP Endpoints
-- `POST /mcp`: JSON-RPC endpoint
-- `GET /health`: Health check
-- `OPTIONS /*`: CORS preflight
+- `POST /`: JSON-RPC endpoint (the only JSON-RPC route; `POST /mcp` returns `404`)
+- `GET /health`: Health check (`{"running": true, "tools_count": N, ...}`)
+- `OPTIONS /.*`: CORS preflight
+
+The server is **stateless**: it does not issue or require an `mcp-session-id` header and does
+not stream SSE. Every request is an independent JSON-RPC call.
+
+`listen("localhost", port)` binds the IPv6 loopback only (`[::1]`), so clients must use
+`http://localhost:8080/`; `http://127.0.0.1:8080/` is refused.
 
 ### Example Usage
 ```bash
-curl -X POST http://localhost:8080/mcp \
+curl -X POST http://localhost:8080/ \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -89,6 +99,40 @@ curl -X POST http://localhost:8080/mcp \
     }
   }'
 ```
+
+## MCP Client Configuration
+
+`.mcp.json` at the repository root exposes the server to Copilot / VS Code:
+
+```json
+{
+        "mcpServers": {
+                "gladius": {
+                        "type": "http",
+                        "url": "http://localhost:8080/",
+                        "tools": ["*"]
+                },
+                "gladius-stdio": {
+                        "type": "stdio",
+                        "command": ".../out/build/linux-releaseWithDebug/src/gladiusmcp",
+                        "args": ["--mcp-stdio", "--headless"],
+                        "tools": ["*"],
+                        "env": { "DISPLAY": ":0" }
+                }
+        }
+}
+```
+
+- `gladius` (HTTP) points at a server **you** start. Clients never launch `type: "http"`
+  entries; use the VS Code tasks "Start Gladius MCP Server (HTTP)" (Gladius window plus MCP)
+  or "Start Gladius MCP Server (HTTP, headless)" (background, no window). Check that it is up
+  with `curl http://localhost:8080/health`.
+- `gladius-stdio` is the fallback: the client launches the process itself and speaks JSON-RPC
+  over stdin/stdout. Rebuild the binary, then `pkill -9 -f 'gladiusmcp --mcp-stdio'` (it ignores
+  `SIGTERM`) to make the client relaunch it.
+- UI interaction tools (`ui_click`, `ui_dump_windows`, `ui_dump_items`, `capture_screenshot`)
+  exist only when the server runs without `--headless`.
+- A UI-mode server exits when its window is closed; headless servers stay alive.
 
 ## Benefits
 
@@ -133,17 +177,20 @@ The MCP server is fully functional and ready for AI agent integration. The adapt
 ### Enable MCP Server
 ```cpp
 Application app;
-bool success = app.enableMCPServer(8080);  // Start on port 8080
+bool http  = app.enableMCPServer(8080);   // HTTP transport on port 8080
+bool stdio = app.enableMCPServerStdio();  // stdio transport
 ```
+or from the command line: `--mcp-server [port]` / `--mcp-stdio`.
 
 ### AI Agent Connection
 ```python
+import json
 import requests
 
 # Get application status
-response = requests.post('http://localhost:8080/mcp', json={
+response = requests.post('http://localhost:8080/', json={
     "jsonrpc": "2.0",
-    "id": 1, 
+    "id": 1,
     "method": "tools/call",
     "params": {
         "name": "get_status",
@@ -151,7 +198,8 @@ response = requests.post('http://localhost:8080/mcp', json={
     }
 })
 
-status = response.json()['result']
+# Tool results arrive as MCP content blocks: result.content[0].text is JSON text
+status = json.loads(response.json()['result']['content'][0]['text'])
 print(f"Gladius is {status['status']} on version {status['version']}")
 ```
 

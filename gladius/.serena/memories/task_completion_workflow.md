@@ -43,21 +43,19 @@ For MCP server development:
 
 1. **Test MCP functionality**:
    ```bash
-   # Start server
-   ./out/build/linux-releaseWithDebug/src/gladius --enable-mcp --port 8080
+   # Start server (UI window, or add --headless for a background server)
+   ./out/build/linux-releaseWithDebug/src/gladiusmcp --mcp-server 8080
    
-   # Test endpoints
+   # Test endpoints (JSON-RPC is served on POST /, not /mcp)
    curl http://localhost:8080/health
-   curl -X POST http://localhost:8080/mcp -H "Content-Type: application/json" \
+   curl -X POST http://localhost:8080/ -H "Content-Type: application/json" \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
    ```
 
-2. **Run MCP compliance tests**:
+2. **Run the MCP test suites**:
    ```bash
-   cd src/
-   g++ -std=c++17 -I. -I../out/build/linux-releaseWithDebug/vcpkg_installed/x64-linux/include \
-       mcp_compliance_test.cpp mcp/MCPServer.cpp -o mcp_compliance_test -lpthread
-   ./mcp_compliance_test
+   cd out/build/linux-releaseWithDebug/tests/apitests
+   ./gladius_apitest --gtest_filter='MCP*:ApplicationMCPAdapter*'
    ```
 
 ### Final Checklist

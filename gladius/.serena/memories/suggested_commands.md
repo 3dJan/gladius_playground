@@ -78,8 +78,8 @@ clang-tidy src/**/*.cpp -- -I. -Iout/build/linux-releaseWithDebug/vcpkg_installe
 # Run built application
 ./out/build/linux-releaseWithDebug/src/gladius
 
-# Run with MCP server enabled
-./out/build/linux-releaseWithDebug/src/gladius --enable-mcp --port 8080
+# Run with MCP server enabled (HTTP)
+./out/build/linux-releaseWithDebug/src/gladiusmcp --mcp-server 8080
 
 # Run in headless mode (no GUI)
 ./out/build/linux-releaseWithDebug/src/gladius --headless
@@ -89,12 +89,19 @@ clang-tidy src/**/*.cpp -- -I. -Iout/build/linux-releaseWithDebug/vcpkg_installe
 
 ### Start MCP Server
 ```bash
-# HTTP mode (for web clients)
-./out/build/linux-releaseWithDebug/src/gladius --enable-mcp --port 8080
+# HTTP mode, UI window (for web clients and live collaboration)
+./out/build/linux-releaseWithDebug/src/gladiusmcp --mcp-server 8080
+
+# HTTP mode, background (no window)
+./out/build/linux-releaseWithDebug/src/gladiusmcp --mcp-server 8080 --headless
 
 # STDIO mode (for direct client integration)
-./out/build/linux-releaseWithDebug/src/gladius --mcp-stdio
+./out/build/linux-releaseWithDebug/src/gladiusmcp --mcp-stdio --headless
 ```
+Prefer the VS Code tasks "Start Gladius MCP Server (HTTP)" / "(HTTP, headless)". The server
+binds `[::1]` only, so talk to it as `localhost`, not `127.0.0.1`. JSON-RPC is served on
+`POST /` (there is no `/mcp` route). It ignores `SIGTERM`, so stop it with `pkill -9 -f
+'gladiusmcp --mcp-server'`.
 
 ### Test MCP Server
 ```bash
@@ -102,12 +109,12 @@ clang-tidy src/**/*.cpp -- -I. -Iout/build/linux-releaseWithDebug/vcpkg_installe
 curl http://localhost:8080/health
 
 # List tools
-curl -X POST http://localhost:8080/mcp \
+curl -X POST http://localhost:8080/ \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 
 # Get application status
-curl -X POST http://localhost:8080/mcp \
+curl -X POST http://localhost:8080/ \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_status","arguments":{}}}'
 ```

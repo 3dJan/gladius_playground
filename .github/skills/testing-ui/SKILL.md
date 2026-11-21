@@ -57,16 +57,31 @@ After executing your clicks, call `#tool:capture_screenshot`. The MCP server is 
 
 ## MCP Server Modes: Headless vs UI Mode
 
-Two Gladius MCP server entries are configured in `.vscode/mcp.json`:
+Gladius MCP entries live in `.mcp.json` at the repository root:
 
-| Server name | Args | Use case |
-|---|---|---|
-| `gladius` | `--mcp-stdio --headless` | Default — no visible window, for modeling/generation tasks |
-| `gladius-ui` | `--mcp-stdio` | UI debugging — shows a real Gladius window you can observe and interact with |
+| Server name | Transport | Mode | Use case |
+|---|---|---|---|
+| `gladius` | `http` (`http://localhost:8080/`) | UI, unless started with `--headless` | Default — collaborate over HTTP while a Gladius window shows the changes |
+| `gladius-stdio` | `stdio` (`--mcp-stdio --headless`) | Headless | Fallback when no HTTP server is running |
 
-**Use `gladius-ui` for any session involving `ui_click`, `ui_dump_items`, or `capture_screenshot`** so you can visually verify what the agent is doing.
+**UI-only tools** (`ui_click`, `ui_dump_windows`, `ui_dump_items`, `capture_screenshot`) exist
+only when the server runs without `--headless`. Before using them, confirm the mode:
 
-Both servers are managed by VS Code's MCP host. They restart automatically when killed.
+```bash
+curl http://localhost:8080/health          # server is up (use localhost, not 127.0.0.1)
+```
+
+then call `get_status` and check `headless: false`. If it reports `headless: true`, no UI tool
+will work — start the server through the **"Start Gladius MCP Server (HTTP)"** task instead.
+
+A `type: "http"` entry is **never launched by the client**; you start the server yourself with
+one of the VS Code tasks:
+
+- **"Start Gladius MCP Server (HTTP)"** — UI mode: Gladius window plus MCP server on port 8080
+- **"Start Gladius MCP Server (HTTP, headless)"** — background server, no window
+
+A UI-mode server exits as soon as its window is closed. Only the `gladius-stdio` entry is
+managed by VS Code's MCP host and relaunched automatically.
 
 ## Restarting the MCP Server After a Rebuild
 
@@ -74,18 +89,21 @@ Both servers are managed by VS Code's MCP host. They restart automatically when 
 
 The correct pattern is:
 
-- **Headless server** (`gladius`): run `rtk proxy sh -c "pkill -f 'gladiusmcp --mcp-stdio --headless'"`, or use the VS Code task **"Restart Gladius MCP Server (headless)"**.
-- **UI-mode server** (`gladius-ui`): run `rtk proxy sh -c "pkill -f 'gladiusmcp --mcp-stdio$'"`, or use the VS Code task **"Restart Gladius MCP Server (UI mode)"**.
+- **HTTP server**: use the VS Code task **"Start Gladius MCP Server (HTTP)"** or **"Start Gladius MCP Server (HTTP, headless)"** — both force-kill the old process first. Manually: `rtk proxy sh -c "pkill -9 -f 'gladiusmcp --mcp-server'"`, then run the new binary (or run the task).
+- **stdio server** (`gladius-stdio`): run `rtk proxy sh -c "pkill -9 -f 'gladiusmcp --mcp-stdio'"`, or use the VS Code task **"Restart Gladius MCP Server (headless)"**. Match on `--mcp-stdio` so you do not also kill a running HTTP server.
 
-Prefer the configured VS Code restart task. For manual process control, use
+Prefer the configured VS Code task. For manual process control, use
 `rtk proxy sh -c "pkill ..."` when RTK tracking is useful, but do not use
 `rtk err`, `rtk summary`, or other output filters around an MCP stdio server.
 MCP protocol bytes must remain unmodified; never pipe the server's stdout
 through a filtering wrapper.
 
-VS Code detects the process exiting and **automatically relaunches** the server with the new binary on the next tool call. Wait ~2 seconds before issuing the next MCP call.
+The server ignores `SIGTERM`, so `pkill` alone does not stop it — always use `-9`. After
+killing, wait ~2 seconds before issuing the next MCP call.
 
-> **Why `pkill` works**: The MCP server entries in `.vscode/mcp.json` declare `"type": "stdio"`. VS Code's MCP host monitors each process and applies an automatic restart on unexpected exit.
+> **Why only stdio auto-restarts**: VS Code's MCP host monitors processes it launched itself,
+> i.e. entries with `"type": "stdio"`. An `"type": "http"` entry points at a server you own,
+> so after `pkill -9` you must start the new binary yourself.
 
 ## Common Pitfalls and Debugging Strategies
 
