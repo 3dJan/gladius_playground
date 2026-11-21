@@ -144,7 +144,23 @@ namespace gladius::ui
 #endif
 
         m_modelEditor.setDocument(m_doc);
-        m_agentPanels.bind(m_doc.get(), m_configManager);
+        m_agentPanels.bind(m_doc.get(), m_configManager, [this]() {
+            markFileAsChanged();
+            m_modelEditor.invalidatePrimitiveData();
+            m_modelEditor.resetEditorContext();
+            m_modelEditor.markModelAsUpToDate();
+            if (m_doc)
+            {
+                m_doc->invalidatePrimitiveData();
+                m_doc->signalStructuralEdit();
+            }
+            m_parameterThrottle.reset();
+            m_parameterDirty = true;
+            m_contoursDirty = true;
+            m_dirty = true;
+            m_renderWindow.invalidateViewDuetoModelUpdate();
+            m_sliceView.invalidateContours();
+        });
 
         // Sync shipped library items into the user's persistent library directory.
         // This copies new files without overwriting existing user customizations.
@@ -1547,6 +1563,23 @@ namespace gladius::ui
                               reinterpret_cast<const char *>(ICON_FA_DESKTOP "\tPreview")))
                         {
                             m_renderWindow.show();
+                        }
+                    }
+
+                    if (m_agentPanels.isVisible())
+                    {
+                        if (ImGui::Button(
+                              reinterpret_cast<const char *>(ICON_FA_ROBOT "\tAI")))
+                        {
+                            m_agentPanels.setVisible(false);
+                        }
+                    }
+                    else
+                    {
+                        if (bigMenuItem(
+                              reinterpret_cast<const char *>(ICON_FA_ROBOT "\tAI")))
+                        {
+                            m_agentPanels.setVisible(true);
                         }
                     }
 

@@ -8,12 +8,13 @@ namespace gladius::agent
     {
         return "You are the Gladius Native Design Agent for hierarchical, variant-driven 3D engineering design.\n"
                "Follow a systematic engineering process:\n"
-               "1. Inspect the model and requirements before modifying anything.\n"
+               "1. Inspect the open document (get_program_snippet, get_model_summary) and requirements before modifying anything.\n"
                "2. Decompose into functions and interfaces, then explore multiple solution principles.\n"
                "3. Use low-fidelity envelope variants before committing to structural or decorative detail.\n"
                "4. Preserve frozen components and group edits inside transactions (begin_edit / commit_edit).\n"
-               "5. Separate deterministic metrics from subjective visual assessments.\n"
-               "6. Run validation and call finish_design explicitly when complete.\n";
+               "5. Apply your actual geometry directly to the open document using set_program_snippet so it renders in the viewport.\n"
+               "6. Separate deterministic metrics from subjective visual assessments.\n"
+               "7. Run validation and call finish_design explicitly when complete.\n";
     }
 
     CompletionRequest ContextBuilder::build(Conversation const & conversation,

@@ -18,6 +18,7 @@ namespace gladius::tools
         int level = 0;
         std::size_t functionCount = 0;
         std::chrono::system_clock::time_point createdAt;
+        std::vector<std::byte> previewPng;
     };
 
     /// @brief Manages named Assembly checkpoints for design-level branching and rollback
@@ -25,7 +26,10 @@ namespace gladius::tools
     {
       public:
         /// @brief Create a checkpoint from the given assembly and return its unique ID
-        std::string createCheckpoint(std::string const & label, int level, nodes::Assembly const & assembly);
+        std::string createCheckpoint(std::string const & label,
+                                     int level,
+                                     nodes::Assembly const & assembly,
+                                     std::vector<std::byte> previewPng = {});
 
         /// @brief Restore a checkpoint into targetAssembly; returns false if ID not found
         bool restoreCheckpoint(std::string const & id, nodes::Assembly & targetAssembly) const;

@@ -139,6 +139,17 @@ namespace gladius::design
         return true;
     }
 
+    bool DesignGraph::setConfigurationPreview(std::string const & configId, std::vector<std::byte> pngBytes)
+    {
+        auto it = m_configurations.find(configId);
+        if (it == m_configurations.end())
+        {
+            return false;
+        }
+        it->second.previewPng = std::move(pngBytes);
+        return true;
+    }
+
     std::string DesignGraph::createConfiguration(std::string name,
                                                  std::unordered_map<std::string, std::string> selectedVariants)
     {

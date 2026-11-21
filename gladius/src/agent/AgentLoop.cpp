@@ -1,4 +1,5 @@
 #include "AgentLoop.h"
+#include "providers/ImageProvider.h"
 
 namespace gladius::agent
 {
@@ -66,15 +67,9 @@ namespace gladius::agent
 
             if (response.toolCalls.empty())
             {
-                if (!isDesignComplete || isDesignComplete())
-                {
-                    result.completed = true;
-                    eventQueue.push(AgentCompletedEvent{result.finalMessage});
-                    co_return result;
-                }
-                conversation.appendUserText(
-                  "Design is not yet marked complete. Continue or call finish_design when validated.");
-                continue;
+                result.completed = true;
+                eventQueue.push(AgentCompletedEvent{result.finalMessage});
+                co_return result;
             }
 
             for (auto const & call : response.toolCalls)
@@ -125,7 +120,29 @@ namespace gladius::agent
 
                 bool const ok = toolResult.is_object() ? toolResult.value("success", true) : true;
                 eventQueue.push(ToolCallCompletedEvent{call.id, call.name, toolResult, ok});
+
+                std::optional<ImageContent> attachedImage;
+                if (ok && toolResult.is_object() && toolResult.contains("base64")
+                    && toolResult["base64"].is_string())
+                {
+                    std::string const b64 = toolResult["base64"].get<std::string>();
+                    std::string const mime = toolResult.value("mimeType", "image/png");
+                    auto bytes = decodeBase64(b64);
+                    if (!bytes.empty())
+                    {
+                        attachedImage = ImageContent{std::move(bytes), mime};
+                        toolResult.erase("base64");
+                        toolResult["imageAttached"] = true;
+                    }
+                }
+
                 conversation.appendToolResult(call.id, toolResult);
+                if (attachedImage.has_value())
+                {
+                    eventQueue.push(ImageGeneratedEvent{*attachedImage, call.name});
+                    conversation.appendUserImage(std::move(attachedImage->data),
+                                                 std::move(attachedImage->mimeType));
+                }
 
                 if (isDesignComplete && isDesignComplete())
                 {

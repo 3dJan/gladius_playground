@@ -19,10 +19,10 @@ namespace gladius::agent
     /// @brief Hard execution limits preventing runaway cost or infinite refinement
     struct AgentLimits
     {
-        std::size_t maxModelTurns = 24;
-        std::size_t maxToolCalls = 64;
-        std::size_t maxViewportReviews = 8;
-        std::chrono::minutes maxWallTime{10};
+        std::size_t maxModelTurns = 64;
+        std::size_t maxToolCalls = 256;
+        std::size_t maxViewportReviews = 16;
+        std::chrono::minutes maxWallTime{15};
     };
 
     /// @brief Outcome of an AgentLoop execution

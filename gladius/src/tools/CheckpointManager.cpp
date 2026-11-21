@@ -7,7 +7,8 @@ namespace gladius::tools
 {
     std::string CheckpointManager::createCheckpoint(std::string const & label,
                                                     int level,
-                                                    nodes::Assembly const & assembly)
+                                                    nodes::Assembly const & assembly,
+                                                    std::vector<std::byte> previewPng)
     {
         std::string const id = "cp_" + std::to_string(m_nextId++);
         CheckpointSummary summary{
@@ -15,7 +16,8 @@ namespace gladius::tools
             label.empty() ? id : label,
             level,
             assembly.getFunctions().size(),
-            std::chrono::system_clock::now()};
+            std::chrono::system_clock::now(),
+            std::move(previewPng)};
         m_entries.push_back(Entry{std::move(summary), assembly});
         return id;
     }

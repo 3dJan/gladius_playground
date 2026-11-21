@@ -47,6 +47,7 @@ namespace gladius::design
         bool defineInterface(std::string const & variantId, Interface iface);
         bool setVariantEvaluation(std::string const & variantId, Evaluation eval);
         bool setVariantPreview(std::string const & variantId, std::vector<std::byte> pngBytes);
+        bool setConfigurationPreview(std::string const & configId, std::vector<std::byte> pngBytes);
 
         std::string createConfiguration(std::string name,
                                         std::unordered_map<std::string, std::string> selectedVariants);

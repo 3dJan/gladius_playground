@@ -36,6 +36,7 @@ namespace gladius::design
         Document * document = nullptr;
         ViewportCaptureCallback captureViewport;
         ModelValidationCallback validateModel;
+        std::function<void()> onDocumentModified;
     };
 
     /// @brief Register all canonical design-space, lifecycle, evaluation, and viewport tools

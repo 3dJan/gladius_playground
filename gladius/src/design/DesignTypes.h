@@ -163,5 +163,6 @@ namespace gladius::design
         std::unordered_map<std::string, std::string> selectedVariants; // nodeId -> variantId
         Evaluation evaluation;
         bool active = false;
+        std::vector<std::byte> previewPng;
     };
 } // namespace gladius::design

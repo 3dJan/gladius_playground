@@ -17,11 +17,15 @@
 #include "../tools/TransactionManager.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace gladius
@@ -42,7 +46,9 @@ namespace gladius::ui
         AgentPanels(AgentPanels const &) = delete;
         AgentPanels & operator=(AgentPanels const &) = delete;
 
-        void bind(Document * document, ConfigManager * configManager);
+        void bind(Document * document,
+                  ConfigManager * configManager,
+                  std::function<void()> onDocumentModified = nullptr);
         void setVisible(bool visible) noexcept
         {
             m_visible = visible;
@@ -67,11 +73,31 @@ namespace gladius::ui
             bool success = true;
         };
 
+        struct PendingImageAttachment
+        {
+            std::string filename;
+            std::vector<std::byte> bytes;
+            std::string mimeType = "image/png";
+        };
+
+        struct CachedTexture
+        {
+            unsigned int glTextureId = 0;
+            int width = 0;
+            int height = 0;
+            std::size_t sourceBytes = 0;
+        };
+
         void drainEvents();
         void startRun(std::string const & userPrompt);
         void stopRun();
         void loadSettings();
         void saveSettings();
+        void releaseTextures();
+        unsigned int getOrCreatePreviewTexture(std::string const & key,
+                                               std::vector<std::byte> const & pngBytes,
+                                               int & outW,
+                                               int & outH);
 
         void renderChatPanel();
         void renderDesignTreePanel();
@@ -84,6 +110,8 @@ namespace gladius::ui
 
         Document * m_document = nullptr;
         ConfigManager * m_configManager = nullptr;
+        std::function<void()> m_onDocumentModified;
+        std::atomic<bool> m_documentModifiedPending{false};
 
         design::DesignGraph m_graph;
         design::DesignCatalogue m_catalogue;
@@ -108,7 +136,11 @@ namespace gladius::ui
         char m_promptBuf[2048] = "";
 
         std::string m_streamingBuffer;
+        std::string m_activeToolName;
+        std::chrono::steady_clock::time_point m_runStartTime;
         std::vector<ActivityEntry> m_activityLog;
+        std::vector<PendingImageAttachment> m_pendingImages;
+        std::unordered_map<std::string, CachedTexture> m_previewTextures;
         std::string m_lastError;
 
         std::atomic<bool> m_running{false};

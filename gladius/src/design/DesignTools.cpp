@@ -1,8 +1,14 @@
 #include "DesignTools.h"
 
 #include "../Document.h"
+#include "../ExpressionParser.h"
+#include "../ExpressionToGraphConverter.h"
+#include "../ProgramSnippetApplier.h"
 #include "../agent/Conversation.h"
 #include "../nodes/Assembly.h"
+#include "../nodes/GraphOptimizer.h"
+
+#include <filesystem>
 
 namespace gladius::design
 {
@@ -236,6 +242,14 @@ namespace gladius::design
           [&ctx](nlohmann::json const & args) -> nlohmann::json {
               std::string const cid = args.value("configurationId", "");
               bool const ok = ctx.graph.activateConfiguration(cid);
+              if (ok && ctx.captureViewport)
+              {
+                  auto png = ctx.captureViewport(256, 256, "isometric");
+                  if (!png.empty())
+                  {
+                      ctx.graph.setConfigurationPreview(cid, std::move(png));
+                  }
+              }
               return ok ? nlohmann::json{{"success", true}, {"configurationId", cid}}
                         : nlohmann::json{{"success", false}, {"error", "Unknown configurationId: " + cid}};
           });
@@ -334,8 +348,13 @@ namespace gladius::design
               nodes::Assembly emptyAssembly;
               nodes::Assembly const & target =
                 (ctx.document && ctx.document->getAssembly()) ? *ctx.document->getAssembly() : emptyAssembly;
-              std::string const id =
-                ctx.checkpoints.createCheckpoint(args.value("label", ""), args.value("level", 0), target);
+              std::vector<std::byte> png;
+              if (ctx.captureViewport)
+              {
+                  png = ctx.captureViewport(256, 256, "isometric");
+              }
+              std::string const id = ctx.checkpoints.createCheckpoint(
+                args.value("label", ""), args.value("level", 0), target, std::move(png));
               return {{"success", true}, {"checkpointId", id}};
           });
 
@@ -408,10 +427,170 @@ namespace gladius::design
                           {"warnings", eval.deterministicWarnings}};
               }
               ctx.graph.setPhase(DesignPhase::Complete);
+              if (ctx.captureViewport)
+              {
+                  auto png = ctx.captureViewport(256, 256, "isometric");
+                  if (!png.empty())
+                  {
+                      ctx.graph.setConfigurationPreview(active->id, std::move(png));
+                  }
+              }
               return {{"success", true},
                       {"valid", true},
                       {"phase", toString(ctx.graph.phase())},
                       {"passed", eval.deterministicPassed}};
+          });
+
+        registry.registerSyncTool(
+          {"get_model_summary",
+           "Inspect the currently open 3MF document's functions, node counts, and build items.",
+           {{"type", "object"}, {"properties", nlohmann::json::object()}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const &) -> nlohmann::json {
+              if (!ctx.document || !ctx.document->getAssembly())
+              {
+                  return {{"success", false}, {"error", "No active document"}};
+              }
+              auto const assembly = ctx.document->getAssembly();
+              nlohmann::json funcs = nlohmann::json::array();
+              for (auto const & [fid, model] : assembly->getFunctions())
+              {
+                  if (!model)
+                  {
+                      continue;
+                  }
+                  funcs.push_back({
+                      {"id", fid},
+                      {"name", model->getDisplayName().value_or("")},
+                      {"nodeCount", model->getSize()}
+                  });
+              }
+              return {
+                  {"success", true},
+                  {"functionCount", funcs.size()},
+                  {"functions", std::move(funcs)},
+                  {"assemblyModelId", assembly->getAssemblyModelId()}
+              };
+          });
+
+        registry.registerSyncTool(
+          {"get_program_snippet",
+           "Read the current open document's implicit function program listing.",
+           {{"type", "object"}, {"properties", nlohmann::json::object()}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const &) -> nlohmann::json {
+              if (!ctx.document || !ctx.document->getAssembly())
+              {
+                  return {{"success", false}, {"error", "No active document"}};
+              }
+              auto const assembly = ctx.document->getAssembly();
+              std::string const snippet =
+                ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+              return {{"success", true}, {"snippet", snippet}};
+          });
+
+        registry.registerSyncTool(
+          {"set_program_snippet",
+           "Apply a multi-function implicit geometry program snippet directly to the open document and refresh the viewport.",
+           {{"type", "object"},
+            {"required", {"snippet"}},
+            {"properties", {{"snippet", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ModelModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.document || !ctx.document->getAssembly())
+              {
+                  return {{"success", false}, {"error", "No active document"}};
+              }
+              std::string const snippet = args.value("snippet", "");
+              if (snippet.empty())
+              {
+                  return {{"success", false}, {"error", "snippet is required"}};
+              }
+              try
+              {
+                  std::string normalizedSnippet;
+                  std::size_t appliedCount = 0;
+                  {
+                      auto const token = ctx.document->waitForAssemblyToken();
+                      auto assembly = ctx.document->getAssembly();
+                      ExpressionParser parser;
+                      auto const report = ProgramSnippetApplier::apply(snippet, *assembly, parser);
+                      if (!report.failed.empty())
+                      {
+                          nlohmann::json errs = nlohmann::json::array();
+                          for (auto const & f : report.failed)
+                          {
+                              errs.push_back({{"name", f.displayName}, {"message", f.message}});
+                          }
+                          return {{"success", false},
+                                  {"error", report.failed.front().message},
+                                  {"failed", std::move(errs)}};
+                      }
+                      for (auto & [fid, funcModel] : assembly->getFunctions())
+                      {
+                          if (funcModel)
+                          {
+                              (void) nodes::GraphOptimizer::optimize(*funcModel);
+                          }
+                      }
+                      appliedCount = report.parsed.size();
+                      normalizedSnippet =
+                        ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+                  }
+                  ctx.document->update3mfModel();
+                  ctx.document->rebuildResourceDependencyGraph();
+                  ctx.document->refreshModelBlocking();
+                  ctx.document->markFileAsChanged();
+                  ctx.document->signalStructuralEdit();
+                  if (ctx.onDocumentModified)
+                  {
+                      ctx.onDocumentModified();
+                  }
+                  return {{"success", true},
+                          {"appliedFunctions", appliedCount},
+                          {"snippet", normalizedSnippet}};
+              }
+              catch (std::exception const & ex)
+              {
+                  return {{"success", false}, {"error", ex.what()}};
+              }
+          });
+
+        registry.registerSyncTool(
+          {"insert_image_to_document",
+           "Insert an image file into the currently open 3MF document as an image stack resource.",
+           {{"type", "object"},
+            {"required", {"path"}},
+            {"properties", {{"path", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ModelModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.document)
+              {
+                  return {{"success", false}, {"error", "No active document"}};
+              }
+              std::filesystem::path const imgPath(args.value("path", ""));
+              if (imgPath.empty() || !std::filesystem::exists(imgPath))
+              {
+                  return {{"success", false}, {"error", "Image file does not exist"}};
+              }
+              try
+              {
+                  auto const key = ctx.document->addImageStackResource(imgPath);
+                  ctx.document->refreshModelBlocking();
+                  ctx.document->markFileAsChanged();
+                  ctx.document->signalStructuralEdit();
+                  if (ctx.onDocumentModified)
+                  {
+                      ctx.onDocumentModified();
+                  }
+                  return {{"success", true},
+                          {"resourceId", key.getResourceId().value_or(0)},
+                          {"displayName", key.getDisplayName()}};
+              }
+              catch (std::exception const & ex)
+              {
+                  return {{"success", false}, {"error", ex.what()}};
+              }
           });
     }
 } // namespace gladius::design
