@@ -128,11 +128,16 @@ namespace gladius::agent::tests
     {
         // Arrange
         tools::ToolRegistry registry;
+        registry.registerSyncTool(
+          {"ping", "Ping", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const &) { return nlohmann::json{{"success", true}}; });
         tools::ToolExecutor executor(registry);
 
         ScriptedProvider provider;
-        provider.responses.push(CompletionResponse{"Turn 1", {}, "stop", true, ""});
-        provider.responses.push(CompletionResponse{"Turn 2", {}, "stop", true, ""});
+        provider.responses.push(
+          CompletionResponse{"Turn 1", {ToolCall{"c1", "ping", {}}}, "tool_calls", true, ""});
+        provider.responses.push(
+          CompletionResponse{"Turn 2", {ToolCall{"c2", "ping", {}}}, "tool_calls", true, ""});
 
         Conversation conv;
         conv.appendUserText("Loop");
@@ -144,7 +149,7 @@ namespace gladius::agent::tests
         io::CancellationToken cancel;
         AgentLoop loop;
 
-        // Act (isDesignComplete always false forces continuation until maxModelTurns)
+        // Act (tool calls keep the loop running until maxModelTurns)
         auto const res = coro::sync_wait(loop.run(
           conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel,
           []() { return false; }));
@@ -153,5 +158,67 @@ namespace gladius::agent::tests
         EXPECT_FALSE(res.completed);
         EXPECT_EQ(res.modelTurns, 2u);
         EXPECT_EQ(res.error, "Maximum model turn limit reached");
+    }
+    TEST(AgentLoop, Run_CaptureViewportTool_AttachesImageContentAndStripsBase64)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        registry.registerSyncTool(
+          {"capture_viewport", "Capture", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const &) {
+              return nlohmann::json{
+                {"success", true},
+                {"mimeType", "image/png"},
+                {"base64", "iVBORw0KGgo="}};
+          });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(CompletionResponse{
+          "",
+          {ToolCall{"c1", "capture_viewport", nlohmann::json::object()}},
+          "tool_calls",
+          true,
+          ""});
+        provider.responses.push(CompletionResponse{"Looks good.", {}, "stop", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Check viewport");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy(AutonomyLevel::WorkAutonomously, PrivacySettings{});
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(
+          loop.run(conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel));
+
+        // Assert
+        EXPECT_TRUE(res.completed);
+        ASSERT_GE(provider.capturedRequests.size(), 2u);
+        auto const & secondMsgs = provider.capturedRequests[1].messages;
+        bool sawImage = false;
+        bool sawBase64Text = false;
+        for (auto const & m : secondMsgs)
+        {
+            for (auto const & p : m.parts)
+            {
+                if (std::holds_alternative<ImageContent>(p))
+                {
+                    sawImage = true;
+                }
+                if (auto const * tr = std::get_if<ToolResult>(&p))
+                {
+                    if (tr->value.contains("base64"))
+                    {
+                        sawBase64Text = true;
+                    }
+                }
+            }
+        }
+        EXPECT_TRUE(sawImage);
+        EXPECT_FALSE(sawBase64Text);
     }
 } // namespace gladius::agent::tests
