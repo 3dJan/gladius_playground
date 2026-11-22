@@ -173,7 +173,6 @@ namespace gladius::ui
         agent::SkillLoader m_skills;
         io::CancellationToken m_cancellation;
 
-        bool m_startFresh = true;
         bool m_promptFocused = false;
         int m_inspectedImageIndex = -1;
 

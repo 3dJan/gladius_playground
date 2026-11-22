@@ -293,7 +293,6 @@ namespace gladius::ui
             }
             nlohmann::json state;
             state["version"] = 1;
-            state["startFresh"] = m_startFresh;
             state["designGraph"] = m_graph.toJson();
             state["conversation"] = m_conversation.toJson();
             state["todos"] = m_todos.toJson();
@@ -326,7 +325,6 @@ namespace gladius::ui
         m_activityLog.clear();
         m_lastError.clear();
         m_streamingBuffer.clear();
-        m_startFresh = true;
     }
 
     void AgentPanels::loadSessionState()
@@ -375,7 +373,6 @@ namespace gladius::ui
             {
                 (void) m_todos.fromJson(state["todos"]);
             }
-            m_startFresh = state.value("startFresh", m_conversation.empty());
         }
         catch (...)
         {
@@ -392,7 +389,6 @@ namespace gladius::ui
         {
             nlohmann::json state = {
               {"version", 1},
-              {"startFresh", m_startFresh},
               {"designGraph", m_graph.toJson()},
               {"conversation", m_conversation.toJson()},
               {"todos", m_todos.toJson()}};
@@ -437,7 +433,6 @@ namespace gladius::ui
                     {
                         (void) m_todos.fromJson(state["todos"]);
                     }
-                    m_startFresh = state.value("startFresh", false);
                     return;
                 }
             }
@@ -465,7 +460,6 @@ namespace gladius::ui
                         {
                             (void) m_todos.fromJson(state["todos"]);
                         }
-                        m_startFresh = state.value("startFresh", m_conversation.empty());
                     }
                 }
             }
@@ -982,24 +976,6 @@ namespace gladius::ui
         m_webConfirmHandle = {};
         m_webRunTask.reset();
 #endif
-
-        if (m_startFresh)
-        {
-            m_graph.clear();
-            m_conversation.clear();
-            m_checkpoints.clear();
-            m_todos.clear();
-            m_activityLog.clear();
-            if (m_document != nullptr)
-            {
-                m_document->newModel();
-                if (m_onDocumentModified)
-                {
-                    m_onDocumentModified();
-                }
-            }
-            m_startFresh = false;
-        }
 
         m_lastError.clear();
         m_streamingBuffer.clear();
@@ -1598,12 +1574,6 @@ namespace gladius::ui
                     }
                 }
             }
-        }
-        ImGui::SameLine();
-        ImGui::Checkbox("Start fresh", &m_startFresh);
-        if (ImGui::IsItemHovered())
-        {
-            ImGui::SetTooltip("Clear current model & history on next prompt (auto-unchecks after first prompt)");
         }
 
         if (!m_pendingImages.empty())
