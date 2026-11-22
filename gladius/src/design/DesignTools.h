@@ -2,6 +2,7 @@
 
 #include "DesignCatalogue.h"
 #include "DesignGraph.h"
+#include "../agent/SkillLoader.h"
 #include "../tools/CheckpointManager.h"
 #include "../tools/ToolRegistry.h"
 #include "../tools/TransactionManager.h"
@@ -37,6 +38,7 @@ namespace gladius::design
         ViewportCaptureCallback captureViewport;
         ModelValidationCallback validateModel;
         std::function<void()> onDocumentModified;
+        agent::SkillLoader * skills = nullptr;
     };
 
     /// @brief Register all canonical design-space, lifecycle, evaluation, and viewport tools

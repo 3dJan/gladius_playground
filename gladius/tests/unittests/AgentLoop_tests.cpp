@@ -1,7 +1,10 @@
 #include "agent/AgentLoop.h"
+#include "agent/SkillLoader.h"
 
 #include <gtest/gtest.h>
+#include <chrono>
 #include <queue>
+#include <thread>
 
 namespace gladius::agent::tests
 {
@@ -159,6 +162,151 @@ namespace gladius::agent::tests
         EXPECT_EQ(res.modelTurns, 2u);
         EXPECT_EQ(res.error, "Maximum model turn limit reached");
     }
+
+    namespace
+    {
+        class SlowProvider final : public IAiProvider
+        {
+          public:
+            /// @brief When non-zero, emit finish_design instead of ping once this many turns were served
+            std::size_t turnsBeforeFinish = 0;
+
+            std::string name() const override
+            {
+                return "slow";
+            }
+
+            coro::task<CompletionResponse> complete(CompletionRequest const &,
+                                                    TextDeltaCallback,
+                                                    io::CancellationToken const &) override
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                ++turns;
+                if (turnsBeforeFinish != 0 && turns >= turnsBeforeFinish)
+                {
+                    co_return CompletionResponse{"All done",
+                                                 {ToolCall{"cf", "finish_design", {}}},
+                                                 "tool_calls",
+                                                 true,
+                                                 ""};
+                }
+                co_return CompletionResponse{"Working",
+                                             {ToolCall{"c1", "ping", {}}},
+                                             "tool_calls",
+                                             true,
+                                             ""};
+            }
+
+          private:
+            std::size_t turns = 0;
+        };
+    } // namespace
+
+    TEST(AgentLoop, Run_WallTimeLimitExceeded_FailsCleanly)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        registry.registerSyncTool(
+          {"ping", "Ping", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const &) { return nlohmann::json{{"success", true}}; });
+        tools::ToolExecutor executor(registry);
+        SlowProvider provider;
+        Conversation conv;
+        conv.appendUserText("Wait forever");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        limits.maxWallTime = std::chrono::milliseconds(1);
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act (tool calls keep the loop running past the wall-time budget)
+        auto const res = coro::sync_wait(loop.run(
+          conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel,
+          []() { return false; }));
+
+        // Assert
+        EXPECT_FALSE(res.completed);
+        EXPECT_EQ(res.error, "Agent wall-time limit reached");
+    }
+
+    TEST(AgentLoop, Run_ZeroWallTime_UnlimitedRunsToCompletion)
+    {
+        // Arrange (a 0 duration used to mean "already expired")
+        tools::ToolRegistry registry;
+        bool finished = false;
+        registry.registerSyncTool(
+          {"ping", "Ping", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const &) { return nlohmann::json{{"success", true}}; });
+        registry.registerSyncTool(
+          {"finish_design", "Finish", {{"type", "object"}}, tools::ToolPolicy::DesignGraphModification},
+          [&](nlohmann::json const &) {
+              finished = true;
+              return nlohmann::json{{"success", true}};
+          });
+        tools::ToolExecutor executor(registry);
+        SlowProvider provider;
+        provider.turnsBeforeFinish = 3;
+        Conversation conv;
+        conv.appendUserText("No time limit");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        limits.maxWallTime = std::chrono::milliseconds(0);
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(loop.run(
+          conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel,
+          [&]() { return finished; }));
+
+        // Assert
+        EXPECT_TRUE(res.completed);
+        EXPECT_TRUE(finished);
+        EXPECT_TRUE(res.error.empty());
+    }
+
+    TEST(AgentLoop, Run_ZeroMaxModelTurns_UnlimitedRunsToCompletion)
+    {
+        // Arrange (a 0 turn limit used to stop the loop immediately)
+        tools::ToolRegistry registry;
+        bool finished = false;
+        registry.registerSyncTool(
+          {"ping", "Ping", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const &) { return nlohmann::json{{"success", true}}; });
+        registry.registerSyncTool(
+          {"finish_design", "Finish", {{"type", "object"}}, tools::ToolPolicy::DesignGraphModification},
+          [&](nlohmann::json const &) {
+              finished = true;
+              return nlohmann::json{{"success", true}};
+          });
+        tools::ToolExecutor executor(registry);
+        SlowProvider provider;
+        provider.turnsBeforeFinish = 70;
+        Conversation conv;
+        conv.appendUserText("No turn limit");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        limits.maxModelTurns = 0;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act (more turns than the default 64 turn limit)
+        auto const res = coro::sync_wait(loop.run(
+          conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel,
+          [&]() { return finished; }));
+
+        // Assert
+        EXPECT_TRUE(res.completed);
+        EXPECT_TRUE(finished);
+        EXPECT_TRUE(res.error.empty());
+    }
+
     TEST(AgentLoop, Run_CaptureViewportTool_AttachesImageContentAndStripsBase64)
     {
         // Arrange
@@ -220,5 +368,72 @@ namespace gladius::agent::tests
         }
         EXPECT_TRUE(sawImage);
         EXPECT_FALSE(sawBase64Text);
+    }
+
+    TEST(AgentLoop, Run_AutonomousModeHesitatesWithoutTools_NudgesAndCompletes)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        bool finished = false;
+        registry.registerSyncTool(
+          {"finish_design", "Finish", {{"type", "object"}}, tools::ToolPolicy::DesignGraphModification},
+          [&](nlohmann::json const &) {
+              finished = true;
+              return nlohmann::json{{"success", true}};
+          });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(CompletionResponse{"Should I continue?", {}, "stop", true, ""});
+        provider.responses.push(CompletionResponse{
+          "Continuing autonomously.",
+          {ToolCall{"c1", "finish_design", nlohmann::json::object()}},
+          "tool_calls",
+          true,
+          ""});
+
+        Conversation conv;
+        conv.appendUserText("Design a bracket");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy(AutonomyLevel::WorkAutonomously, PrivacySettings{});
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(loop.run(
+          conv,
+          provider,
+          registry,
+          executor,
+          ctxBuilder,
+          policy,
+          queue,
+          limits,
+          cancel,
+          [&]() { return finished; },
+          nullptr,
+          []() {
+              DesignContextSnapshot snap;
+              snap.autonomy = AutonomyLevel::WorkAutonomously;
+              return snap;
+          }));
+
+        // Assert
+        EXPECT_TRUE(res.completed);
+        EXPECT_TRUE(finished);
+        EXPECT_EQ(res.modelTurns, 2u);
+        EXPECT_NE(provider.capturedRequests[0].systemPrompt.find("AUTONOMOUS MODE ACTIVE"),
+                  std::string::npos);
+    }
+
+    TEST(SkillLoader, BuiltInSkills_ContainsModelingAndLibraryReuse)
+    {
+        SkillLoader loader;
+        EXPECT_TRUE(loader.findSkill("sdf-modeling").has_value());
+        EXPECT_TRUE(loader.findSkill("library-reuse").has_value());
+        EXPECT_TRUE(loader.findSkill("morphological-design").has_value());
+        EXPECT_FALSE(loader.summarizeForPrompt().empty());
     }
 } // namespace gladius::agent::tests

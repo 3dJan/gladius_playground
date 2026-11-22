@@ -13,12 +13,14 @@ namespace gladius::agent
     /// @brief Structured engineering context injected into each model turn
     struct DesignContextSnapshot
     {
+        AutonomyLevel autonomy = AutonomyLevel::AskAtMajorDecisions;
         std::string designPhase = "ClarifyRequirements";
         std::string requirementsSummary;
         std::string designGraphSummary;
         std::string activeConfigurationSummary;
         std::string manufacturingConstraints;
         std::string relevantCatalogueSummary;
+        std::string availableSkillsSummary;
         std::string validationSummary;
     };
 

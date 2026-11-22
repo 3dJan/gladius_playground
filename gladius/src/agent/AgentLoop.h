@@ -19,10 +19,12 @@ namespace gladius::agent
     /// @brief Hard execution limits preventing runaway cost or infinite refinement
     struct AgentLimits
     {
-        std::size_t maxModelTurns = 64;
+        /// @brief Model-turn budget for a single run; a non-positive value means unlimited
+        int maxModelTurns = 64;
         std::size_t maxToolCalls = 256;
         std::size_t maxViewportReviews = 16;
-        std::chrono::minutes maxWallTime{15};
+        /// @brief Wall-clock budget for a single run; a non-positive duration means unlimited
+        std::chrono::milliseconds maxWallTime{std::chrono::minutes(15)};
     };
 
     /// @brief Outcome of an AgentLoop execution

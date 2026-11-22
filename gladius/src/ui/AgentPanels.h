@@ -6,6 +6,7 @@
 #include "../agent/Conversation.h"
 #include "../agent/CredentialStore.h"
 #include "../agent/PermissionPolicy.h"
+#include "../agent/SkillLoader.h"
 #include "../agent/providers/IAiProvider.h"
 #include "../design/DesignCatalogue.h"
 #include "../design/DesignGraph.h"
@@ -127,6 +128,7 @@ namespace gladius::ui
         agent::AgentEventQueue m_eventQueue;
         agent::AgentLimits m_limits;
         agent::OsCredentialStore m_credentialStore;
+        agent::SkillLoader m_skills;
         io::CancellationToken m_cancellation;
 
         int m_providerIndex = 0; // 0 = OpenAI-compatible, 1 = Anthropic

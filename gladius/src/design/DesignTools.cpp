@@ -4,12 +4,18 @@
 #include "../EventLogger.h"
 #include "../ExpressionParser.h"
 #include "../ExpressionToGraphConverter.h"
+#include "../FileSystemUtils.h"
 #include "../ProgramSnippetApplier.h"
 #include "../agent/Conversation.h"
+#include "../io/3mf/Lib3mfLoader.h"
+#include "../io/3mf/LibraryMetadata.h"
 #include "../nodes/Assembly.h"
 #include "../nodes/GraphOptimizer.h"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
+#include <set>
 
 namespace gladius::design
 {
@@ -613,6 +619,273 @@ namespace gladius::design
                   return {{"success", true},
                           {"resourceId", key.getResourceId().value_or(0)},
                           {"displayName", key.getDisplayName()}};
+              }
+              catch (std::exception const & ex)
+              {
+                  return {{"success", false}, {"error", ex.what()}};
+              }
+          });
+
+        registry.registerSyncTool(
+          {"list_skills",
+           "List available built-in Gladius design skills.",
+           {{"type", "object"}, {"properties", nlohmann::json::object()}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const &) -> nlohmann::json {
+              if (!ctx.skills)
+              {
+                  return {{"success", true}, {"skills", nlohmann::json::array()}};
+              }
+              nlohmann::json arr = nlohmann::json::array();
+              for (auto const & s : ctx.skills->skills())
+              {
+                  arr.push_back({{"name", s.name}, {"description", s.description}});
+              }
+              return {{"success", true}, {"skills", std::move(arr)}};
+          });
+
+        registry.registerSyncTool(
+          {"load_skill",
+           "Load detailed instructions for a built-in Gladius design skill by name.",
+           {{"type", "object"},
+            {"required", {"name"}},
+            {"properties", {{"name", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.skills)
+              {
+                  return {{"success", false}, {"error", "Skills registry unavailable"}};
+              }
+              std::string const name = args.value("name", "");
+              auto const skill = ctx.skills->findSkill(name);
+              if (!skill.has_value())
+              {
+                  return {{"success", false}, {"error", "Unknown skill: " + name}};
+              }
+              return {{"success", true},
+                      {"name", skill->name},
+                      {"description", skill->description},
+                      {"content", skill->content}};
+          });
+
+        registry.registerSyncTool(
+          {"list_library_items",
+           "Search the Gladius 3MF component/function library by optional category or query keyword.",
+           {{"type", "object"},
+            {"properties",
+             {{"category", {{"type", "string"}}}, {"query", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const & args) -> nlohmann::json {
+              std::string const catFilter = args.value("category", "");
+              std::string query = args.value("query", "");
+              std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) {
+                  return static_cast<char>(std::tolower(c));
+              });
+
+              auto toLower = [](std::string s) {
+                  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+                      return static_cast<char>(std::tolower(c));
+                  });
+                  return s;
+              };
+
+              std::set<std::string> categories;
+              std::error_code ec;
+              for (auto const & root : {getUserLibraryDir(), getShippedLibraryDir()})
+              {
+                  if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec))
+                  {
+                      continue;
+                  }
+                  for (auto const & dir : std::filesystem::directory_iterator(root, ec))
+                  {
+                      if (dir.is_directory(ec))
+                      {
+                          std::string const name = dir.path().filename().string();
+                          if (!name.empty() && name[0] != '.'
+                              && (catFilter.empty() || catFilter == name))
+                          {
+                              categories.insert(name);
+                          }
+                      }
+                  }
+              }
+
+              nlohmann::json items = nlohmann::json::array();
+              std::set<std::string> seen;
+              for (auto const & cat : categories)
+              {
+                  for (auto const & root : {getUserLibraryDir(), getShippedLibraryDir()})
+                  {
+                      auto const catDir = root / cat;
+                      if (!std::filesystem::exists(catDir, ec)
+                          || !std::filesystem::is_directory(catDir, ec))
+                      {
+                          continue;
+                      }
+                      for (auto const & file : std::filesystem::directory_iterator(catDir, ec))
+                      {
+                          if (!file.is_regular_file(ec) || file.path().extension() != ".3mf")
+                          {
+                              continue;
+                          }
+                          std::string const entryName = file.path().stem().string();
+                          std::string const key = cat + "/" + entryName;
+                          if (!seen.insert(key).second)
+                          {
+                              continue;
+                          }
+
+                          std::string desc;
+                          std::string tags;
+                          try
+                          {
+                              auto wrapper = io::loadLib3mfScoped();
+                              auto model = wrapper->CreateModel();
+                              auto reader = model->QueryReader("3mf");
+                              reader->ReadFromFile(file.path().string());
+                              if (auto meta = io::readLibraryMetadata(model))
+                              {
+                                  desc = meta->libraryDescription;
+                                  tags = meta->libraryTags;
+                              }
+                          }
+                          catch (...)
+                          {
+                          }
+
+                          if (!query.empty())
+                          {
+                              std::string const haystack =
+                                toLower(cat + " " + entryName + " " + desc + " " + tags);
+                              if (haystack.find(query) == std::string::npos)
+                              {
+                                  continue;
+                              }
+                          }
+
+                          items.push_back({{"category", cat},
+                                           {"name", entryName},
+                                           {"description", desc},
+                                           {"tags", tags}});
+                      }
+                  }
+              }
+              return {{"success", true}, {"count", items.size()}, {"items", std::move(items)}};
+          });
+
+        registry.registerSyncTool(
+          {"import_library_item",
+           "Import a reusable library item into the currently open document and return its function signature.",
+           {{"type", "object"},
+            {"required", {"category", "name"}},
+            {"properties",
+             {{"category", {{"type", "string"}}}, {"name", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ModelModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.document || !ctx.document->getAssembly())
+              {
+                  return {{"success", false}, {"error", "No active document"}};
+              }
+              std::string const category = args.value("category", "");
+              std::string const name = args.value("name", "");
+              if (category.empty() || name.empty())
+              {
+                  return {{"success", false}, {"error", "category and name are required"}};
+              }
+
+              std::filesystem::path entryPath;
+              std::error_code ec;
+              for (auto const & root : {getUserLibraryDir(), getShippedLibraryDir()})
+              {
+                  auto const candidate = root / category / (name + ".3mf");
+                  if (std::filesystem::exists(candidate, ec))
+                  {
+                      entryPath = candidate;
+                      break;
+                  }
+              }
+              if (entryPath.empty())
+              {
+                  return {{"success", false},
+                          {"error", "Library item not found: " + category + "/" + name}};
+              }
+
+              try
+              {
+                  auto wrapper = io::loadLib3mfScoped();
+                  auto libModel = wrapper->CreateModel();
+                  auto reader = libModel->QueryReader("3mf");
+                  reader->ReadFromFile(entryPath.string());
+                  auto metadata = io::readLibraryMetadata(libModel);
+
+                  std::string targetFuncName;
+                  if (metadata.has_value())
+                  {
+                      auto taggedIds = io::parseResourceIds(metadata->libraryFunctions);
+                      auto funcIter = libModel->GetFunctions();
+                      while (funcIter->MoveNext())
+                      {
+                          auto func = funcIter->GetCurrentFunction();
+                          if (!taggedIds.empty()
+                              && std::find(taggedIds.begin(),
+                                           taggedIds.end(),
+                                           func->GetModelResourceID())
+                                   != taggedIds.end())
+                          {
+                              targetFuncName = func->GetDisplayName();
+                              break;
+                          }
+                      }
+                  }
+                  if (targetFuncName.empty())
+                  {
+                      auto funcIter = libModel->GetFunctions();
+                      if (funcIter->MoveNext())
+                      {
+                          targetFuncName = funcIter->GetCurrentFunction()->GetDisplayName();
+                      }
+                  }
+                  if (targetFuncName.empty())
+                  {
+                      return {{"success", false},
+                              {"error", "Library item contains no functions"}};
+                  }
+
+                  auto const match = ctx.document->mergeAndResolve(entryPath, targetFuncName);
+                  if (match.id == 0)
+                  {
+                      return {{"success", false},
+                              {"error", "Failed to import library function: " + targetFuncName}};
+                  }
+
+                  ctx.document->update3mfModel();
+                  ctx.document->rebuildResourceDependencyGraph();
+                  ctx.document->refreshModelBlocking();
+                  ctx.document->markFileAsChanged();
+                  ctx.document->signalStructuralEdit();
+                  if (ctx.onDocumentModified)
+                  {
+                      ctx.onDocumentModified();
+                  }
+
+                  std::string importedSnippet;
+                  if (auto const assembly = ctx.document->getAssembly())
+                  {
+                      if (auto const it = assembly->getFunctions().find(match.id);
+                          it != assembly->getFunctions().end() && it->second)
+                      {
+                          importedSnippet =
+                            ExpressionToGraphConverter::convertGraphToSnippet(*it->second);
+                      }
+                  }
+
+                  return {{"success", true},
+                          {"functionId", match.id},
+                          {"functionName",
+                           match.model ? match.model->getDisplayName().value_or(targetFuncName)
+                                       : targetFuncName},
+                          {"snippet", importedSnippet}};
               }
               catch (std::exception const & ex)
               {

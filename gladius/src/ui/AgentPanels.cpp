@@ -27,6 +27,18 @@ namespace gladius::ui
     namespace
     {
         constexpr char const * kCredentialService = "gladius.design_agent";
+        constexpr int kDefaultWallTimeMinutes = 15;
+        constexpr int kDefaultMaxModelTurns = 64;
+
+        std::chrono::milliseconds wallTimeFromMinutes(int minutes)
+        {
+            return std::chrono::milliseconds(std::max(0, minutes) * 60000);
+        }
+
+        int minutesFromWallTime(std::chrono::milliseconds const duration)
+        {
+            return static_cast<int>(duration.count() / 60000);
+        }
 
         std::vector<std::byte> readBinaryFile(std::string const & path)
         {
@@ -104,7 +116,8 @@ namespace gladius::ui
               }
           },
           nullptr,
-          [this]() { m_documentModifiedPending.store(true); }});
+          [this]() { m_documentModifiedPending.store(true); },
+          &m_skills});
         design::registerDesignTools(m_registry, *m_toolCtx);
     }
 
@@ -244,6 +257,12 @@ namespace gladius::ui
           m_configManager->getValue<bool>("AgentPrivacy", "allowRawGeometry", false);
         m_policy.setPrivacy(privacy);
 
+        m_limits.maxWallTime =
+          wallTimeFromMinutes(m_configManager->getValue<int>(
+            "Agent", "maxWallTimeMinutes", kDefaultWallTimeMinutes));
+        m_limits.maxModelTurns =
+          std::max(0, m_configManager->getValue<int>("Agent", "maxModelTurns", kDefaultMaxModelTurns));
+
         std::string const account = (m_providerIndex == 1) ? "anthropic" : "openai";
         if (auto key = m_credentialStore.loadSecret(kCredentialService, account))
         {
@@ -260,6 +279,9 @@ namespace gladius::ui
               "Agent", "autonomy", static_cast<int>(m_policy.autonomy()));
             m_configManager->setValue<std::string>("Agent", "endpoint", m_endpointBuf);
             m_configManager->setValue<std::string>("Agent", "model", m_modelBuf);
+            m_configManager->setValue<int>(
+              "Agent", "maxWallTimeMinutes", minutesFromWallTime(m_limits.maxWallTime));
+            m_configManager->setValue<int>("Agent", "maxModelTurns", m_limits.maxModelTurns);
 
             auto const & privacy = m_policy.privacy();
             m_configManager->setValue<bool>("AgentPrivacy", "allowConversationText", privacy.allowConversationText);
@@ -395,8 +417,10 @@ namespace gladius::ui
               },
               [this]() {
                   agent::DesignContextSnapshot snap;
+                  snap.autonomy = m_policy.autonomy();
                   snap.designPhase = design::toString(m_graph.phase());
                   snap.designGraphSummary = m_graph.summarize();
+                  snap.availableSkillsSummary = m_skills.summarizeForPrompt();
                   return snap;
               }));
             m_running.store(false);
@@ -920,6 +944,58 @@ namespace gladius::ui
             {
                 m_configManager->setValue<int>("Agent", "autonomy", autonomy);
                 m_configManager->save();
+            }
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Execution Limits");
+        bool unlimitedTurns = m_limits.maxModelTurns <= 0;
+        if (ImGui::Checkbox("Unlimited model turns", &unlimitedTurns))
+        {
+            m_limits.maxModelTurns = unlimitedTurns ? 0 : kDefaultMaxModelTurns;
+            if (m_configManager != nullptr)
+            {
+                m_configManager->setValue<int>("Agent", "maxModelTurns", m_limits.maxModelTurns);
+                m_configManager->save();
+            }
+        }
+        if (!unlimitedTurns)
+        {
+            int maxTurns = m_limits.maxModelTurns;
+            if (ImGui::SliderInt("Max model turns", &maxTurns, 1, 1024))
+            {
+                m_limits.maxModelTurns = maxTurns;
+                if (m_configManager != nullptr)
+                {
+                    m_configManager->setValue<int>("Agent", "maxModelTurns", maxTurns);
+                    m_configManager->save();
+                }
+            }
+        }
+        bool unlimitedWallTime = m_limits.maxWallTime.count() <= 0;
+        if (ImGui::Checkbox("Unlimited wall time", &unlimitedWallTime))
+        {
+            m_limits.maxWallTime =
+              unlimitedWallTime ? std::chrono::milliseconds(0)
+                                : wallTimeFromMinutes(kDefaultWallTimeMinutes);
+            if (m_configManager != nullptr)
+            {
+                m_configManager->setValue<int>(
+                  "Agent", "maxWallTimeMinutes", minutesFromWallTime(m_limits.maxWallTime));
+                m_configManager->save();
+            }
+        }
+        if (!unlimitedWallTime)
+        {
+            int wallTimeMinutes = minutesFromWallTime(m_limits.maxWallTime);
+            if (ImGui::SliderInt("Wall time limit", &wallTimeMinutes, 1, 720, "%d min"))
+            {
+                m_limits.maxWallTime = wallTimeFromMinutes(wallTimeMinutes);
+                if (m_configManager != nullptr)
+                {
+                    m_configManager->setValue<int>("Agent", "maxWallTimeMinutes", wallTimeMinutes);
+                    m_configManager->save();
+                }
             }
         }
 

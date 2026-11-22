@@ -18,8 +18,11 @@ namespace gladius::agent
     {
         AgentRunResult result;
         auto const startTime = std::chrono::steady_clock::now();
+        std::size_t autonomousNudges = 0;
+        constexpr std::size_t kMaxAutonomousNudges = 3;
 
-        while (result.modelTurns < limits.maxModelTurns)
+        while (limits.maxModelTurns <= 0
+               || result.modelTurns < static_cast<std::size_t>(limits.maxModelTurns))
         {
             if (cancellation.isCancelled())
             {
@@ -29,7 +32,8 @@ namespace gladius::agent
                 co_return result;
             }
 
-            if (std::chrono::steady_clock::now() - startTime > limits.maxWallTime)
+            if (limits.maxWallTime.count() > 0
+                && std::chrono::steady_clock::now() - startTime > limits.maxWallTime)
             {
                 result.error = "Agent wall-time limit reached";
                 eventQueue.push(AgentFailedEvent{result.error});
@@ -67,10 +71,21 @@ namespace gladius::agent
 
             if (response.toolCalls.empty())
             {
+                if (policy.autonomy() == AutonomyLevel::WorkAutonomously && isDesignComplete
+                    && !isDesignComplete() && autonomousNudges < kMaxAutonomousNudges)
+                {
+                    ++autonomousNudges;
+                    conversation.appendUserText(
+                      "The user is away in autonomous mode. Do not wait for user input or ask "
+                      "permission. Decide autonomously, execute the next tools, and call "
+                      "finish_design when validated.");
+                    continue;
+                }
                 result.completed = true;
                 eventQueue.push(AgentCompletedEvent{result.finalMessage});
                 co_return result;
             }
+            autonomousNudges = 0;
 
             for (auto const & call : response.toolCalls)
             {
