@@ -21,6 +21,13 @@ namespace gladius::agent
         std::size_t autonomousNudges = 0;
         constexpr std::size_t kMaxAutonomousNudges = 3;
 
+        // Completion is scoped to this run: a design that was already complete when the run started
+        // (e.g. finished by an earlier prompt) must not terminate a run for a follow-up request.
+        bool const initiallyComplete = isDesignComplete ? isDesignComplete() : false;
+        auto becameDesignComplete = [&]() {
+            return isDesignComplete != nullptr && !initiallyComplete && isDesignComplete();
+        };
+
         while (limits.maxModelTurns <= 0
                || result.modelTurns < static_cast<std::size_t>(limits.maxModelTurns))
         {
@@ -72,7 +79,7 @@ namespace gladius::agent
             if (response.toolCalls.empty())
             {
                 if (policy.autonomy() == AutonomyLevel::WorkAutonomously && isDesignComplete
-                    && !isDesignComplete() && autonomousNudges < kMaxAutonomousNudges)
+                    && !becameDesignComplete() && autonomousNudges < kMaxAutonomousNudges)
                 {
                     ++autonomousNudges;
                     conversation.appendUserText(
@@ -160,7 +167,7 @@ namespace gladius::agent
                                                  std::move(attachedImage->mimeType));
                 }
 
-                if (isDesignComplete && isDesignComplete())
+                if (becameDesignComplete())
                 {
                     result.completed = true;
                     eventQueue.push(AgentCompletedEvent{result.finalMessage});

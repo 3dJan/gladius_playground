@@ -89,6 +89,37 @@ namespace gladius::design::tests
         EXPECT_EQ(graph.requirements()[0].description, "Height >= 60mm");
     }
 
+    TEST(DesignGraph, ReopenForFollowUpRequest_CompletedDesign_ResetsPhaseAndRecordsChange)
+    {
+        // Arrange
+        DesignGraph graph;
+        graph.addRequirement("Height >= 50mm", "dimensions", true);
+        graph.setPhase(DesignPhase::Complete);
+
+        // Act
+        ASSERT_TRUE(graph.reopenForFollowUpRequest("Build a house out of the brick I added"));
+
+        // Assert
+        EXPECT_EQ(graph.phase(), DesignPhase::Refine);
+        EXPECT_TRUE(graph.hasPendingRequirementChanges());
+        auto const changes = graph.consumePendingRequirementChanges();
+        ASSERT_EQ(changes.size(), 1u);
+        EXPECT_NE(changes[0].find("Build a house out of the brick I added"), std::string::npos);
+        EXPECT_EQ(graph.requirements().size(), 1u);
+    }
+
+    TEST(DesignGraph, ReopenForFollowUpRequest_IncompleteDesign_DoesNothing)
+    {
+        // Arrange
+        DesignGraph graph;
+        graph.setPhase(DesignPhase::DevelopComponents);
+
+        // Act / Assert
+        EXPECT_FALSE(graph.reopenForFollowUpRequest("Make it taller"));
+        EXPECT_EQ(graph.phase(), DesignPhase::DevelopComponents);
+        EXPECT_FALSE(graph.hasPendingRequirementChanges());
+    }
+
     TEST(DesignGraph, ToAndFromJson_RoundTripsFeedbackAndConfigurations)
     {
         // Arrange

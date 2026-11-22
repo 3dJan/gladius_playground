@@ -967,6 +967,45 @@ namespace gladius::ui
         }
     }
 
+    agent::DesignContextSnapshot AgentPanels::buildContextSnapshot(std::string const & knowledgeQuery)
+    {
+        agent::DesignContextSnapshot snap;
+        snap.autonomy = m_policy.autonomy();
+        snap.isIncremental = (m_conversation.size() > 1)
+                             || (m_document && m_document->getAssembly()
+                                 && m_document->getAssembly()->getFunctions().size() > 1);
+        snap.isFollowUpRequest = m_followUpRequest && m_graph.phase() != design::DesignPhase::Complete;
+        if (snap.isIncremental && m_document && m_document->getAssembly())
+        {
+            std::string funcList;
+            for (auto const & [fid, model] : m_document->getAssembly()->getFunctions())
+            {
+                if (model)
+                {
+                    funcList += "- " + model->getDisplayName().value_or(std::to_string(fid))
+                                + " (id=" + std::to_string(fid) + ")\n";
+                }
+            }
+            snap.existingModelSummary = std::move(funcList);
+        }
+        for (auto const & req : m_graph.requirements())
+        {
+            snap.requirementsSummary += "- " + req.id + " [" + req.category
+                                        + (req.mandatory ? ", mandatory" : ", optional") + "] \""
+                                        + req.description + "\"\n";
+        }
+        for (auto const & ch : m_graph.consumePendingRequirementChanges())
+        {
+            snap.requirementChangesSummary += "- " + ch + "\n";
+        }
+        snap.designPhase = design::toString(m_graph.phase());
+        snap.designGraphSummary = m_graph.summarize();
+        snap.availableSkillsSummary = m_skills.summarizeForPrompt();
+        snap.todoSummary = m_todos.summarize();
+        snap.knowledgeSummary = m_knowledge.summarizeForPrompt(knowledgeQuery, 5);
+        return snap;
+    }
+
     void AgentPanels::startRun(std::string const & userPrompt)
     {
         if (m_running.load() || (userPrompt.empty() && m_pendingImages.empty()))
@@ -1006,6 +1045,10 @@ namespace gladius::ui
         m_activeToolName.clear();
         m_runStartTime = std::chrono::steady_clock::now();
         m_cancellation.reset();
+
+        // A prompt that arrives after the design was finished extends the requirements: re-open the
+        // design so the new request is iterated on instead of being reported as already done.
+        m_followUpRequest = m_graph.reopenForFollowUpRequest(userPrompt);
 
         agent::Message msg;
         msg.role = agent::MessageRole::User;
@@ -1121,37 +1164,7 @@ namespace gladius::ui
                     m_confirmationResolved = false;
                     co_return ok;
                 },
-                [this, promptForKnowledge]() {
-                    agent::DesignContextSnapshot snap;
-                    snap.autonomy = m_policy.autonomy();
-                    snap.isIncremental = (m_conversation.size() > 1)
-                                         || (m_document && m_document->getAssembly()
-                                             && m_document->getAssembly()->getFunctions().size() > 1);
-                    if (snap.isIncremental && m_document && m_document->getAssembly())
-                    {
-                        std::string funcList;
-                        for (auto const & [fid, model] : m_document->getAssembly()->getFunctions())
-                        {
-                            if (model)
-                            {
-                                funcList += "- " + model->getDisplayName().value_or(std::to_string(fid))
-                                            + " (id=" + std::to_string(fid) + ")\n";
-                            }
-                        }
-                        snap.existingModelSummary = std::move(funcList);
-                    }
-                    auto const reqChanges = m_graph.consumePendingRequirementChanges();
-                    for (auto const & ch : reqChanges)
-                    {
-                        snap.requirementChangesSummary += "- " + ch + "\n";
-                    }
-                    snap.designPhase = design::toString(m_graph.phase());
-                    snap.designGraphSummary = m_graph.summarize();
-                    snap.availableSkillsSummary = m_skills.summarizeForPrompt();
-                    snap.todoSummary = m_todos.summarize();
-                    snap.knowledgeSummary = m_knowledge.summarizeForPrompt(promptForKnowledge, 5);
-                    return snap;
-                }));
+                [this, promptForKnowledge]() { return buildContextSnapshot(promptForKnowledge); }));
               m_running.store(false);
           });
 #endif
@@ -1240,37 +1253,7 @@ namespace gladius::ui
           [this](tools::ToolDefinition const &, nlohmann::json const &) -> coro::task<bool> {
               co_return co_await WebConfirmAwaitable{this};
           },
-          [this, promptForKnowledge]() {
-              agent::DesignContextSnapshot snap;
-              snap.autonomy = m_policy.autonomy();
-              snap.isIncremental = (m_conversation.size() > 1)
-                                   || (m_document && m_document->getAssembly()
-                                       && m_document->getAssembly()->getFunctions().size() > 1);
-              if (snap.isIncremental && m_document && m_document->getAssembly())
-              {
-                  std::string funcList;
-                  for (auto const & [fid, model] : m_document->getAssembly()->getFunctions())
-                  {
-                      if (model)
-                      {
-                          funcList += "- " + model->getDisplayName().value_or(std::to_string(fid))
-                                      + " (id=" + std::to_string(fid) + ")\n";
-                      }
-                  }
-                  snap.existingModelSummary = std::move(funcList);
-              }
-              auto const reqChanges = m_graph.consumePendingRequirementChanges();
-              for (auto const & ch : reqChanges)
-              {
-                  snap.requirementChangesSummary += "- " + ch + "\n";
-              }
-              snap.designPhase = design::toString(m_graph.phase());
-              snap.designGraphSummary = m_graph.summarize();
-              snap.availableSkillsSummary = m_skills.summarizeForPrompt();
-              snap.todoSummary = m_todos.summarize();
-              snap.knowledgeSummary = m_knowledge.summarizeForPrompt(promptForKnowledge, 5);
-              return snap;
-          });
+          [this, promptForKnowledge]() { return buildContextSnapshot(promptForKnowledge); });
         m_running.store(false);
         co_return;
     }

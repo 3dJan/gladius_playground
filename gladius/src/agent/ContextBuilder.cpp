@@ -10,6 +10,9 @@ namespace gladius::agent
                "ENGINEERING WORKFLOW:\n"
                "1. Inspect the open document (get_model_summary, get_program_snippet) and requirements.\n"
                "   When continuing incrementally on an existing model, preserve and extend existing functions rather than replacing them unless requested.\n"
+               "1b. A new user message is never already solved. Even if the design was completed and validated by an earlier\n"
+               "    request, treat every new message as a change request: add the new requirement, update the plan, iterate on\n"
+               "    the design, and finish again. Never answer a new request by simply reporting the previous design as done.\n"
                "2. For non-trivial tasks, plan your steps with create_todo_list / add_todo_item and track progress with update_todo_item.\n"
                "3. Create a part/function inventory: call add_function for every required part/feature.\n"
                "4. Library reuse check: for each part/function in your list, search the Gladius library "
@@ -51,6 +54,15 @@ namespace gladius::agent
         if (!snapshot.designPhase.empty())
         {
             sys << "\nCurrent design phase: " << snapshot.designPhase << "\n";
+        }
+        if (snapshot.isFollowUpRequest)
+        {
+            sys << "\nFOLLOW-UP REQUEST ON A FINISHED DESIGN:\n"
+                   "A previous design was already completed and validated. The user's newest message is a new\n"
+                   "request that has NOT been considered yet. Do NOT assume the work is done and do NOT call\n"
+                   "finish_design before addressing it: extend the requirements with add_requirement for the new\n"
+                   "wish, revise the plan (todos), variants and configuration,\n"
+                   "apply the model edits, inspect with capture_viewport, and only then call finish_design.\n";
         }
         if (snapshot.isIncremental)
         {

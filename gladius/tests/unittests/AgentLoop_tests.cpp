@@ -88,6 +88,68 @@ namespace gladius::agent::tests
         EXPECT_FALSE(events.empty());
     }
 
+    TEST(AgentLoop, Run_DesignAlreadyComplete_KeepsIteratingFollowUpRequest)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        registry.registerSyncTool(
+          {"get_model_summary", "Inspect", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const &) { return nlohmann::json{{"success", true}}; });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(CompletionResponse{
+          "Looking at the scene.",
+          {ToolCall{"c1", "get_model_summary", nlohmann::json::object()}},
+          "tool_calls",
+          true,
+          ""});
+        provider.responses.push(CompletionResponse{"I will extend the design.", {}, "stop", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Build a house out of the brick I added");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act: the graph is already Complete when the follow-up prompt arrives
+        auto const res = coro::sync_wait(loop.run(
+          conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel,
+          []() { return true; }));
+
+        // Assert: the stale complete state must not cut the run short after the first tool call
+        EXPECT_TRUE(res.completed);
+        EXPECT_EQ(res.modelTurns, 2u);
+        EXPECT_EQ(res.toolCalls, 1u);
+    }
+
+    TEST(AgentLoop, Build_FollowUpRequestInjectsReIterationGuidance)
+    {
+        // Arrange
+        Conversation conv;
+        conv.appendUserText("Build a lego house");
+        tools::ToolRegistry registry;
+        ContextBuilder ctxBuilder;
+        DesignContextSnapshot snap;
+        snap.isFollowUpRequest = true;
+        snap.requirementsSummary = "- req_1 [functional, mandatory] \"Fit a 2x4 brick\"\n";
+
+        // Act
+        auto const req = ctxBuilder.build(conv, registry, PrivacySettings{}, snap);
+
+        // Assert
+        EXPECT_NE(req.systemPrompt.find("FOLLOW-UP REQUEST ON A FINISHED DESIGN"), std::string::npos);
+        EXPECT_NE(req.systemPrompt.find("Requirements:"), std::string::npos);
+
+        DesignContextSnapshot const plain;
+        auto const plainReq = ctxBuilder.build(conv, registry, PrivacySettings{}, plain);
+        EXPECT_EQ(plainReq.systemPrompt.find("FOLLOW-UP REQUEST ON A FINISHED DESIGN"),
+                  std::string::npos);
+    }
+
     TEST(AgentLoop, Run_PrivacyBlocksViewport_DeniesToolCall)
     {
         // Arrange

@@ -86,6 +86,20 @@ namespace gladius::design
         return out;
     }
 
+    bool DesignGraph::reopenForFollowUpRequest(std::string const & userRequest)
+    {
+        if (m_phase != DesignPhase::Complete)
+        {
+            return false;
+        }
+        m_phase = DesignPhase::Refine;
+        std::string const request = userRequest.empty() ? std::string("see attached images") : userRequest;
+        m_pendingRequirementChanges.push_back(
+          "New user request for the already completed design: \"" + request
+          + "\". Extend the existing requirements and iterate on the design again; do not consider the design finished.");
+        return true;
+    }
+
     std::string DesignGraph::addNode(DesignNodeType type,
                                      std::string name,
                                      std::string const & parentNodeId,

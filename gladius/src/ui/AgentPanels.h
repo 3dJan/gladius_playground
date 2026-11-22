@@ -118,6 +118,8 @@ namespace gladius::ui
         void drainEvents();
         void startRun(std::string const & userPrompt);
         void stopRun();
+        [[nodiscard]] agent::DesignContextSnapshot buildContextSnapshot(
+          std::string const & knowledgeQuery);
         void loadSettings();
         void saveSettings();
         void releaseTextures();
@@ -174,6 +176,7 @@ namespace gladius::ui
         io::CancellationToken m_cancellation;
 
         bool m_startFresh = true;
+        bool m_followUpRequest = false;
         bool m_promptFocused = false;
         int m_inspectedImageIndex = -1;
 

@@ -38,6 +38,12 @@ namespace gladius::design
 
         void recordUserAddedRequirement(std::string const & id);
 
+        /// @brief Re-open a design that already reached DesignPhase::Complete so a follow-up user
+        ///        request extends the requirements instead of being treated as already finished.
+        /// @param userRequest New wish of the user; recorded as a pending requirement change.
+        /// @return True when the design was complete and has been re-opened.
+        bool reopenForFollowUpRequest(std::string const & userRequest);
+
         [[nodiscard]] std::vector<std::string> consumePendingRequirementChanges();
         [[nodiscard]] bool hasPendingRequirementChanges() const noexcept
         {

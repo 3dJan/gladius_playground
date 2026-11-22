@@ -15,6 +15,7 @@ namespace gladius::agent
     {
         AutonomyLevel autonomy = AutonomyLevel::AskAtMajorDecisions;
         bool isIncremental = false;
+        bool isFollowUpRequest = false;
         std::string designPhase = "ClarifyRequirements";
         std::string requirementsSummary;
         std::string requirementChangesSummary;
