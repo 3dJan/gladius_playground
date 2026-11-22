@@ -381,8 +381,8 @@ namespace gladius::compute::tests
         ASSERT_FALSE(source.empty());
         EXPECT_NE(source.find("const RF_SKIP_BACKGROUND_RAYS: u32 = 32u;"), std::string::npos);
         EXPECT_NE(source.find("fn background_skip_bounds()"), std::string::npos);
-        EXPECT_NE(source.find("fn ray_misses_bounds("), std::string::npos);
-        EXPECT_NE(source.find("ray_misses_bounds(eye, ray_direction, max_distance)"),
+        EXPECT_NE(source.find("fn ray_bounds_interval("), std::string::npos);
+        EXPECT_NE(source.find("ray_bounds_interval(eye, ray_direction, max_distance)"),
                   std::string::npos);
         EXPECT_NE(source.find("frame.vertical_scale_and_max_steps.z"), std::string::npos);
     }

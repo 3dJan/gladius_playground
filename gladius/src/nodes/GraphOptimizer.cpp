@@ -121,6 +121,12 @@ namespace gladius::nodes
             {
                 return std::nullopt;
             }
+            // Parameters with a resolved origin are addressable runtime parameters; merging
+            // them would collapse their value buffer destinations.
+            if (param.getOrigin().has_value())
+            {
+                return std::nullopt;
+            }
             auto const & val = param.getValue();
             if (auto const * f = std::get_if<float>(&val))
             {
