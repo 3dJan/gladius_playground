@@ -78,7 +78,7 @@ namespace gladius::mcp::tools
         auto snapshot = compute::FunctionEvaluatorSnapshot{};
         try
         {
-            auto const sceneGeneration = std::max(document.structuralEditEpoch(), 1ULL);
+            auto const sceneGeneration = std::max<std::uint64_t>(document.structuralEditEpoch(), 1u);
             compute::AnalyticRenderSceneSnapshotFactory snapshotFactory;
             snapshot = snapshotFactory.createFunctionEvaluator(
               assembly, functionId, sceneGeneration, &document.getResourceManager());
