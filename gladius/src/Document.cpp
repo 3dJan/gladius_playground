@@ -38,6 +38,8 @@
 #include "io/3mf/IndexedTriangleMesh3mfWriter.h"
 #include "io/3mf/MmuSegmentationWriter.h"
 #include "io/3mf/PreparedDiscreteColorExport.h"
+#include "io/3mf/IndexedTriangleMeshWritePrecision.h"
+#include "io/IndexedTriangleMeshRepair.h"
 #include "io/IndexedTriangleMeshWriter.h"
 #include "webgpu/WebGPUContourGenerator.h"
 #include "webgpu/WebGPUDualContouringExporter.h"
@@ -1815,6 +1817,23 @@ namespace gladius
                                            "Simplifying material interiors");
                                 });
                             if (warning && m_logger) m_logger->addEvent({*warning, events::Severity::Warning});
+                        }
+                        // Both steps below can leave the mesh invalid for strict consumers: QEM emits
+                        // collinear slivers, and the 3MF writer quantises every coordinate to nine
+                        // decimals, which can turn a thin triangle into a degenerate one after the fact.
+                        // Snap to that precision first, then collapse what is left. The collapse only drops
+                        // whole triangles and keeps the palette map in lockstep, so the material mapping
+                        // and the face count stay consistent.
+                        io::snapMeshTo3mfWritePrecision(mesh);
+                        if (auto const repair = io::collapseGeometricallyDegenerateTriangles(
+                              mesh, palette.sourceToPaletteMap);
+                            repair.collapsedEdgeCount != 0U && m_logger)
+                        {
+                            m_logger->addEvent(
+                              {fmt::format("3MF export: removed {} geometrically degenerate triangles from "
+                                           "the colored mesh",
+                                           repair.removedTriangleCount),
+                               events::Severity::Warning});
                         }
                         io::validateDiscretePalette(palette, mesh.indices.size() / 3U);
                         throwIfCancelled();
