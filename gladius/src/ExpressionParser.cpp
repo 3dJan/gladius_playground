@@ -200,6 +200,13 @@ namespace gladius
             // Add length function (vector magnitude; scalar fallback for validation)
             m_parser.DefineFun("length", [](double x) -> double { return std::abs(x); });
 
+            // Add rounding functions. muParser provides neither floor nor ceil, so without
+            // them expressions that are valid for the graph converter fail validation.
+            m_parser.DefineFun("floor", [](double x) -> double { return std::floor(x); });
+            m_parser.DefineFun("ceil", [](double x) -> double { return std::ceil(x); });
+            m_parser.DefineFun("round", [](double x) -> double { return std::round(x); });
+            m_parser.DefineFun("fract", [](double x) -> double { return x - std::floor(x); });
+
             // Define common mathematical constants
             // Ensure tokens like 'pi' and 'e' are recognized as constants by muParser
             try

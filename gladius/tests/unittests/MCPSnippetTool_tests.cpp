@@ -1572,5 +1572,93 @@ namespace gladius::tests
         EXPECT_EQ(assembly.findModel(20), nullptr) << "Failed function must not be created";
     }
 
+    TEST_F(MCPSnippetToolTest, ProgramSnippetApplier_ShrinkingCalleeOutputs_PrunesCallerPortAndFlattens)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        // First apply: main (ID 3) exposes (float shape, vec3 color) and is called by root (ID 100)
+        std::string const initialProgram =
+          "// Function: main (ID: 3)\n"
+          "(float shape, vec3 color) main_3(vec3 pos) {\n"
+          "  shape = length(in_pos) - 5.0;\n"
+          "  color = vec3(1.0, 0.0, 0.0);\n"
+          "}\n";
+        auto const report1 = ProgramSnippetApplier::apply(initialProgram, assembly, parser);
+        ASSERT_TRUE(report1.isComplete());
+
+        // Wire the assembly root model (ID 1) to call main_3 and consume both shape and color
+        auto rootModel = assembly.assemblyModel();
+        ASSERT_NE(rootModel, nullptr);
+        rootModel->createBeginEndWithDefaultInAndOuts();
+        auto * resourceNode = rootModel->create<nodes::Resource>();
+        ASSERT_NE(resourceNode, nullptr);
+        resourceNode->parameter().at(nodes::FieldNames::ResourceId).setValue(ResourceId{3u});
+        auto * callNode = rootModel->create<nodes::FunctionCall>();
+        ASSERT_NE(callNode, nullptr);
+        auto mainModel = assembly.findModel(3);
+        ASSERT_NE(mainModel, nullptr);
+        ASSERT_TRUE(rootModel->addLink(resourceNode->getOutputs().at(nodes::FieldNames::Value).getId(),
+                                       callNode->parameter().at(nodes::FieldNames::FunctionId).getId()));
+        callNode->resolveFunctionId();
+        callNode->updateInputsAndOutputs(*mainModel);
+        rootModel->registerInputs(*callNode);
+        rootModel->registerOutputs(*callNode);
+        auto * endNode = rootModel->getEndNode();
+        ASSERT_NE(endNode, nullptr);
+        ASSERT_TRUE(rootModel->addLink(callNode->getOutputs().at("shape").getId(),
+                                       endNode->parameter().at(nodes::FieldNames::Shape).getId()));
+        ASSERT_TRUE(rootModel->addLink(callNode->getOutputs().at("color").getId(),
+                                       endNode->parameter().at(nodes::FieldNames::Color).getId()));
+        rootModel->updateGraphAndOrderIfNeeded();
+
+        // Second apply: main_3 drops the color output
+        std::string const shrunkProgram =
+          "// Function: main (ID: 3)\n"
+          "(float shape) main_3(vec3 pos) {\n"
+          "  shape = length(in_pos) - 5.0;\n"
+          "}\n";
+        auto const report2 = ProgramSnippetApplier::apply(shrunkProgram, assembly, parser);
+        ASSERT_TRUE(report2.isComplete());
+
+        // The stale 'color' output must be pruned from the root FunctionCall node
+        EXPECT_EQ(callNode->getOutputs().find("color"), callNode->getOutputs().end());
+        EXPECT_FALSE(endNode->parameter().at(nodes::FieldNames::Color).getSource().has_value());
+
+        // Flattening must succeed without throwing "Output color not found in end node"
+        nodes::GraphFlattener flattener(assembly);
+        EXPECT_NO_THROW({
+            auto flattened = flattener.flatten();
+            EXPECT_NE(flattened.assemblyModel(), nullptr);
+        });
+    }
+
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_NamedMultiOutputPorts_ParsesAndRoundTrips)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        std::string const program =
+          "// Function: dual (ID: 10)\n"
+          "(float shape, float cut) dual_10(vec3 pos) {\n"
+          "  shape = length(in_pos) - 10.0;\n"
+          "  cut = length(in_pos) - 4.0;\n"
+          "}\n"
+          "\n"
+          "// Function: combo (ID: 20)\n"
+          "float combo_20(vec3 pos) {\n"
+          "  return max(dual_10(in_pos).shape, -dual_10(in_pos).cut);\n"
+          "}\n";
+
+        auto const report = ProgramSnippetApplier::apply(program, assembly, parser);
+        ASSERT_TRUE(report.isComplete());
+
+        auto combo = assembly.findModel(20);
+        ASSERT_NE(combo, nullptr);
+        auto const roundTrip = ExpressionToGraphConverter::convertProgramToSnippet(assembly);
+        EXPECT_NE(roundTrip.find("dual_10(in_pos).shape"), std::string::npos);
+        EXPECT_NE(roundTrip.find("dual_10(in_pos).cut"), std::string::npos);
+    }
+
 
 } // namespace gladius::tests

@@ -33,6 +33,104 @@ namespace gladius::agent
             return service + ":" + account;
         }
 
+#if defined(__APPLE__)
+#ifdef __clang__
+        // The SecKeychain C API is deprecated since macOS 10.10 but is still functional. It is kept as an
+        // isolated adapter so the rest of the file stays warning free.
+        // TODO: Migrate the adapter below to the modern SecItem API.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
+        /// @brief RAII guard that releases a SecKeychainItemRef.
+        class KeychainItemGuard
+        {
+          public:
+            explicit KeychainItemGuard(SecKeychainItemRef item)
+              : m_item(item)
+            {
+            }
+
+            KeychainItemGuard(KeychainItemGuard const &) = delete;
+            KeychainItemGuard & operator=(KeychainItemGuard const &) = delete;
+
+            ~KeychainItemGuard()
+            {
+                if (m_item != nullptr)
+                {
+                    CFRelease(m_item);
+                }
+            }
+
+          private:
+            SecKeychainItemRef m_item;
+        };
+
+        OSStatus addToKeychain(std::string const & service, std::string const & account, std::string const & secret)
+        {
+            return SecKeychainAddGenericPassword(nullptr,
+                                                 static_cast<UInt32>(service.size()),
+                                                 service.data(),
+                                                 static_cast<UInt32>(account.size()),
+                                                 account.data(),
+                                                 static_cast<UInt32>(secret.size()),
+                                                 secret.data(),
+                                                 nullptr);
+        }
+
+        /// @brief Looks up an existing generic password item without loading its secret.
+        OSStatus findKeychainItem(std::string const & service, std::string const & account, SecKeychainItemRef & item)
+        {
+            return SecKeychainFindGenericPassword(nullptr,
+                                                  static_cast<UInt32>(service.size()),
+                                                  service.data(),
+                                                  static_cast<UInt32>(account.size()),
+                                                  account.data(),
+                                                  nullptr,
+                                                  nullptr,
+                                                  &item);
+        }
+
+        OSStatus updateKeychainItem(SecKeychainItemRef item, std::string const & secret)
+        {
+            return SecKeychainItemModifyAttributesAndData(item,
+                                                          nullptr,
+                                                          static_cast<UInt32>(secret.size()),
+                                                          secret.data());
+        }
+
+        /// @brief Copies the secret of an existing generic password item into secret.
+        OSStatus findKeychainSecret(std::string const & service, std::string const & account, std::string & secret)
+        {
+            void * data = nullptr;
+            UInt32 length = 0;
+            OSStatus const status = SecKeychainFindGenericPassword(nullptr,
+                                                                   static_cast<UInt32>(service.size()),
+                                                                   service.data(),
+                                                                   static_cast<UInt32>(account.size()),
+                                                                   account.data(),
+                                                                   &length,
+                                                                   &data,
+                                                                   nullptr);
+            if (status != errSecSuccess || data == nullptr)
+            {
+                return status;
+            }
+            secret.assign(static_cast<char const *>(data), length);
+            SecKeychainItemFreeContent(nullptr, data);
+            return errSecSuccess;
+        }
+
+        OSStatus deleteKeychainItem(SecKeychainItemRef item)
+        {
+            return SecKeychainItemDelete(item);
+        }
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+#endif
+
 #if defined(__linux__)
         bool hasSecretTool()
         {
@@ -272,33 +370,14 @@ namespace gladius::agent
         cred.UserName = const_cast<LPSTR>(account.c_str());
         return CredWriteA(&cred, 0) == TRUE;
 #elif defined(__APPLE__)
-        OSStatus const status = SecKeychainAddGenericPassword(
-          nullptr,
-          static_cast<UInt32>(service.size()),
-          service.data(),
-          static_cast<UInt32>(account.size()),
-          account.data(),
-          static_cast<UInt32>(secret.size()),
-          secret.data(),
-          nullptr);
+        OSStatus const status = addToKeychain(service, account, secret);
         if (status == errSecDuplicateItem)
         {
             SecKeychainItemRef item = nullptr;
-            if (SecKeychainFindGenericPassword(nullptr,
-                                               static_cast<UInt32>(service.size()),
-                                               service.data(),
-                                               static_cast<UInt32>(account.size()),
-                                               account.data(),
-                                               nullptr,
-                                               nullptr,
-                                               &item)
-                  == errSecSuccess
-                && item != nullptr)
+            if (findKeychainItem(service, account, item) == errSecSuccess && item != nullptr)
             {
-                OSStatus const upd = SecKeychainItemModifyAttributesAndData(
-                  item, nullptr, static_cast<UInt32>(secret.size()), secret.data());
-                CFRelease(item);
-                return upd == errSecSuccess;
+                KeychainItemGuard const guard(item);
+                return updateKeychainItem(item, secret) == errSecSuccess;
             }
             return false;
         }
@@ -371,23 +450,11 @@ namespace gladius::agent
         CredFree(cred);
         return secret;
 #elif defined(__APPLE__)
-        void * data = nullptr;
-        UInt32 length = 0;
-        OSStatus const status = SecKeychainFindGenericPassword(
-          nullptr,
-          static_cast<UInt32>(service.size()),
-          service.data(),
-          static_cast<UInt32>(account.size()),
-          account.data(),
-          &length,
-          &data,
-          nullptr);
-        if (status != errSecSuccess || data == nullptr)
+        std::string secret;
+        if (findKeychainSecret(service, account, secret) != errSecSuccess)
         {
             return std::nullopt;
         }
-        std::string secret(static_cast<char const *>(data), length);
-        SecKeychainItemFreeContent(nullptr, data);
         return secret;
 #elif defined(__linux__)
         if (hasSecretTool())
@@ -463,20 +530,10 @@ namespace gladius::agent
         return CredDeleteA(target.c_str(), CRED_TYPE_GENERIC, 0) == TRUE;
 #elif defined(__APPLE__)
         SecKeychainItemRef item = nullptr;
-        if (SecKeychainFindGenericPassword(nullptr,
-                                           static_cast<UInt32>(service.size()),
-                                           service.data(),
-                                           static_cast<UInt32>(account.size()),
-                                           account.data(),
-                                           nullptr,
-                                           nullptr,
-                                           &item)
-              == errSecSuccess
-            && item != nullptr)
+        if (findKeychainItem(service, account, item) == errSecSuccess && item != nullptr)
         {
-            OSStatus const status = SecKeychainItemDelete(item);
-            CFRelease(item);
-            return status == errSecSuccess;
+            KeychainItemGuard const guard(item);
+            return deleteKeychainItem(item) == errSecSuccess;
         }
         return true;
 #elif defined(__linux__)

@@ -1,6 +1,6 @@
 /**
  * @file FunctionEvaluatorTool.h
- * @brief Tool for evaluating functions at sample points via OpenCL
+ * @brief Tool for evaluating functions at sample points on the active compute backend
  */
 
 #pragma once
@@ -21,9 +21,9 @@ namespace gladius
         /**
          * @brief Evaluates volumetric functions at arbitrary 3D sample points.
          *
-         * Uses the existing OpenCL compute infrastructure (ToOCLVisitor / ComputeContext)
-         * to compile and dispatch a 1D evaluation kernel over sample points.
-         * Supports both float and vec3 output types.
+         * Compiles the function graph on the active compute backend (OpenCL or WebGPU)
+         * and dispatches a 1D evaluation over the sample points.
+         * Supports scalar, vec3 and matrix-valued outputs.
          */
         class FunctionEvaluatorTool : public MCPToolBase
         {

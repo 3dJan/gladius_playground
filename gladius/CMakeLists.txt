@@ -9,6 +9,10 @@ if(POLICY CMP0177)
     cmake_policy(SET CMP0177 NEW)  # install() DESTINATION paths normalization
 endif()
 
+if(POLICY CMP0079)
+    cmake_policy(SET CMP0079 NEW)  # target_link_libraries() on targets from other directories
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options

@@ -2,6 +2,7 @@
 
 #include "ExpressionParser.h"
 #include "ExpressionToGraphConverter.h"
+#include "FunctionCallPortSync.h"
 #include "nodes/Assembly.h"
 #include "nodes/DerivedNodes.h"
 #include "nodes/Model.h"
@@ -461,6 +462,12 @@ namespace gladius
         {
             rollback();
             report.parsed.clear();
+        }
+        else
+        {
+            // The replaced functions may expose a different set of outputs than before, so the
+            // call nodes of all other models have to be adapted (and stale outputs removed).
+            syncFunctionCallPorts(assembly);
         }
 
         return report;

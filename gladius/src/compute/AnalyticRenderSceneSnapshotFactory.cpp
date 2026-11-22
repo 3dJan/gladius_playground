@@ -21,6 +21,7 @@
 #include "nodes/ToWgslVisitor.h"
 
 #include <algorithm>
+#include <fmt/format.h>
 #include <map>
 #include <set>
 #include <sstream>
@@ -225,6 +226,157 @@ namespace gladius::compute
             }
             return result;
         }
+
+        /// @brief Payload tables for the resources referenced by a lowered model.
+        struct ResourcePayloads
+        {
+            std::vector<MeshResourcePayload> meshes;
+            std::vector<MeshResourcePayload> beamLattices;
+            std::vector<ImageResourcePayload> images;
+
+            [[nodiscard]] bool empty() const noexcept
+            {
+                return meshes.empty() && beamLattices.empty() && images.empty();
+            }
+        };
+
+        /// @brief Resolve mesh, beam lattice and image stack resources referenced by the model.
+        /// Payload slots are indexed by resource id so they match the ids embedded in the WGSL.
+        ResourcePayloads collectResourcePayloads(nodes::Model & model,
+                                                 ResourceManager const & resourceManager)
+        {
+            std::set<ResourceId> referencedMeshIds;
+            std::set<ResourceId> referencedBeamLatticeIds;
+            std::set<ResourceId> referencedImageIds;
+            for (auto const & node : model)
+            {
+                auto * meshNode = dynamic_cast<nodes::SignedDistanceToMesh *>(node.second.get());
+                auto * beamNode = dynamic_cast<nodes::SignedDistanceToBeamLattice *>(node.second.get());
+                auto * imageNode = dynamic_cast<nodes::ImageSampler *>(node.second.get());
+                if (meshNode == nullptr && beamNode == nullptr && imageNode == nullptr)
+                {
+                    continue;
+                }
+                try
+                {
+                    // Re-resolve the connected resource node the same way the visitor does.
+                    auto const & fieldName = meshNode != nullptr
+                                              ? nodes::FieldNames::Mesh
+                                              : beamNode != nullptr ? nodes::FieldNames::BeamLattice
+                                                                    : nodes::FieldNames::ResourceId;
+                    auto & resourceParameter = node.second->parameter().at(fieldName);
+                    auto const source = resourceParameter.getSource();
+                    if (!source.has_value() || source->port == nullptr ||
+                        source->port->getParent() == nullptr)
+                    {
+                        continue;
+                    }
+                    auto * resourceNode = dynamic_cast<nodes::Resource *>(source->port->getParent());
+                    if (resourceNode == nullptr)
+                    {
+                        continue;
+                    }
+                    if (meshNode != nullptr)
+                    {
+                        referencedMeshIds.insert(resourceNode->getResourceId());
+                    }
+                    else if (beamNode != nullptr)
+                    {
+                        referencedBeamLatticeIds.insert(resourceNode->getResourceId());
+                    }
+                    else
+                    {
+                        referencedImageIds.insert(resourceNode->getResourceId());
+                    }
+                }
+                catch (std::exception const &)
+                {
+                    throw std::runtime_error(
+                      "Analytic render scene contains a resource node without a valid resource");
+                }
+            }
+
+            ResourcePayloads payloads;
+            // getResourcePtr is non-const in the ResourceManager API; this factory only reads
+            // the resources, so use a const_cast at this boundary.
+            auto & mutableManager = const_cast<ResourceManager &>(resourceManager);
+
+            for (auto const resourceId : referencedMeshIds)
+            {
+                auto * resource = mutableManager.getResourcePtr(ResourceKey{resourceId, ResourceType::Mesh});
+                if (resource == nullptr)
+                {
+                    throw std::runtime_error("Analytic render scene references a missing mesh resource");
+                }
+                auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
+                if (spatialMesh == nullptr)
+                {
+                    throw std::runtime_error(
+                      "WebGPU render scenes support SpatialMesh resources only (no VDB meshes)");
+                }
+
+                MeshResourcePayload payload;
+                payload.data = io::serializeSpatialMeshPayload(spatialMesh->getData());
+                auto const index = static_cast<std::size_t>(resourceId);
+                if (index >= payloads.meshes.size())
+                {
+                    payloads.meshes.resize(index + 1u);
+                }
+                payloads.meshes[index] = std::move(payload);
+            }
+
+            for (auto const resourceId : referencedBeamLatticeIds)
+            {
+                auto * resource =
+                  mutableManager.getResourcePtr(ResourceKey{resourceId, ResourceType::BeamLattice});
+                if (resource == nullptr)
+                {
+                    throw std::runtime_error(
+                      "Analytic render scene references a missing beam lattice resource");
+                }
+                auto * beamLattice = dynamic_cast<BeamLatticeResource *>(resource);
+                if (beamLattice == nullptr)
+                {
+                    throw std::runtime_error("Referenced beam lattice resource has an unexpected type");
+                }
+
+                MeshResourcePayload payload;
+                payload.data =
+                  io::serializeBeamLatticePayload(beamLattice->getBeams(), beamLattice->getBalls());
+                auto const index = static_cast<std::size_t>(resourceId);
+                if (index >= payloads.beamLattices.size())
+                {
+                    payloads.beamLattices.resize(index + 1u);
+                }
+                payloads.beamLattices[index] = std::move(payload);
+            }
+
+            for (auto const resourceId : referencedImageIds)
+            {
+                auto * resource = mutableManager.getResourcePtr(
+                  ResourceKey{resourceId, ResourceType::ImageStack});
+                if (resource == nullptr)
+                {
+                    throw std::runtime_error(
+                      "Analytic render scene references a missing image stack resource");
+                }
+                auto * imageStack = dynamic_cast<ImageStackResource *>(resource);
+                if (imageStack == nullptr || imageStack->getImageStack() == nullptr)
+                {
+                    throw std::runtime_error("Referenced image stack resource has an unexpected type");
+                }
+
+                ImageResourcePayload payload;
+                payload.data = io::serializeImageStackPayload(*imageStack->getImageStack());
+                auto const index = static_cast<std::size_t>(resourceId);
+                if (index >= payloads.images.size())
+                {
+                    payloads.images.resize(index + 1u);
+                }
+                payloads.images[index] = std::move(payload);
+            }
+            return payloads;
+        }
     }
 
     RenderSceneSnapshot AnalyticRenderSceneSnapshotFactory::create(
@@ -305,158 +457,29 @@ namespace gladius::compute
     {
         auto snapshot = createModel(model, sceneGeneration, bufferNumericLiterals, lookupIndices);
 
-        // Collect mesh resource ids referenced by the lowered model. The visitor emits
-        // gladiusSignedDistanceToMesh(pos, id) calls; the ids must match payload entries.
-        std::set<ResourceId> referencedMeshIds;
-        std::set<ResourceId> referencedBeamLatticeIds;
-        std::set<ResourceId> referencedImageIds;
-        for (auto const & node : model)
-        {
-            auto * meshNode = dynamic_cast<nodes::SignedDistanceToMesh *>(node.second.get());
-            auto * beamNode = dynamic_cast<nodes::SignedDistanceToBeamLattice *>(node.second.get());
-            auto * imageNode = dynamic_cast<nodes::ImageSampler *>(node.second.get());
-            if (meshNode == nullptr && beamNode == nullptr && imageNode == nullptr)
-            {
-                continue;
-            }
-            try
-            {
-                // Re-resolve the connected resource node the same way the visitor does.
-                auto const & fieldName = meshNode != nullptr
-                                          ? nodes::FieldNames::Mesh
-                                          : beamNode != nullptr ? nodes::FieldNames::BeamLattice
-                                                                : nodes::FieldNames::ResourceId;
-                auto & resourceParameter = node.second->parameter().at(fieldName);
-                auto const source = resourceParameter.getSource();
-                if (!source.has_value() || source->port == nullptr ||
-                    source->port->getParent() == nullptr)
-                {
-                    continue;
-                }
-                auto * resourceNode = dynamic_cast<nodes::Resource *>(source->port->getParent());
-                if (resourceNode == nullptr)
-                {
-                    continue;
-                }
-                if (meshNode != nullptr)
-                {
-                    referencedMeshIds.insert(resourceNode->getResourceId());
-                }
-                else if (beamNode != nullptr)
-                {
-                    referencedBeamLatticeIds.insert(resourceNode->getResourceId());
-                }
-                else
-                {
-                    referencedImageIds.insert(resourceNode->getResourceId());
-                }
-            }
-            catch (std::exception const &)
-            {
-                throw std::runtime_error(
-                  "Analytic render scene contains a resource node without a valid resource");
-            }
-        }
-
-        if (referencedMeshIds.empty() && referencedBeamLatticeIds.empty() &&
-            referencedImageIds.empty())
+        auto const payloads = collectResourcePayloads(model, resourceManager);
+        if (payloads.empty())
         {
             return snapshot;
         }
 
-        for (auto const resourceId : referencedMeshIds)
-        {
-            // getResourcePtr is non-const in the ResourceManager API; the snapshot
-            // factory only reads the resource, so use a const_cast at this boundary.
-            auto & mutableManager = const_cast<ResourceManager &>(resourceManager);
-            auto * resource = mutableManager.getResourcePtr(ResourceKey{resourceId, ResourceType::Mesh});
-            if (resource == nullptr)
-            {
-                throw std::runtime_error("Analytic render scene references a missing mesh resource");
-            }
-            auto * spatialMesh = dynamic_cast<SpatialMeshResource *>(resource);
-            if (spatialMesh == nullptr)
-            {
-                throw std::runtime_error(
-                  "WebGPU render scenes support SpatialMesh resources only (no VDB meshes)");
-            }
+        snapshot.meshResources = payloads.meshes;
+        snapshot.beamLatticeResources = payloads.beamLattices;
+        snapshot.imageResources = payloads.images;
 
-            MeshResourcePayload payload;
-            payload.data = io::serializeSpatialMeshPayload(spatialMesh->getData());
-            auto const index = static_cast<std::size_t>(resourceId);
-            if (index >= snapshot.meshResources.size())
-            {
-                snapshot.meshResources.resize(index + 1u);
-            }
-            snapshot.meshResources[index] = std::move(payload);
-        }
-
-        if (!referencedMeshIds.empty())
+        if (!payloads.meshes.empty())
         {
             snapshot.requiredCapabilities =
               snapshot.requiredCapabilities | RendererCapability::MeshSdf;
         }
 
-        for (auto const resourceId : referencedBeamLatticeIds)
-        {
-            auto & mutableManager = const_cast<ResourceManager &>(resourceManager);
-            auto * resource =
-              mutableManager.getResourcePtr(ResourceKey{resourceId, ResourceType::BeamLattice});
-            if (resource == nullptr)
-            {
-                throw std::runtime_error(
-                  "Analytic render scene references a missing beam lattice resource");
-            }
-            auto * beamLattice = dynamic_cast<BeamLatticeResource *>(resource);
-            if (beamLattice == nullptr)
-            {
-                throw std::runtime_error("Referenced beam lattice resource has an unexpected type");
-            }
-
-            MeshResourcePayload payload;
-            payload.data =
-              io::serializeBeamLatticePayload(beamLattice->getBeams(), beamLattice->getBalls());
-            auto const index = static_cast<std::size_t>(resourceId);
-            if (index >= snapshot.beamLatticeResources.size())
-            {
-                snapshot.beamLatticeResources.resize(index + 1u);
-            }
-            snapshot.beamLatticeResources[index] = std::move(payload);
-        }
-
-        if (!referencedBeamLatticeIds.empty())
+        if (!payloads.beamLattices.empty())
         {
             snapshot.requiredCapabilities =
               snapshot.requiredCapabilities | RendererCapability::BeamLattice;
         }
 
-        for (auto const resourceId : referencedImageIds)
-        {
-            auto & mutableManager = const_cast<ResourceManager &>(resourceManager);
-            auto * resource = mutableManager.getResourcePtr(
-              ResourceKey{resourceId, ResourceType::ImageStack});
-            if (resource == nullptr)
-            {
-                throw std::runtime_error(
-                  "Analytic render scene references a missing image stack resource");
-            }
-            auto * imageStack = dynamic_cast<ImageStackResource *>(resource);
-            if (imageStack == nullptr || imageStack->getImageStack() == nullptr)
-            {
-                throw std::runtime_error("Referenced image stack resource has an unexpected type");
-            }
-
-            ImageResourcePayload payload;
-            payload.data = io::serializeImageStackPayload(*imageStack->getImageStack());
-            auto const index = static_cast<std::size_t>(resourceId);
-            if (index >= snapshot.imageResources.size())
-            {
-                snapshot.imageResources.resize(index + 1u);
-            }
-            snapshot.imageResources[index] = std::move(payload);
-        }
-
-        if (!referencedImageIds.empty())
+        if (!payloads.images.empty())
         {
             snapshot.requiredCapabilities =
               snapshot.requiredCapabilities | RendererCapability::ImageSampling;
@@ -548,5 +571,134 @@ namespace gladius::compute
         return resourceManager
              ? createModel(*model->second, sceneGeneration, *resourceManager, true, &lookupIndices)
              : createModel(*model->second, sceneGeneration, true, &lookupIndices);
+    }
+
+    FunctionEvaluatorSnapshot AnalyticRenderSceneSnapshotFactory::createFunctionEvaluator(
+      nodes::Assembly const & assembly,
+      gladius::ResourceId const functionId,
+      std::uint64_t const sceneGeneration,
+      ResourceManager const * resourceManager)
+    {
+        auto detached = assembly;
+        if (!detached.findModel(functionId))
+        {
+            throw std::runtime_error("Function with resource ID " + std::to_string(functionId) + " not found");
+        }
+
+        for (auto const & [modelId, model] : detached.getFunctions())
+        {
+            if (!model)
+            {
+                continue;
+            }
+            for (auto const & [parameterId, parameter] : model->getParameterRegistry())
+            {
+                if (parameter && parameter->getId() == parameterId && !parameter->getOrigin().has_value())
+                {
+                    parameter->setOrigin(nodes::ParameterOrigin{modelId, parameterId});
+                }
+            }
+        }
+
+        // Make the requested function the flattening root before any pass runs, so the
+        // flattener inlines its transitive dependencies into it and drops everything else.
+        detached.setAssemblyModelId(functionId);
+
+        nodes::LowerNormalizeDistanceField normalize(detached);
+        normalize.run();
+        nodes::LowerFunctionGradient gradient(detached);
+        gradient.run();
+        if (normalize.hadErrors() || gradient.hadErrors())
+        {
+            throw std::runtime_error("Function evaluation lowering failed");
+        }
+
+        // Unconsumed outputs must survive: the caller asked for every output of the function.
+        nodes::OptimizeOutputs optimizer{&detached};
+        optimizer.optimize();
+
+        nodes::GraphFlattener flattener(detached);
+        auto flattened = flattener.flatten();
+        auto const model = flattened.assemblyModel();
+        if (!model)
+        {
+            throw std::runtime_error("Flattened function has no model");
+        }
+
+        auto const lookupIndices = createParameterLookupIndices(*model, true);
+        nodes::ToWgslVisitor visitor;
+        visitor.setBufferNumericLiterals(true);
+        visitor.setParameterLookupIndices(&lookupIndices);
+        visitor.setEvaluatorChannel(nodes::EvaluatorChannel::FunctionSignature);
+        model->visitNodes(visitor);
+
+        std::ostringstream evaluator;
+        visitor.write(evaluator);
+
+        auto const signature = visitor.getFunctionSignature();
+        FunctionEvaluatorSnapshot snapshot;
+        snapshot.evaluatorWgsl = evaluator.str();
+        snapshot.descriptor.argumentComponents = signature.argumentComponents;
+        snapshot.descriptor.outputComponents = signature.outputComponents;
+        for (auto const & argument : signature.arguments)
+        {
+            snapshot.descriptor.arguments.push_back({argument.name, argument.components});
+        }
+        for (auto const & output : signature.outputs)
+        {
+            snapshot.descriptor.outputs.push_back({output.graphName, output.components});
+        }
+
+        if (snapshot.descriptor.outputs.empty())
+        {
+            throw std::runtime_error("Function has no outputs");
+        }
+        if (snapshot.evaluatorWgsl.empty())
+        {
+            throw std::runtime_error("Function evaluation produced no WGSL");
+        }
+
+        snapshot.abiDeclarations =
+          fmt::format("const gladius_argument_components: u32 = {}u;\n"
+                      "const gladius_output_components: u32 = {}u;\n",
+                      signature.argumentComponents,
+                      signature.outputComponents);
+
+        snapshot.parameterValues.resize(visitor.getRequiredParameterCount(), 0.0f);
+        std::vector<bool> assignedValues(snapshot.parameterValues.size(), false);
+        for (auto const & [parameterId, parameter] : model->getConstParameterRegistry())
+        {
+            if (parameter == nullptr || parameter->getId() != parameterId ||
+                !visitor.usesParameter(parameterId))
+            {
+                continue;
+            }
+            writeParameterValues(*parameter, snapshot.parameterValues, assignedValues, true, &lookupIndices);
+        }
+
+        if (resourceManager != nullptr)
+        {
+            auto const payloads = collectResourcePayloads(*model, *resourceManager);
+            snapshot.meshResources = payloads.meshes;
+            snapshot.beamLatticeResources = payloads.beamLattices;
+            snapshot.imageResources = payloads.images;
+            if (!payloads.meshes.empty())
+            {
+                snapshot.requiredCapabilities =
+                  snapshot.requiredCapabilities | RendererCapability::MeshSdf;
+            }
+            if (!payloads.beamLattices.empty())
+            {
+                snapshot.requiredCapabilities =
+                  snapshot.requiredCapabilities | RendererCapability::BeamLattice;
+            }
+            if (!payloads.images.empty())
+            {
+                snapshot.requiredCapabilities =
+                  snapshot.requiredCapabilities | RendererCapability::ImageSampling;
+            }
+        }
+
+        return snapshot;
     }
 }

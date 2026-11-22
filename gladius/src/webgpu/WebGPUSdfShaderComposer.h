@@ -39,5 +39,15 @@ namespace gladius::webgpu
           bool includeMesh,
           bool includeBeam,
           bool includeImage);
+
+        /// Compose a shader that evaluates one graph function per sample.
+        /// @param modelEvaluator generated graph function plus its flat-record adapter.
+        /// @param abiDeclarations record layout declarations consumed by the driver entry point.
+        [[nodiscard]] static std::string composeFunctionWithResourceSupport(
+          std::string_view modelEvaluator,
+          std::string_view abiDeclarations,
+          bool includeMesh,
+          bool includeBeam,
+          bool includeImage);
     };
 }

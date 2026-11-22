@@ -870,4 +870,54 @@ namespace gladius::nodes::tests
         ASSERT_NE(firstCall, std::string::npos);
         EXPECT_NE(code.find("gladius_fn_42(", firstCall + 1u), std::string::npos);
     }
+
+    TEST(ToWgslVisitor, FunctionSignatureChannel_EmitsValidSignatureWithParenthesesAndRecordAdapter)
+    {
+        Model model;
+        model.setResourceId(42u);
+        model.createBeginEndWithDefaultInAndOuts();
+
+        auto * radius = model.create<ConstantScalar>();
+        auto * length = model.create<Length>();
+        auto * sphere = model.create<Subtraction>();
+        ASSERT_NE(radius, nullptr);
+        ASSERT_NE(length, nullptr);
+        ASSERT_NE(sphere, nullptr);
+        radius->parameter().at(FieldNames::Value).setValue(2.5f);
+
+        auto * begin = model.getBeginNode();
+        auto * end = model.getEndNode();
+        ASSERT_NE(begin, nullptr);
+        ASSERT_NE(end, nullptr);
+        ASSERT_TRUE(model.addLink(begin->getOutputs().at(FieldNames::Pos).getId(),
+                                  length->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(model.addLink(length->getOutputs().at(FieldNames::Result).getId(),
+                                  sphere->parameter().at(FieldNames::A).getId()));
+        ASSERT_TRUE(model.addLink(radius->getValueOutputPort().getId(),
+                                  sphere->parameter().at(FieldNames::B).getId()));
+        ASSERT_TRUE(model.addLink(sphere->getOutputs().at(FieldNames::Result).getId(),
+                                  end->parameter().at(FieldNames::Shape).getId()));
+        model.updateGraphAndOrderIfNeeded();
+
+        ToWgslVisitor visitor;
+        visitor.setEvaluatorChannel(EvaluatorChannel::FunctionSignature);
+        model.visitNodes(visitor);
+
+        std::ostringstream out;
+        visitor.write(out);
+        auto const wgsl = out.str();
+
+        EXPECT_NE(wgsl.find("struct GladiusFunctionResult"), std::string::npos);
+        EXPECT_NE(wgsl.find("fn graphFunction_42(\n"), std::string::npos)
+          << "Opening '(' after function name must be emitted; got:\n"
+          << wgsl;
+        EXPECT_NE(wgsl.find("-> GladiusFunctionResult"), std::string::npos);
+        EXPECT_NE(wgsl.find("fn gladiusCallRecord(argsBase: u32, resultsBase: u32)"),
+                  std::string::npos);
+
+        auto const sig = visitor.getFunctionSignature();
+        EXPECT_EQ(sig.entryPointName, "graphFunction_42");
+        EXPECT_EQ(sig.argumentComponents, 3u);
+        EXPECT_GE(sig.outputComponents, 1u);
+    }
 }

@@ -735,10 +735,10 @@ namespace gladius::nodes
                 {
                     node->second->accept(visitor);
                 }
-                catch (const std::exception & e)
+                catch (std::exception const & e)
                 {
                     std::cerr << e.what() << '\n';
-                    throw e;
+                    throw;
                 }
             }
         }

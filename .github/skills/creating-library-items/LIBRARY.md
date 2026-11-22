@@ -34,10 +34,9 @@ The `_N` suffix is the function's resource ID **inside the entry file**. After
 import the ID changes, so always re-read it from the import response or
 `get_program_snippet()`.
 
-## Reading a signature without MCP
+## Inspecting library entries offline
 
-On a pure WebGPU MCP build `list_library` and `get_library_entry_info` are
-unavailable. Read the inventory from the filesystem instead:
+If you want to inspect an entry's raw 3MF XML without opening it in MCP:
 
 ```bash
 ls "$HOME/Library/Application Support/gladius/library"   # macOS

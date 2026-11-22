@@ -5,7 +5,6 @@
 
 #include "LibraryTool.h"
 
-#ifdef GLADIUS_ENABLE_OPENCL
 #include "DocumentLifecycleTool.h"
 #include "FunctionOperationsTool.h"
 
@@ -16,11 +15,14 @@
 #include "../../FileSystemUtils.h"
 #include "../../FunctionArgument.h"
 #include "../../compute/ComputeBackend.h"
-#include "../../compute/ComputeCore.h"
 #include "../../io/3mf/LibraryMetadata.h"
 #include "../../io/3mf/ResourceDependencyGraph.h"
 #include "../../io/3mf/Writer3mf.h"
 #include "../../nodes/Model.h"
+
+#if defined(GLADIUS_ENABLE_OPENCL)
+#include "../../compute/ComputeCore.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -33,11 +35,9 @@
 #include <stdexcept>
 #include <system_error>
 #include <unordered_set>
-#endif
 
 namespace gladius::mcp::tools
 {
-#ifdef GLADIUS_ENABLE_OPENCL
     namespace fs = std::filesystem;
 
     namespace
@@ -812,17 +812,6 @@ namespace gladius::mcp::tools
             backend = getBackendName(document);
             logStep("Step 1: create document from template");
 
-                        phase = "backend_validation";
-                        auto const core = document->getCore();
-                        if (!core)
-                        {
-                                return makeError(
-                                    "backend_unsupported",
-                                    fmt::format("Library creation requires OpenCL compilation and model bounds, "
-                                                            "but the selected {} backend has no OpenCL compute core. "
-                                                            "Select OpenCL to use create_library_entry.", backend));
-                        }
-
             // Step 2: Apply the full program snippet (includes main + library function)
             phase = "snippet_validation";
             auto assembly = document->getAssembly();
@@ -899,26 +888,19 @@ namespace gladius::mcp::tools
             document->rebuildResourceDependencyGraph();
             logStep("Step 2a: update3mfModel + rebuildDependencyGraph");
 
-            // Step 2b: Force a fresh compilation and check for errors
+            // Step 2b: Compile the composed program for the active backend and check for errors
             phase = "backend_compilation";
-            document->refreshModelBlocking();
-            logStep("Step 2b: refreshModelBlocking (GPU compile)");
+            auto const compileResult = document->compileModelProgramBlocking();
+            logStep("Step 2b: compileModelProgramBlocking (GPU compile)");
 
-            auto const slicerProgram = core->getSlicerProgram();
-            if (!slicerProgram || !slicerProgram->isValid())
+            if (!compileResult.ok)
             {
-                                return makeError(
-                                    "invalid_compiled_program",
-                  "Compilation failed: the slicer program is invalid. "
-                  "Check the program_snippet for syntax errors or unsupported constructs.");
-            }
-
-            if (!slicerProgram->compilationSucceeded())
-            {
-                                return makeError(
-                                    "backend_compilation_failed",
-                  "Compilation failed. The program_snippet contains errors. "
-                  "Check for unsupported functions, missing parameters, or syntax issues.");
+                auto const message = compileResult.message.empty()
+                                       ? std::string("Compilation failed. Check the program_snippet "
+                                                     "for syntax errors or unsupported constructs.")
+                                       : compileResult.message;
+                return makeError("backend_compilation_failed",
+                                 fmt::format("{} compilation failed: {}", compileResult.backend, message));
             }
             logStep("Step 2b: compilation check");
 
@@ -985,22 +967,15 @@ namespace gladius::mcp::tools
                 // The bbox must be strictly smaller than the evaluation domain (build volume).
                 // If it matches the build volume, the function likely has no real surface and
                 // the bbox is just the fallback eval domain.
-                                auto const resourceContext = core->getResourceContext();
-                                if (!resourceContext)
-                                {
-                                        return makeError(
-                                            "compute_context_unavailable",
-                                            "The compute core has no resource context for bounding-box validation.");
-                                }
-                                auto const & buildVolume = resourceContext->getBuildVolume();
+                auto const evalDomain = document->getEvaluationDomain();
                 float constexpr MARGIN = 1.f; // mm
                 bool const matchesBuildVolume =
-                  (bbox.min.x <= buildVolume.min.x + MARGIN)
-                  && (bbox.min.y <= buildVolume.min.y + MARGIN)
-                  && (bbox.min.z <= buildVolume.min.z + MARGIN)
-                  && (bbox.max.x >= buildVolume.max.x - MARGIN)
-                  && (bbox.max.y >= buildVolume.max.y - MARGIN)
-                  && (bbox.max.z >= buildVolume.max.z - MARGIN);
+                  (bbox.min.x <= evalDomain.min[0] + MARGIN)
+                  && (bbox.min.y <= evalDomain.min[1] + MARGIN)
+                  && (bbox.min.z <= evalDomain.min[2] + MARGIN)
+                  && (bbox.max.x >= evalDomain.max[0] - MARGIN)
+                  && (bbox.max.y >= evalDomain.max[1] - MARGIN)
+                  && (bbox.max.z >= evalDomain.max[2] - MARGIN);
                 if (matchesBuildVolume)
                 {
                     return makeError(
@@ -1201,11 +1176,11 @@ namespace gladius::mcp::tools
             }
         }
 
+#if defined(GLADIUS_ENABLE_OPENCL)
         auto computeCore = document->getCore();
         if (!computeCore)
         {
-            diagnostic = fmt::format(
-              "The {} backend has no initialized compute core for thumbnail rendering.",
+            diagnostic = fmt::format(              "The {} backend has no initialized compute core for thumbnail rendering.",
               backendName);
             logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
                      events::Severity::Warning);
@@ -1260,6 +1235,13 @@ namespace gladius::mcp::tools
                      events::Severity::Warning);
             return {};
         }
+#else
+        diagnostic = fmt::format(
+          "The {} backend has no thumbnail rendering path available.", backendName);
+        logEvent(fmt::format("renderThumbnailPng: {}", diagnostic),
+                 events::Severity::Warning);
+        return {};
+#endif
     }
 
     nlohmann::json LibraryTool::exportToLibrary(uint32_t functionId,
@@ -2086,80 +2068,4 @@ namespace gladius::mcp::tools
         }
     }
 
-#else
-    LibraryTool::LibraryTool(Application * app)
-        : MCPToolBase(app)
-    {
-    }
-
-    nlohmann::json LibraryTool::listLibrary(std::string const &, std::string const &) const
-    {
-        return createToolError("Library operations are unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::getLibraryEntryInfo(std::string const &, std::string const &) const
-    {
-        return createToolError("Library operations are unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::createLibraryEntry(std::string const &,
-                                                   std::string const &,
-                                                   std::string const &,
-                                                   uint32_t,
-                                                   std::string const &,
-                                                   std::vector<std::string> const &,
-                                                   bool)
-    {
-        return createToolError("Library creation is unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::exportToLibrary(uint32_t,
-                                                std::string const &,
-                                                std::string const &,
-                                                std::string const &,
-                                                bool,
-                                                bool)
-    {
-        return createToolError("Library export is unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::setLibraryMetadata(std::vector<uint32_t> const &,
-                                                   std::string const &,
-                                                   std::vector<std::string> const &,
-                                                   std::string const &,
-                                                   std::string const &)
-    {
-        return createToolError("Library metadata operations are unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::importLibraryEntry(std::string const &, std::string const &)
-    {
-        return createToolError("Library import is unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::deleteLibraryEntry(std::string const &, std::string const &)
-    {
-        return createToolError("Library deletion is unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::browseBin(std::string const &) const
-    {
-        return createToolError("Library bin operations are unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::restoreBinEntry(std::string const &, std::string const &)
-    {
-        return createToolError("Library bin operations are unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::deleteBinEntry(std::string const &, std::string const &)
-    {
-        return createToolError("Library bin operations are unavailable in a pure WebGPU MCP build.");
-    }
-
-    nlohmann::json LibraryTool::emptyBin()
-    {
-        return createToolError("Library bin operations are unavailable in a pure WebGPU MCP build.");
-    }
-#endif
 } // namespace gladius::mcp::tools

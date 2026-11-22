@@ -7,6 +7,7 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <stdexcept>
@@ -15,6 +16,9 @@ namespace gladius::nodes
 {
     namespace
     {
+        /// WGSL type the generated function-signature entry point returns.
+        auto constexpr FUNCTION_RESULT_TYPE_NAME = "GladiusFunctionResult";
+
         std::string typeIndexToWgsl(std::type_index const typeIndex)
         {
             if (typeIndex == ParameterTypeIndex::Float)
@@ -31,6 +35,125 @@ namespace gladius::nodes
             }
 
             throw std::runtime_error("WGSL evaluator supports only scalar, vec3, and mat4x4 graph values");
+        }
+
+
+        /// Number of consecutive floats one graph value occupies in the flat evaluator storage bindings.
+        std::size_t typeIndexToFloatCount(std::type_index const typeIndex)
+        {
+            if (typeIndex == ParameterTypeIndex::Float)
+            {
+                return 1u;
+            }
+            if (typeIndex == ParameterTypeIndex::Float3)
+            {
+                return 3u;
+            }
+            if (typeIndex == ParameterTypeIndex::Matrix4)
+            {
+                return 16u;
+            }
+
+            throw std::runtime_error("WGSL evaluator supports only scalar, vec3 and matrix graph values");
+        }
+
+        /// WGSL expression that rebuilds one graph value from a flat f32 storage array.
+        /// `base` is a u32 record offset and `offset` the component offset inside the record.
+        std::string recordValueExpression(std::string const & wgslType,
+                                          std::string const & bindingName,
+                                          std::string const & base,
+                                          std::size_t const offset)
+        {
+            auto const at = [&](std::size_t const component)
+            {
+                return fmt::format("{}.values[{} + {}u]", bindingName, base, offset + component);
+            };
+
+            if (wgslType == "f32")
+            {
+                return at(0u);
+            }
+            if (wgslType == "vec3<f32>")
+            {
+                return fmt::format("vec3<f32>({}, {}, {})", at(0u), at(1u), at(2u));
+            }
+            if (wgslType == "mat4x4<f32>")
+            {
+                std::array<std::string, 16> cells;
+                for (std::size_t cell = 0u; cell < cells.size(); ++cell)
+                {
+                    cells[cell] = at(cell);
+                }
+                return fmt::format("mat4x4<f32>(vec4<f32>({0}, {1}, {2}, {3}), "
+                                   "vec4<f32>({4}, {5}, {6}, {7}), "
+                                   "vec4<f32>({8}, {9}, {10}, {11}), "
+                                   "vec4<f32>({12}, {13}, {14}, {15}))",
+                                   cells[0], cells[1], cells[2], cells[3],
+                                   cells[4], cells[5], cells[6], cells[7],
+                                   cells[8], cells[9], cells[10], cells[11],
+                                   cells[12], cells[13], cells[14], cells[15]);
+            }
+
+            throw std::runtime_error("WGSL evaluator supports only scalar, vec3 and matrix graph values");
+        }
+
+        /// WGSL statements storing one graph value into a flat f32 storage array.
+        std::string recordStoreStatements(std::string const & wgslType,
+                                          std::string const & bindingName,
+                                          std::string const & base,
+                                          std::size_t const offset,
+                                          std::string const & valueExpression,
+                                          std::size_t const temporaryIndex)
+        {
+            auto const store = [&](std::size_t const component, std::string const & expression)
+            {
+                return fmt::format("    {}.values[{} + {}u] = {};\n", bindingName, base, offset + component, expression);
+            };
+
+            if (wgslType == "f32")
+            {
+                return store(0u, valueExpression);
+            }
+
+            std::string statements =
+                fmt::format("    let rec{}: {} = {};\n", temporaryIndex, wgslType, valueExpression);
+            if (wgslType == "vec3<f32>")
+            {
+                statements += store(0u, fmt::format("rec{}.x", temporaryIndex));
+                statements += store(1u, fmt::format("rec{}.y", temporaryIndex));
+                statements += store(2u, fmt::format("rec{}.z", temporaryIndex));
+                return statements;
+            }
+
+            // mat4x4<f32>: elements are column-major, matching the render-side matrix lowering.
+            for (std::size_t column = 0u; column < 4u; ++column)
+            {
+                for (std::size_t row = 0u; row < 4u; ++row)
+                {
+                    statements += store(column * 4u + row,
+                                        fmt::format("rec{}[{}u][{}u]", temporaryIndex, column, row));
+                }
+            }
+            return statements;
+        }
+
+        /// Maps a graph port name onto a WGSL identifier usable as a function parameter or local.
+        std::string toWgslIdentifier(std::string const & name)
+        {
+            std::string result;
+            result.reserve(name.size() + 2u);
+            for (auto const character : name)
+            {
+                auto const isAlpha = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z');
+                auto const isDigit = character >= '0' && character <= '9';
+                result += (isAlpha || isDigit) ? character : '_';
+            }
+            if (result.empty() || !(result.front() >= 'a' && result.front() <= 'z')
+                && !(result.front() >= 'A' && result.front() <= 'Z'))
+            {
+                result.insert(result.begin(), 'v');
+            }
+            return result;
         }
 
         std::string formatFloat(float const value)
@@ -58,6 +181,7 @@ namespace gladius::nodes
         m_requiredParameterCount = 0u;
         m_requiredParameterIds.clear();
         m_functionClosed = false;
+        m_functionSignature = {};
         m_channelSelector.setModel(model);
     }
 
@@ -110,6 +234,177 @@ namespace gladius::nodes
     void ToWgslVisitor::setParameterLookupIndices(ParameterLookupIndices const * const indices) noexcept
     {
         m_parameterLookupIndices = indices;
+    }
+
+    void ToWgslVisitor::emitFunctionSignatureEntry(Begin & beginning)
+    {
+        if (m_currentModel == nullptr)
+        {
+            throw std::runtime_error("Function signature lowering requires a model");
+        }
+
+        m_functionSignature = {};
+        auto const localizedName = toWgslIdentifier(fmt::format("graphFunction_{}", m_currentModel->getResourceId()));
+        std::string argumentList;
+        // Sort arguments by definition order (sort index), the same order the
+        // graph and the evaluation tool use for positional binding.
+        auto const & inputPorts = m_currentModel->getInputs();
+        std::vector<std::pair<int, std::string>> sortableInputs;
+        sortableInputs.reserve(inputPorts.size());
+        for (auto const & [name, input] : inputPorts)
+        {
+            sortableInputs.emplace_back(input.getSortIndex(), name);
+        }
+        std::sort(sortableInputs.begin(), sortableInputs.end());
+
+        auto const & beginOutputs = beginning.getOutputs();
+        for (auto const & entry : sortableInputs)
+        {
+            auto const & name = entry.second;
+            if (beginOutputs.find(name) == beginOutputs.end())
+            {
+                continue;
+            }
+
+            auto const & input = inputPorts.at(name);
+            auto const wgslType = typeIndexToWgsl(input.getTypeIndex());
+
+            if (!argumentList.empty())
+            {
+                argumentList += ",\n    ";
+            }
+            argumentList += input.getUniqueName() + ": " + wgslType;
+
+            m_functionSignature.arguments.push_back(
+                {input.getShortName(), wgslType, typeIndexToFloatCount(input.getTypeIndex())});
+        }
+
+        for (auto const & argument : m_functionSignature.arguments)
+        {
+            m_functionSignature.argumentComponents += argument.components;
+        }
+
+        if (argumentList.empty())
+        {
+            argumentList = "()";
+        }
+        else
+        {
+            argumentList = "(\n    " + argumentList + "\n)";
+        }
+
+        m_functionSignature.outputs = functionSignatureOutputDeclarations();
+        m_functionSignature.entryPointName = localizedName;
+        m_functionSignature.resultTypeName = FUNCTION_RESULT_TYPE_NAME;
+
+        m_definition << "struct " << FUNCTION_RESULT_TYPE_NAME << "\n{\n";
+        for (auto const & output : m_functionSignature.outputs)
+        {
+            m_functionSignature.outputComponents += output.components;
+            m_definition << "    " << output.wgslName << ": " << output.wgslType << ",\n";
+        }
+        m_definition << "}\n\n";
+
+        m_definition << "fn " << localizedName << argumentList << " -> " << FUNCTION_RESULT_TYPE_NAME << "\n{\n";
+        for (auto const & output : m_functionSignature.outputs)
+        {
+            m_definition << "    var " << output.wgslName << ": " << output.wgslType << ";\n";
+        }
+    }
+
+    void ToWgslVisitor::emitFunctionSignatureOutputs(End & ending)
+    {
+        auto const & endParameters = ending.parameter();
+
+        for (auto const & declaration : m_functionSignature.outputs)
+        {
+            auto const parameterIterator = endParameters.find(declaration.graphName);
+            if (parameterIterator == endParameters.end())
+            {
+                throw std::runtime_error("Function output '" + declaration.graphName + "' has no end parameter");
+            }
+
+            m_definition << "    " << declaration.wgslName << " = "
+                         << resolveParameter(parameterIterator->second) << ";\n";
+        }
+
+        std::string resultArguments;
+        for (auto const & output : m_functionSignature.outputs)
+        {
+            if (!resultArguments.empty())
+            {
+                resultArguments += ", ";
+            }
+            resultArguments += output.wgslName;
+        }
+        m_definition << "    return " << FUNCTION_RESULT_TYPE_NAME << "(" << resultArguments << ");\n}\n";
+
+        emitFunctionRecordAdapter();
+        m_functionClosed = true;
+    }
+
+    void ToWgslVisitor::emitFunctionRecordAdapter()
+    {
+        // Adapter between the flat per-sample evaluator bindings and the graph function signature:
+        // one record of argument components in, one record of output components out. The storage
+        // binding names are the contract of src/webgpu/shaders/sdf_evaluate_function.wgsl.
+        m_definition << "fn gladiusCallRecord(argsBase: u32, resultsBase: u32)\n{\n";
+
+        std::string callArguments;
+        std::size_t argumentOffset = 0u;
+        for (std::size_t index = 0u; index < m_functionSignature.arguments.size(); ++index)
+        {
+            auto const & argument = m_functionSignature.arguments[index];
+            m_definition << "    let in" << index << ": " << argument.wgslType << " = "
+                         << recordValueExpression(argument.wgslType, "function_arguments", "argsBase", argumentOffset)
+                         << ";\n";
+            if (!callArguments.empty())
+            {
+                callArguments += ", ";
+            }
+            callArguments += "in" + std::to_string(index);
+            argumentOffset += argument.components;
+        }
+
+        m_definition << "    let gladiusRecord: " << m_functionSignature.resultTypeName << " = "
+                     << m_functionSignature.entryPointName << "(" << callArguments << ");\n";
+
+        std::size_t outputOffset = 0u;
+        for (std::size_t index = 0u; index < m_functionSignature.outputs.size(); ++index)
+        {
+            auto const & output = m_functionSignature.outputs[index];
+            m_definition << recordStoreStatements(output.wgslType,
+                                                  "function_results",
+                                                  "resultsBase",
+                                                  outputOffset,
+                                                  "gladiusRecord." + output.wgslName,
+                                                  index);
+            outputOffset += output.components;
+        }
+        m_definition << "}\n";
+    }
+
+    std::vector<ToWgslVisitor::FunctionOutputDescriptor> ToWgslVisitor::functionSignatureOutputDeclarations()
+    {
+        std::vector<FunctionOutputDescriptor> declarations;
+
+        // Map order, the same order the OpenCL lowering uses for out parameters.
+        for (auto const & [name, parameter] : m_currentModel->getOutputs())
+        {
+            auto const typeIndex = parameter.getTypeIndex();
+            declarations.push_back(
+                {name,
+                 toWgslIdentifier(fmt::format("out{}", declarations.size())),
+                 typeIndexToWgsl(typeIndex),
+                 typeIndexToFloatCount(typeIndex)});
+        }
+
+        return declarations;
+    }
+
+    ToWgslVisitor::FunctionSignatureDescriptor ToWgslVisitor::getFunctionSignature() const
+    {
+        return m_functionSignature;
     }
 
     bool ToWgslVisitor::beginNode(NodeBase const & node)
@@ -339,6 +634,12 @@ namespace gladius::nodes
             return;
         }
 
+        if (m_channelSelector.getChannel() == EvaluatorChannel::FunctionSignature)
+        {
+            emitFunctionSignatureEntry(beginning);
+            return;
+        }
+
         if (!m_channelSelector.providesSelectedChannel())
         {
             // The model does not provide the selected channel - emit no evaluator at all.
@@ -387,6 +688,13 @@ namespace gladius::nodes
                 }
                 m_definition << ");\n}\n";
             }
+            m_functionClosed = true;
+            return;
+        }
+
+        if (m_channelSelector.getChannel() == EvaluatorChannel::FunctionSignature)
+        {
+            emitFunctionSignatureOutputs(ending);
             m_functionClosed = true;
             return;
         }

@@ -7,6 +7,7 @@
 #include "../../Application.h"
 #include "../../Document.h"
 #include "../EventLogger.h"
+#include <fmt/format.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 
@@ -21,12 +22,6 @@ namespace gladius
 
         nlohmann::json ValidationTool::validateModel(const nlohmann::json & options)
         {
-#ifndef GLADIUS_ENABLE_OPENCL
-                        (void)options;
-                        return createToolError(
-                            "OpenCL model compilation is unavailable in a pure WebGPU MCP build. "
-                            "Graph validation remains available through the document API.");
-#else
             nlohmann::json out;
             out["phases"] = nlohmann::json::array();
             out["success"] = false;
@@ -138,38 +133,36 @@ namespace gladius
             }
             out["phases"].push_back(phase1);
 
-            // Phase 2: opencl_compile (optional)
-            nlohmann::json phase2 = {{"name", "opencl_compile"}};
+            // Phase 2: backend compile (optional)
+            auto const backendKind = document->getBackendKind();
+            bool const isWebGpu =
+              backendKind.has_value() && *backendKind == compute::ComputeBackendKind::WebGPU;
+            std::string const backendName = isWebGpu ? "webgpu" : "opencl";
+            out["backend"] = backendName;
+
+            nlohmann::json phase2 = {{"name", backendName + "_compile"}};
             bool compileOk = true;
             if (doCompile)
             {
                 try
                 {
-                    // Refresh program and attempt a blocking recompile on the compute core
-                    auto core = document->getCore();
-                    if (!core)
-                    {
-                        throw std::runtime_error(
-                          "OpenCL compilation requires an active OpenCL compute core; "
-                          "the selected backend cannot run this compilation phase. "
-                          "Use compile=false for graph-only validation.");
-                    }
-                    // Ensure the flattened assembly exists and kernel is generated
-                    document->updateFlatAssembly();
-                    core->tryRefreshProgramProtected(document->getFlatAssembly());
-                    core->recompileBlockingNoLock();
+                    // Backend-neutral compile: lowers the flattened assembly and compiles the
+                    // generated program (OpenCL kernel or composed WGSL) for the active backend.
+                    auto const compileResult = document->compileModelProgramBlocking();
                     auto logger = document->getSharedLogger();
                     auto diag = snapshotLogger(logger);
                     phase2.update(diag);
-                    // Determine compile success: no new errors and renderer program valid
-                    compileOk = (static_cast<int>(phase2["errors"]) == 0);
-                    if (core && !core->getBestRenderProgram()->isValid())
+                    phase2["message"] = compileResult.message;
+                    compileOk = compileResult.ok && (static_cast<int>(phase2["errors"]) == 0);
+                    if (!compileOk)
                     {
-                        compileOk = false;
-                        // Add a hint message
                         auto msgs = phase2["messages"];
                         msgs.push_back({{"severity", "error"},
-                                        {"message", "Render program not valid after compile"}});
+                                        {"message",
+                                         compileResult.message.empty()
+                                           ? fmt::format("{} program not valid after compile",
+                                                         compileResult.backend)
+                                           : compileResult.message}});
                         phase2["messages"] = msgs;
                         phase2["errors"] = static_cast<int>(phase2["errors"]) + 1;
                     }
@@ -215,7 +208,6 @@ namespace gladius
             out["success"] =
               out["summary"]["graph_ok"].get<bool>() && out["summary"]["compile_ok"].get<bool>();
             return out;
-#endif
         }
 
         nlohmann::json

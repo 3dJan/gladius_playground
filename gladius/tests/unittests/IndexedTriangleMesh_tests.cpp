@@ -1,4 +1,5 @@
 #include "io/IndexedTriangleMesh.h"
+#include "io/IndexedTriangleMeshRepair.h"
 #include "io/IndexedTriangleMeshWriter.h"
 
 #include <gtest/gtest.h>
@@ -31,7 +32,27 @@ namespace gladius::io::tests
             return mesh;
         }
 
-                IndexedTriangleMesh makeTetrahedron()
+        /// @brief Closed, oriented octahedron whose vertex 3 sits on the line through
+    /// vertices 1 and 2, making exactly one face a collinear sliver.
+    IndexedTriangleMesh makeOctahedronWithSliver()
+    {
+        IndexedTriangleMesh mesh;
+        mesh.positions = {
+            Eigen::Vector3f{1.0F, 0.0F, 0.0F},
+            Eigen::Vector3f{-1.0F, 0.0F, 0.0F},
+            Eigen::Vector3f{0.0F, 1.0F, 0.0F},
+            Eigen::Vector3f{1.0F, 2.0F, 0.0F},
+            Eigen::Vector3f{0.0F, -1.0F, 0.0F},
+            Eigen::Vector3f{0.0F, 0.0F, -1.0F},
+        };
+        mesh.indices = {
+            0, 2, 3,   2, 1, 3,   1, 4, 3,   4, 0, 3,
+            2, 0, 5,   1, 2, 5,   4, 1, 5,   0, 4, 5,
+        };
+        return mesh;
+    }
+
+    IndexedTriangleMesh makeTetrahedron()
                 {
                         IndexedTriangleMesh mesh;
                         mesh.positions = {
@@ -385,5 +406,57 @@ namespace gladius::io::tests
 
         std::error_code error;
         std::filesystem::remove(filePath, error);
+    }
+    TEST(IndexedTriangleMeshRepair, Collapse_ClosedOctahedronWithSliver_RemovesSliverAndStaysClosed)
+    {
+        auto mesh = makeOctahedronWithSliver();
+        ASSERT_NE(mesh.validationError(), std::nullopt);
+        ASSERT_EQ(computeIndexedTriangleMeshDiagnostics(mesh).degenerateTriangleCount, 1U);
+        auto const relaxed = IndexedTriangleMeshValidationPolicy::AllowGeometricDegenerates;
+        ASSERT_FALSE(mesh.closedOrientedTopologyError(relaxed).has_value());
+
+        auto const result = collapseGeometricallyDegenerateTriangles(mesh);
+
+        EXPECT_EQ(result.collapsedEdgeCount, 1U);
+        EXPECT_EQ(result.removedTriangleCount, 2U);
+        EXPECT_EQ(result.removedVertexCount, 1U);
+        EXPECT_EQ(result.remainingDegenerateTriangleCount, 0U);
+        EXPECT_EQ(countGeometricallyDegenerateTriangles(mesh), 0U);
+        EXPECT_FALSE(mesh.validationError().has_value());
+        EXPECT_FALSE(mesh.closedOrientedTopologyError().has_value());
+
+        auto const diagnostics = computeIndexedTriangleMeshDiagnostics(mesh);
+        EXPECT_EQ(diagnostics.degenerateTriangleCount, 0U);
+        EXPECT_EQ(diagnostics.boundaryEdgeCount, 0U);
+        EXPECT_EQ(diagnostics.nonManifoldEdgeCount, 0U);
+        EXPECT_EQ(diagnostics.inconsistentWindingEdgeCount, 0U);
+        EXPECT_EQ(diagnostics.triangleCount, 6U);
+        EXPECT_EQ(diagnostics.vertexCount, 5U);
+    }
+
+    TEST(IndexedTriangleMeshRepair, Collapse_ClosedTetrahedron_LeavesMeshUnchanged)
+    {
+        auto const source = makeTetrahedron();
+        auto mesh = source;
+
+        auto const result = collapseGeometricallyDegenerateTriangles(mesh);
+
+        EXPECT_EQ(result.collapsedEdgeCount, 0U);
+        EXPECT_EQ(result.removedTriangleCount, 0U);
+        EXPECT_EQ(result.removedVertexCount, 0U);
+        EXPECT_EQ(mesh.positions, source.positions);
+        EXPECT_EQ(mesh.indices, source.indices);
+    }
+
+    TEST(IndexedTriangleMeshRepair, Collapse_SliverOnOpenBoundary_LeavesTriangleInPlace)
+    {
+        auto mesh = makeSingleTriangle();
+        mesh.positions[2] = Eigen::Vector3f{2.0F, 0.0F, 0.0F};
+
+        auto const result = collapseGeometricallyDegenerateTriangles(mesh);
+
+        EXPECT_EQ(result.collapsedEdgeCount, 0U);
+        EXPECT_EQ(result.remainingDegenerateTriangleCount, 1U);
+        EXPECT_EQ(mesh.validationError().value_or(""), "Mesh contains a degenerate triangle");
     }
 } // namespace gladius::io::tests

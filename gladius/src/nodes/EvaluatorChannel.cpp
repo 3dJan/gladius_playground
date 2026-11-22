@@ -116,7 +116,8 @@ namespace gladius::nodes
 
     bool ChannelDependencySelector::isNeededByChannel(NodeId const nodeId) const
     {
-        if (m_channel == EvaluatorChannel::ShapeAndColor)
+        if (m_channel == EvaluatorChannel::ShapeAndColor ||
+            m_channel == EvaluatorChannel::FunctionSignature)
         {
             return true;
         }
@@ -129,7 +130,7 @@ namespace gladius::nodes
 
     bool ChannelDependencySelector::providesSelectedChannel() const
     {
-        if (m_channel == EvaluatorChannel::ShapeAndColor)
+        if (m_channel == EvaluatorChannel::ShapeAndColor || m_channel == EvaluatorChannel::FunctionSignature)
         {
             return true;
         }

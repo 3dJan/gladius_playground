@@ -293,4 +293,36 @@ namespace gladius::tests
         EXPECT_NEAR(result, std::exp(-4.0), 1e-10);
     }
 
+    TEST_F(ExpressionParserTest, ParseExpression_RoundingFunctions_ValidatesAndEvaluatesCorrectly)
+    {
+        // muParser provides no floor/ceil, they are registered as custom functions.
+        std::map<std::string, double> variables = {{"x", 2.5}};
+
+        EXPECT_TRUE(m_parser->parseExpression("floor(x)"));
+        EXPECT_TRUE(m_parser->hasValidExpression());
+        EXPECT_DOUBLE_EQ(m_parser->evaluate(variables), 2.0);
+
+        EXPECT_TRUE(m_parser->parseExpression("ceil(x)"));
+        EXPECT_TRUE(m_parser->hasValidExpression());
+        EXPECT_DOUBLE_EQ(m_parser->evaluate(variables), 3.0);
+
+        EXPECT_TRUE(m_parser->parseExpression("round(x)"));
+        EXPECT_TRUE(m_parser->hasValidExpression());
+        EXPECT_DOUBLE_EQ(m_parser->evaluate(variables), 3.0);
+
+        EXPECT_TRUE(m_parser->parseExpression("fract(x)"));
+        EXPECT_TRUE(m_parser->hasValidExpression());
+        EXPECT_DOUBLE_EQ(m_parser->evaluate(variables), 0.5);
+    }
+
+    TEST_F(ExpressionParserTest, ParseExpression_FloorWithComponentAccess_ValidatesAndEvaluatesCorrectly)
+    {
+        EXPECT_TRUE(m_parser->parseExpression("floor(pos.x+0.5)"));
+        EXPECT_TRUE(m_parser->hasValidExpression());
+
+        // Component access is folded into a flat variable name before evaluation.
+        std::map<std::string, double> variables = {{"pos_x", 4.2}};
+        EXPECT_DOUBLE_EQ(m_parser->evaluate(variables), 4.0);
+    }
+
 } // namespace gladius::tests

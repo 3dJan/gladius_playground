@@ -26,6 +26,7 @@ namespace gladius::webgpu
 
         using PositionBatchSource =
           std::function<void(std::size_t, std::size_t, std::vector<std::array<float, 3>> &)>;
+        using ArgumentBatchSource = std::function<void(std::size_t, std::size_t, std::vector<float> &)>;
         using ValueBatchSink = std::function<void(std::size_t, std::vector<float> &&)>;
         using ColorBatchSink =
           std::function<void(std::size_t, std::vector<std::array<float, 3>> &&)>;
@@ -71,14 +72,36 @@ namespace gladius::webgpu
           ColorBatchSink colorSink,
           CancellationPredicate shouldCancel = {}) const;
 
+        /// @brief Evaluate one graph function at flattened argument records through its own entry point.
+        [[nodiscard]] compute::FunctionEvaluationResult
+          evaluateFunction(compute::FunctionEvaluationRequest request) const;
+
       private:
         using RawValueBatchSink = std::function<void(std::size_t, std::vector<float> &&)>;
 
+        /// @brief Shared batching path: \p argumentComponents == 0 feeds positions, otherwise argument records.
         [[nodiscard]] compute::AsyncTask<bool> evaluateGeneratedImpl(
           compute::SdfEvaluationRequest request,
           std::size_t pointCount,
           std::size_t outputComponents,
           PositionBatchSource positionSource,
+          RawValueBatchSink valueSink,
+          CancellationPredicate shouldCancel) const;
+
+        [[nodiscard]] compute::AsyncTask<bool> evaluateGeneratedImpl(
+          compute::SdfEvaluationRequest request,
+          std::size_t pointCount,
+          std::size_t outputComponents,
+          std::size_t argumentComponents,
+          PositionBatchSource positionSource,
+          ArgumentBatchSource argumentSource,
+          RawValueBatchSink valueSink,
+          CancellationPredicate shouldCancel) const;
+
+        [[nodiscard]] compute::AsyncTask<bool> evaluateRecordImpl(
+          compute::FunctionEvaluationRequest request,
+          std::size_t sampleCount,
+          ArgumentBatchSource argumentSource,
           RawValueBatchSink valueSink,
           CancellationPredicate shouldCancel) const;
 

@@ -40,17 +40,22 @@ namespace gladius::webgpu
             void create(wgpu::Device const & device,
                         std::size_t const pointCount,
                         std::size_t const parameterCount,
-                        std::size_t const outputComponents)
+                        std::size_t const outputComponents,
+                        std::size_t const argumentComponents = 0u)
             {
                 auto const parameterSize = std::max(sizeof(float), parameterCount * sizeof(float));
-                auto const positionSize = pointCount * sizeof(EvaluationPosition);
-                if (outputComponents != 1u && outputComponents != 4u)
-                {
-                    throw std::invalid_argument("Unsupported WebGPU SDF evaluation output width");
-                }
+                auto const functionMode = argumentComponents != 0u;
+                auto const positionSize = functionMode
+                                            ? sizeof(EvaluationPosition)
+                                            : pointCount * sizeof(EvaluationPosition);
+                auto const argumentSize = functionMode
+                                            ? std::max<std::size_t>(
+                                                sizeof(float) * 4u, pointCount * argumentComponents * sizeof(float))
+                                            : 0u;
                 auto const outputSize = pointCount * outputComponents * sizeof(float);
                 if (positionSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE ||
                     outputSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE ||
+                    argumentSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE ||
                     parameterSize > MAX_WEBGPU_STORAGE_BUFFER_BINDING_SIZE)
                 {
                     throw std::length_error(
@@ -68,6 +73,19 @@ namespace gladius::webgpu
                 positionDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
                 positionDescriptor.size = positionSize;
                 m_positions = device.CreateBuffer(&positionDescriptor);
+
+                if (functionMode)
+                {
+                    wgpu::BufferDescriptor argumentDescriptor;
+                    argumentDescriptor.label = "Gladius function arguments";
+                    argumentDescriptor.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
+                    argumentDescriptor.size = argumentSize;
+                    m_arguments = device.CreateBuffer(&argumentDescriptor);
+                    if (!m_arguments)
+                    {
+                        throw std::runtime_error("Unable to allocate WebGPU function argument buffers");
+                    }
+                }
 
                 wgpu::BufferDescriptor outputDescriptor;
                 outputDescriptor.label = "Gladius SDF evaluation output";
@@ -94,6 +112,7 @@ namespace gladius::webgpu
 
                 m_outputSize = outputSize;
                 m_parameterSize = parameterSize;
+                m_argumentSize = argumentSize;
                 createMeshPayloadBuffers(device);
                 createBeamPayloadBuffers(device);
                 createImagePayloadBuffers(device);
@@ -114,6 +133,7 @@ namespace gladius::webgpu
             {
                 m_uniform = nullptr;
                 m_positions = nullptr;
+                m_arguments = nullptr;
                 m_output = nullptr;
                 m_staging = nullptr;
                 m_parameters = nullptr;
@@ -370,25 +390,44 @@ namespace gladius::webgpu
                                   positions.data(),
                                   positions.size() * sizeof(EvaluationPosition));
 
-                float const zero{};
-                auto const * data = parameters.empty() ? &zero : parameters.data();
-                auto const size = parameters.empty() ? sizeof(zero) : parameters.size() * sizeof(float);
-                queue.WriteBuffer(m_parameters, 0u, data, size);
+                writeParameters(queue, parameters);
+            }
+
+            void writeArguments(wgpu::Queue const & queue,
+                                EvaluationUniforms const & uniforms,
+                                std::vector<float> const & arguments,
+                                std::vector<float> const & parameters) const
+            {
+                queue.WriteBuffer(m_uniform, 0u, &uniforms, sizeof(uniforms));
+                queue.WriteBuffer(m_arguments, 0u, arguments.data(), arguments.size() * sizeof(float));
+
+                writeParameters(queue, parameters);
             }
 
             [[nodiscard]] std::size_t outputSize() const noexcept { return m_outputSize; }
+            [[nodiscard]] std::size_t argumentSize() const noexcept { return m_argumentSize; }
             [[nodiscard]] std::size_t parameterSize() const noexcept { return m_parameterSize; }
             [[nodiscard]] wgpu::Buffer const & uniform() const noexcept { return m_uniform; }
             [[nodiscard]] wgpu::Buffer const & positions() const noexcept { return m_positions; }
+            [[nodiscard]] wgpu::Buffer const & arguments() const noexcept { return m_arguments; }
             [[nodiscard]] wgpu::Buffer const & output() const noexcept { return m_output; }
             [[nodiscard]] wgpu::Buffer const & staging() const noexcept { return m_staging; }
             [[nodiscard]] wgpu::Buffer const & parameters() const noexcept { return m_parameters; }
 
           private:
+            void writeParameters(wgpu::Queue const & queue, std::vector<float> const & parameters) const
+            {
+                float const zero{};
+                auto const * data = parameters.empty() ? &zero : parameters.data();
+                auto const size = parameters.empty() ? sizeof(zero) : parameters.size() * sizeof(float);
+                queue.WriteBuffer(m_parameters, 0u, data, size);
+            }
             std::size_t m_outputSize{};
+            std::size_t m_argumentSize{};
             std::size_t m_parameterSize{};
             wgpu::Buffer m_uniform;
             wgpu::Buffer m_positions;
+            wgpu::Buffer m_arguments;
             wgpu::Buffer m_output;
             wgpu::Buffer m_staging;
             wgpu::Buffer m_parameters;
@@ -599,6 +638,106 @@ namespace gladius::webgpu
       RawValueBatchSink valueSink,
       CancellationPredicate shouldCancel) const
     {
+        return evaluateGeneratedImpl(std::move(request),
+                                     pointCount,
+                                     outputComponents,
+                                     0u,
+                                     std::move(positionSource),
+                                     {},
+                                     std::move(valueSink),
+                                     std::move(shouldCancel));
+    }
+
+    compute::FunctionEvaluationResult WebGPUSdfEvaluator::evaluateFunction(
+      compute::FunctionEvaluationRequest request) const
+    {
+        auto const argumentComponents = request.argumentComponents;
+        auto const outputComponents = request.outputComponents;
+        auto const sampleCount =
+          argumentComponents != 0u ? request.arguments.size() / argumentComponents : 0u;
+        compute::FunctionEvaluationResult result;
+        if (sampleCount == 0u)
+        {
+            return result;
+        }
+        result.values.resize(sampleCount * outputComponents);
+        auto task = evaluateRecordImpl(
+          std::move(request),
+          sampleCount,
+          {},
+          [&result, outputComponents](std::size_t const sampleOffset, std::vector<float> && values)
+          {
+              auto const first = static_cast<std::ptrdiff_t>(sampleOffset * outputComponents);
+              std::copy(values.begin(),
+                        values.end(),
+                        result.values.begin() + first);
+          },
+          {});
+        if (!compute::runBlocking(std::move(task), [this] { m_context->processEvents(); }))
+        {
+            throw std::runtime_error("WebGPU function evaluation was cancelled");
+        }
+        return result;
+    }
+
+    compute::AsyncTask<bool> WebGPUSdfEvaluator::evaluateRecordImpl(
+      compute::FunctionEvaluationRequest request,
+      std::size_t const sampleCount,
+      ArgumentBatchSource argumentSource,
+      RawValueBatchSink valueSink,
+      CancellationPredicate shouldCancel) const
+    {
+        if (request.argumentComponents == 0u || request.outputComponents == 0u)
+        {
+            throw std::invalid_argument("Function evaluation requires a non-empty argument and output layout");
+        }
+
+        compute::SdfEvaluationRequest converted;
+        converted.shaderSource = std::move(request.shaderSource);
+        converted.parameterValues = std::move(request.parameterValues);
+        converted.meshPayloadTable = std::move(request.meshPayloadTable);
+        converted.beamPayloadTable = std::move(request.beamPayloadTable);
+        converted.imagePayloadTable = std::move(request.imagePayloadTable);
+
+        std::vector<float> const arguments = std::move(request.arguments);
+        auto const argumentComponents = request.argumentComponents;
+        auto const outputComponents = request.outputComponents;
+
+        ArgumentBatchSource batchSource = std::move(argumentSource);
+        if (!batchSource)
+        {
+            batchSource = [arguments, argumentComponents](std::size_t const offset,
+                                                          std::size_t const count,
+                                                          std::vector<float> & output)
+            {
+                auto const first = static_cast<std::ptrdiff_t>(offset * argumentComponents);
+                output.assign(arguments.begin() + first,
+                              arguments.begin() + first +
+                                static_cast<std::ptrdiff_t>(count * argumentComponents));
+            };
+        }
+
+        co_return co_await evaluateGeneratedImpl(
+          std::move(converted),
+          sampleCount,
+          outputComponents,
+          argumentComponents,
+          {},
+          std::move(batchSource),
+          std::move(valueSink),
+          std::move(shouldCancel));
+    }
+
+    compute::AsyncTask<bool> WebGPUSdfEvaluator::evaluateGeneratedImpl(
+      compute::SdfEvaluationRequest request,
+      std::size_t const pointCount,
+      std::size_t const outputComponents,
+      std::size_t const argumentComponents,
+      PositionBatchSource positionSource,
+      ArgumentBatchSource argumentSource,
+      RawValueBatchSink valueSink,
+      CancellationPredicate shouldCancel) const
+    {
         if (pointCount == 0u)
         {
             co_return true;
@@ -620,7 +759,8 @@ namespace gladius::webgpu
             throw std::invalid_argument(
               "Generated WebGPU SDF evaluation request must not contain materialized positions");
         }
-        if (!positionSource || !valueSink)
+        bool const recordMode = argumentComponents != 0u;
+        if (!valueSink || (recordMode ? !argumentSource : !positionSource))
         {
             throw std::invalid_argument("Generated WebGPU SDF evaluation callbacks must be provided");
         }
@@ -633,6 +773,11 @@ namespace gladius::webgpu
         generatedPositions.reserve(batchCapacity);
         std::vector<EvaluationPosition> positions;
         positions.reserve(batchCapacity);
+        std::vector<float> arguments;
+        if (recordMode)
+        {
+            arguments.reserve(batchCapacity * argumentComponents);
+        }
 
         EvaluationResources resources(m_context);
         auto & buffers = resources.buffers;
@@ -650,7 +795,8 @@ namespace gladius::webgpu
             buffers.create(m_context->getDevice(),
                            batchCapacity,
                            request.parameterValues.size(),
-                           outputComponents);
+                           outputComponents,
+                           argumentComponents);
 
             if (buffers.hasMeshPayloads())
             {
@@ -688,11 +834,14 @@ namespace gladius::webgpu
                                                   buffers.imageOffsetTableData().size() * sizeof(std::uint32_t));
             }
 
+            auto const device = m_context->getDevice();
+            device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
             wgpu::ShaderSourceWGSL wgsl;
             wgsl.code = {request.shaderSource.data(), request.shaderSource.size()};
             wgpu::ShaderModuleDescriptor shaderDescriptor;
             shaderDescriptor.nextInChain = &wgsl;
-            auto const shader = m_context->getDevice().CreateShaderModule(&shaderDescriptor);
+            auto const shader = device.CreateShaderModule(&shaderDescriptor);
 
             wgpu::BindGroupLayoutEntry bindings[4]{};
             bindings[0].binding = 0u;
@@ -702,7 +851,8 @@ namespace gladius::webgpu
             bindings[1].binding = 1u;
             bindings[1].visibility = wgpu::ShaderStage::Compute;
             bindings[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-            bindings[1].buffer.minBindingSize = batchCapacity * sizeof(EvaluationPosition);
+            bindings[1].buffer.minBindingSize =
+              recordMode ? buffers.argumentSize() : batchCapacity * sizeof(EvaluationPosition);
             bindings[2].binding = 2u;
             bindings[2].visibility = wgpu::ShaderStage::Compute;
             bindings[2].buffer.type = wgpu::BufferBindingType::Storage;
@@ -785,15 +935,65 @@ namespace gladius::webgpu
             pipelineDescriptor.layout = pipelineLayout;
             pipelineDescriptor.compute.module = shader;
             pipelineDescriptor.compute.entryPoint = "main";
-            resources.pipeline = m_context->getDevice().CreateComputePipeline(&pipelineDescriptor);
+            resources.pipeline = device.CreateComputePipeline(&pipelineDescriptor);
+
+            struct ValidationScopeState
+            {
+                std::atomic<bool> done{false};
+                wgpu::ErrorType type{wgpu::ErrorType::NoError};
+                std::string message;
+            };
+            auto validationState = std::make_shared<ValidationScopeState>();
+            device.PopErrorScope(
+#ifdef __EMSCRIPTEN__
+              wgpu::CallbackMode::AllowSpontaneous,
+#else
+              wgpu::CallbackMode::AllowProcessEvents,
+#endif
+              [validationState](wgpu::PopErrorScopeStatus const status,
+                                wgpu::ErrorType const type,
+                                wgpu::StringView const message)
+              {
+                  if (status != wgpu::PopErrorScopeStatus::Success)
+                  {
+                      validationState->type = wgpu::ErrorType::Unknown;
+                      validationState->message = "Failed to pop WebGPU validation error scope";
+                  }
+                  else
+                  {
+                      validationState->type = type;
+                      if (message.data != nullptr)
+                      {
+                          validationState->message =
+                            message.length == wgpu::kStrlen
+                              ? std::string(message.data)
+                              : std::string(message.data, message.length);
+                      }
+                  }
+                  validationState->done.store(true, std::memory_order_release);
+              });
+
+            while (!validationState->done.load(std::memory_order_acquire) && m_context->isValid())
+            {
+                m_context->processEvents();
+            }
+
+            if (validationState->type != wgpu::ErrorType::NoError || !shader || !resources.pipeline)
+            {
+                throw std::runtime_error(
+                  validationState->message.empty()
+                    ? "WebGPU shader or compute pipeline creation failed"
+                    : validationState->message);
+            }
 
             wgpu::BindGroupEntry bindGroupEntries[4]{};
             bindGroupEntries[0].binding = 0u;
             bindGroupEntries[0].buffer = buffers.uniform();
             bindGroupEntries[0].size = sizeof(EvaluationUniforms);
             bindGroupEntries[1].binding = 1u;
-            bindGroupEntries[1].buffer = buffers.positions();
-            bindGroupEntries[1].size = batchCapacity * sizeof(EvaluationPosition);
+            bindGroupEntries[1].buffer = recordMode ? buffers.arguments() : buffers.positions();
+            bindGroupEntries[1].size =
+              recordMode ? buffers.argumentSize() : batchCapacity * sizeof(EvaluationPosition);
             bindGroupEntries[2].binding = 2u;
             bindGroupEntries[2].buffer = buffers.output();
             bindGroupEntries[2].size = buffers.outputSize();
@@ -862,25 +1062,38 @@ namespace gladius::webgpu
                 co_return false;
             }
             auto const batchCount = std::min(batchCapacity, pointCount - valueOffset);
-            generatedPositions.clear();
-            positionSource(valueOffset, batchCount, generatedPositions);
-            if (generatedPositions.size() != batchCount)
+            if (recordMode)
             {
-                throw std::runtime_error(
-                  "WebGPU SDF position source returned an unexpected batch size");
-            }
-
-            positions.clear();
-            for (auto const & position : generatedPositions)
-            {
-                if (!std::isfinite(position[0]) || !std::isfinite(position[1]) ||
-                    !std::isfinite(position[2]))
+                arguments.clear();
+                argumentSource(valueOffset, batchCount, arguments);
+                if (arguments.size() != batchCount * argumentComponents)
                 {
-                    throw std::invalid_argument(
-                      "WebGPU SDF position source returned a non-finite coordinate");
+                    throw std::runtime_error(
+                      "WebGPU function argument source returned an unexpected batch size");
                 }
-                positions.push_back(
-                  EvaluationPosition{{position[0], position[1], position[2], 0.0f}});
+            }
+            else
+            {
+                generatedPositions.clear();
+                positionSource(valueOffset, batchCount, generatedPositions);
+                if (generatedPositions.size() != batchCount)
+                {
+                    throw std::runtime_error(
+                      "WebGPU SDF position source returned an unexpected batch size");
+                }
+
+                positions.clear();
+                for (auto const & position : generatedPositions)
+                {
+                    if (!std::isfinite(position[0]) || !std::isfinite(position[1]) ||
+                        !std::isfinite(position[2]))
+                    {
+                        throw std::invalid_argument(
+                          "WebGPU SDF position source returned a non-finite coordinate");
+                    }
+                    positions.push_back(
+                      EvaluationPosition{{position[0], position[1], position[2], 0.0f}});
+                }
             }
 
             auto const batchPointCount = static_cast<std::uint32_t>(batchCount);
@@ -894,13 +1107,26 @@ namespace gladius::webgpu
             }
             {
                 WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
-                buffers.write(m_context->getQueue(),
-                              EvaluationUniforms{request.isoValue,
-                                                 batchPointCount,
-                                                 dispatchPlan.workgroupsX,
-                                                 0u},
-                              positions,
-                              request.parameterValues);
+                if (recordMode)
+                {
+                    buffers.writeArguments(m_context->getQueue(),
+                                          EvaluationUniforms{0.0f,
+                                                             batchPointCount,
+                                                             dispatchPlan.workgroupsX,
+                                                             0u},
+                                          arguments,
+                                          request.parameterValues);
+                }
+                else
+                {
+                    buffers.write(m_context->getQueue(),
+                                  EvaluationUniforms{request.isoValue,
+                                                     batchPointCount,
+                                                     dispatchPlan.workgroupsX,
+                                                     0u},
+                                  positions,
+                                  request.parameterValues);
+                }
 
                 auto const encoder = m_context->getDevice().CreateCommandEncoder();
                 auto const computePass = encoder.BeginComputePass();

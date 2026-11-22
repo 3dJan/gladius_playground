@@ -8,6 +8,8 @@
 
 #include <exception>
 #include <vector>
+#include "io/IndexedTriangleMeshRepair.h"
+#include "io/3mf/IndexedTriangleMeshWritePrecision.h"
 #include "io/IndexedTriangleMeshWriter.h"
 #include "io/MeshExportJob.h"
 #include "io/WindingRepair.h"
@@ -427,6 +429,29 @@ namespace gladius::webgpu
             }
             (void)io::orientTriangleComponentsByVotes(
                 mesh.indices, triangleComponents, componentVotes);
+        }
+
+        // Dual contouring and QEM both emit collinear slivers. They pass the relaxed output
+        // validation below but are rejected by every strict consumer of the exported mesh,
+        // so remove them here by collapsing the shortest edge of each sliver. Snapping to the
+        // decimal precision of the 3MF writer first keeps that step honest: the writer quantises
+        // every coordinate, which can turn a thin triangle into a degenerate one after the fact.
+        io::snapMeshTo3mfWritePrecision(mesh);
+        if (auto const repairResult = io::collapseGeometricallyDegenerateTriangles(mesh);
+            repairResult.collapsedEdgeCount != 0U)
+        {
+            auto const windingStats =
+                io::repairTriangleWindingConsistency(mesh.positions, mesh.indices, nullptr);
+            (void)windingStats;
+            if (logger)
+            {
+                logger->addEvent({"WebGPU manifold export collapsed " +
+                    std::to_string(repairResult.collapsedEdgeCount) +
+                    " degenerate mesh edges (" +
+                    std::to_string(repairResult.removedTriangleCount) + " triangles, " +
+                    std::to_string(repairResult.removedVertexCount) + " vertices removed)",
+                    events::Severity::Warning});
+            }
         }
 
         auto const validationError = mesh.validationError(kWebGpuOutputValidationPolicy);

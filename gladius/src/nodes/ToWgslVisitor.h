@@ -43,6 +43,39 @@ namespace gladius::nodes
         void setEvaluatorChannel(EvaluatorChannel channel);
         [[nodiscard]] EvaluatorChannel getEvaluatorChannel() const noexcept;
 
+        /// @brief One graph value marshalled through the flat parameter storage binding.
+        struct FunctionArgumentDescriptor
+        {
+            std::string name;
+            std::string wgslType;
+            std::size_t components{};
+        };
+
+        /// @brief One graph output of a generated function-signature entry point.
+        struct FunctionOutputDescriptor
+        {
+            std::string graphName;
+            std::string wgslName;
+            std::string wgslType;
+            std::size_t components{};
+        };
+
+        /// @brief Input and output layout of a generated EvaluatorChannel::FunctionSignature entry point.
+        /// Both lists are in generated-code order, which is also the order used to marshal values
+        /// through the positional parameter binding.
+        struct FunctionSignatureDescriptor
+        {
+            std::string entryPointName;
+            std::string resultTypeName;
+            std::vector<FunctionArgumentDescriptor> arguments;
+            std::vector<FunctionOutputDescriptor> outputs;
+            std::size_t argumentComponents{};
+            std::size_t outputComponents{};
+        };
+
+        /// @brief Layout of the last generated function-signature entry point (empty for other channels).
+        [[nodiscard]] FunctionSignatureDescriptor getFunctionSignature() const;
+
         void visit(Begin & beginning) override;
         void visit(End & ending) override;
         void visit(ConstantScalar & constantScalar) override;
@@ -116,6 +149,11 @@ namespace gladius::nodes
         void emitHelperFunction(ResourceId functionId, Model & callee);
         void setHelperMode(std::string functionName, HelperSignature const * signature) noexcept;
 
+        void emitFunctionSignatureEntry(Begin & beginning);
+        void emitFunctionSignatureOutputs(End & ending);
+        void emitFunctionRecordAdapter();
+        [[nodiscard]] std::vector<FunctionOutputDescriptor> functionSignatureOutputDeclarations();
+
         [[nodiscard]] bool beginNode(NodeBase const & node);
         [[nodiscard]] bool shouldInlineOutput(NodeBase const & node, std::string const & portName) const;
         [[nodiscard]] std::string resolveParameter(IParameter const & parameter) const;
@@ -144,5 +182,6 @@ namespace gladius::nodes
         ParameterLookupIndices const * m_parameterLookupIndices{};
         bool m_functionClosed{};
         bool m_bufferNumericLiterals{};
+        FunctionSignatureDescriptor m_functionSignature{};
     };
 }

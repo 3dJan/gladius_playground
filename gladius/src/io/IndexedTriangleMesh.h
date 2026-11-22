@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 
 #include <algorithm>
 #include <cmath>
@@ -38,6 +39,29 @@ namespace gladius::io
         Strict,
         AllowGeometricDegenerates
     };
+
+    /// @brief Relative area below which a triangle counts as geometrically degenerate.
+    inline constexpr double kRelativeAreaTolerance =
+        static_cast<double>(std::numeric_limits<float>::epsilon()) *
+        static_cast<double>(std::numeric_limits<float>::epsilon());
+
+    /// @brief Returns whether a triangle has no usable area relative to its longest edge.
+    [[nodiscard]] inline bool isGeometricallyDegenerateTriangle(Eigen::Vector3f const& first,
+                                                                Eigen::Vector3f const& second,
+                                                                Eigen::Vector3f const& third)
+    {
+        Eigen::Vector3d const firstDouble = first.cast<double>();
+        Eigen::Vector3d const secondDouble = second.cast<double>();
+        Eigen::Vector3d const thirdDouble = third.cast<double>();
+        Eigen::Vector3d const ab = secondDouble - firstDouble;
+        Eigen::Vector3d const ac = thirdDouble - firstDouble;
+        Eigen::Vector3d const bc = thirdDouble - secondDouble;
+        double const maxEdgeSquared = std::max(
+            {ab.squaredNorm(), ac.squaredNorm(), bc.squaredNorm()});
+        return maxEdgeSquared == 0.0 ||
+               ab.cross(ac).squaredNorm() <=
+                   maxEdgeSquared * maxEdgeSquared * kRelativeAreaTolerance;
+    }
 
     /// @brief Computes ordering-independent geometric and topological diagnostics for indexed meshes.
     template <typename Mesh>
@@ -102,8 +126,6 @@ namespace gladius::io
         std::unordered_map<std::uint64_t, EdgeUse> edgeUses;
         edgeUses.reserve(mesh.indices.size() / 2U);
 
-        double const floatEpsilon = std::numeric_limits<float>::epsilon();
-        double const relativeAreaTolerance = floatEpsilon * floatEpsilon;
         double sixTimesSignedVolume = 0.0;
         for (std::size_t offset = 0U; offset + 2U < mesh.indices.size(); offset += 3U)
         {
@@ -126,25 +148,7 @@ namespace gladius::io
             auto const& a = mesh.positions[first];
             auto const& b = mesh.positions[second];
             auto const& c = mesh.positions[third];
-            double const abx = static_cast<double>(b.x()) - a.x();
-            double const aby = static_cast<double>(b.y()) - a.y();
-            double const abz = static_cast<double>(b.z()) - a.z();
-            double const acx = static_cast<double>(c.x()) - a.x();
-            double const acy = static_cast<double>(c.y()) - a.y();
-            double const acz = static_cast<double>(c.z()) - a.z();
-            double const bcx = static_cast<double>(c.x()) - b.x();
-            double const bcy = static_cast<double>(c.y()) - b.y();
-            double const bcz = static_cast<double>(c.z()) - b.z();
-            double const abSquared = abx * abx + aby * aby + abz * abz;
-            double const acSquared = acx * acx + acy * acy + acz * acz;
-            double const bcSquared = bcx * bcx + bcy * bcy + bcz * bcz;
-            double const maxEdgeSquared = std::max({abSquared, acSquared, bcSquared});
-            double const crossX = aby * acz - abz * acy;
-            double const crossY = abz * acx - abx * acz;
-            double const crossZ = abx * acy - aby * acx;
-            double const crossSquared = crossX * crossX + crossY * crossY + crossZ * crossZ;
-            if (maxEdgeSquared == 0.0 ||
-                crossSquared <= maxEdgeSquared * maxEdgeSquared * relativeAreaTolerance)
+            if (isGeometricallyDegenerateTriangle(a, b, c))
             {
                 ++result.degenerateTriangleCount;
             }
@@ -286,8 +290,6 @@ namespace gladius::io
                 }
             }
 
-            double const floatEpsilon = std::numeric_limits<float>::epsilon();
-            double const relativeAreaTolerance = floatEpsilon * floatEpsilon;
             for (std::size_t offset = 0; offset < indices.size(); offset += 3U)
             {
                 auto const indexA = indices[offset];
@@ -304,32 +306,9 @@ namespace gladius::io
                     return "Mesh contains a triangle with repeated indices";
                 }
 
-                auto const & a = positions[indexA];
-                auto const & b = positions[indexB];
-                auto const & c = positions[indexC];
-                double const abx = static_cast<double>(b.x()) - a.x();
-                double const aby = static_cast<double>(b.y()) - a.y();
-                double const abz = static_cast<double>(b.z()) - a.z();
-                double const acx = static_cast<double>(c.x()) - a.x();
-                double const acy = static_cast<double>(c.y()) - a.y();
-                double const acz = static_cast<double>(c.z()) - a.z();
-                double const bcx = static_cast<double>(c.x()) - b.x();
-                double const bcy = static_cast<double>(c.y()) - b.y();
-                double const bcz = static_cast<double>(c.z()) - b.z();
-
-                double const abSquared = abx * abx + aby * aby + abz * abz;
-                double const acSquared = acx * acx + acy * acy + acz * acz;
-                double const bcSquared = bcx * bcx + bcy * bcy + bcz * bcz;
-                double const maxEdgeSquared = std::max({abSquared, acSquared, bcSquared});
-
-                double const crossX = aby * acz - abz * acy;
-                double const crossY = abz * acx - abx * acz;
-                double const crossZ = abx * acy - aby * acx;
-                double const crossSquared = crossX * crossX + crossY * crossY + crossZ * crossZ;
-
                 if (policy == IndexedTriangleMeshValidationPolicy::Strict &&
-                    (maxEdgeSquared == 0.0 ||
-                     crossSquared <= maxEdgeSquared * maxEdgeSquared * relativeAreaTolerance))
+                    isGeometricallyDegenerateTriangle(positions[indexA], positions[indexB],
+                                                      positions[indexC]))
                 {
                     return "Mesh contains a degenerate triangle";
                 }

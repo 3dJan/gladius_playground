@@ -1,4 +1,5 @@
 #include "Document.h"
+#include <typeindex>
 
 #include "io/3mf/Lib3mfLoader.h"
 #include "io/CancellationToken.h"
@@ -37,12 +38,15 @@
 #include "io/3mf/IndexedTriangleMesh3mfWriter.h"
 #include "io/3mf/MmuSegmentationWriter.h"
 #include "io/3mf/PreparedDiscreteColorExport.h"
+#include "io/3mf/IndexedTriangleMeshWritePrecision.h"
+#include "io/IndexedTriangleMeshRepair.h"
 #include "io/IndexedTriangleMeshWriter.h"
 #include "webgpu/WebGPUContourGenerator.h"
 #include "webgpu/WebGPUDualContouringExporter.h"
 #include "webgpu/WebGPULayeredMarchingCubesExporter.h"
 #include "webgpu/WebGPUManifoldDualContouringExporter.h"
 #include "webgpu/WebGPUMeshColorSampler.h"
+#include "webgpu/WebGPUProgramValidator.h"
 #include "webgpu/WebGPUSdfEvaluationRequest.h"
 #include "webgpu/WebGPUThumbnailRenderer.h"
 #endif
@@ -845,11 +849,11 @@ namespace gladius
             nodes::OptimizeOutputs optimizer{&assemblyToFlat};
             optimizer.optimize();
 
-                        // Pass a stable dependency graph snapshot to the flattener if available.
-                        auto dependencyGraph = getResourceDependencyGraphSnapshot();
+            // Pass a stable dependency graph snapshot to the flattener if available.
+            auto dependencyGraph = getResourceDependencyGraphSnapshot();
             nodes::GraphFlattener flattener =
-                            dependencyGraph
-                                ? nodes::GraphFlattener(assemblyToFlat, dependencyGraph.get())
+              dependencyGraph
+                ? nodes::GraphFlattener(assemblyToFlat, dependencyGraph.get())
                 : nodes::GraphFlattener(assemblyToFlat);
 
             m_flatAssembly = std::make_shared<nodes::Assembly>(flattener.flatten());
@@ -1133,7 +1137,15 @@ namespace gladius
     bool Document::updateParameter()
     {
 #if !defined(GLADIUS_ENABLE_OPENCL)
-        return false;
+        // Analytic backends have no compiled parameter buffer: the flattened graph already
+        // references the source parameters, so copying the runtime values is sufficient.
+        if (!m_assembly || !m_flatAssembly)
+        {
+            return false;
+        }
+        updateFlatAssemblyParameterValues();
+        m_parameterDirty = false;
+        return true;
 #else
         ProfileFunction;
         if (!m_assembly || !m_core)
@@ -1350,6 +1362,83 @@ namespace gladius
                   {std::string("unhandled exception: ") + e.what(), events::Severity::Error});
         }
     #endif
+    }
+
+    Document::ProgramCompileResult Document::compileModelProgramBlocking()
+    {
+        refreshModelBlocking();
+
+        if (m_core)
+        {
+#if !defined(GLADIUS_ENABLE_OPENCL)
+            return {.ok = false, .backend = "opencl", .message = "OpenCL support is not compiled in"};
+#else
+            auto const slicerProgram = m_core->getSlicerProgram();
+            if (!slicerProgram || !slicerProgram->isValid())
+            {
+                return {.ok = false,
+                        .backend = "opencl",
+                        .message = "Compilation failed: the slicer program is invalid."};
+            }
+            if (!slicerProgram->compilationSucceeded())
+            {
+                return {.ok = false,
+                        .backend = "opencl",
+                        .message = "Compilation failed. The program contains errors."};
+            }
+            return {.ok = true, .backend = "opencl"};
+#endif
+        }
+
+#if !defined(GLADIUS_ENABLE_WEBGPU)
+        return {.ok = false,
+                .backend = "unknown",
+                .message = "No compute backend is available to compile the model."};
+#else
+        auto const context = m_backendRuntime ? m_backendRuntime->getWebGPUContext() : nullptr;
+        webgpu::WebGPUProgramValidator validator{context};
+        if (!validator.isAvailable())
+        {
+            return {.ok = false,
+                    .backend = "webgpu",
+                    .message = validator.getErrorMessage()};
+        }
+
+        auto assemblyToken = waitForAssemblyToken();
+        updateFlatAssembly();
+        auto const flatAssembly = getFlatAssembly();
+        if (!flatAssembly || flatAssembly->assemblyModel() == nullptr)
+        {
+            return {.ok = false,
+                    .backend = "webgpu",
+                    .message = "The document has no flattened assembly to compile."};
+        }
+
+        auto const generation = std::max<std::uint64_t>(structuralEditEpoch(), 1u);
+        auto const result =
+          validator.validateModel(*flatAssembly->assemblyModel(), getResourceManager(), generation);
+        return {.ok = result.ok, .backend = "webgpu", .message = result.message};
+#endif
+    }
+
+    compute::RenderEvaluationDomain Document::getEvaluationDomain() const
+    {
+        if (m_core)
+        {
+#if defined(GLADIUS_ENABLE_OPENCL)
+            auto const resourceContext = m_core->getResourceContext();
+            if (resourceContext)
+            {
+                auto const & buildVolume = resourceContext->getBuildVolume();
+                return compute::RenderEvaluationDomain{
+                  .min = {buildVolume.min.x, buildVolume.min.y, buildVolume.min.z},
+                  .max = {buildVolume.max.x, buildVolume.max.y, buildVolume.max.z}};
+            }
+#endif
+        }
+
+        // Analytic WebGPU scenes are evaluated on the default dispatch domain.
+        return compute::RenderEvaluationDomain{};
     }
 
     void Document::refreshModelBlocking()
@@ -1728,6 +1817,23 @@ namespace gladius
                                            "Simplifying material interiors");
                                 });
                             if (warning && m_logger) m_logger->addEvent({*warning, events::Severity::Warning});
+                        }
+                        // Both steps below can leave the mesh invalid for strict consumers: QEM emits
+                        // collinear slivers, and the 3MF writer quantises every coordinate to nine
+                        // decimals, which can turn a thin triangle into a degenerate one after the fact.
+                        // Snap to that precision first, then collapse what is left. The collapse only drops
+                        // whole triangles and keeps the palette map in lockstep, so the material mapping
+                        // and the face count stay consistent.
+                        io::snapMeshTo3mfWritePrecision(mesh);
+                        if (auto const repair = io::collapseGeometricallyDegenerateTriangles(
+                              mesh, palette.sourceToPaletteMap);
+                            repair.collapsedEdgeCount != 0U && m_logger)
+                        {
+                            m_logger->addEvent(
+                              {fmt::format("3MF export: removed {} geometrically degenerate triangles from "
+                                           "the colored mesh",
+                                           repair.removedTriangleCount),
+                               events::Severity::Warning});
                         }
                         io::validateDiscretePalette(palette, mesh.indices.size() / 3U);
                         throwIfCancelled();

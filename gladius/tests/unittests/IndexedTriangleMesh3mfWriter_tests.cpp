@@ -1,5 +1,7 @@
 #include "io/IndexedTriangleMesh.h"
+#include "io/IndexedTriangleMeshRepair.h"
 #include "io/3mf/IndexedTriangleMesh3mfWriter.h"
+#include "io/3mf/IndexedTriangleMeshWritePrecision.h"
 #include "io/3mf/Lib3mfLoader.h"
 
 #include <gtest/gtest.h>
@@ -88,6 +90,25 @@ namespace gladius::io::tests
               Eigen::Vector3f{1.0F, sliverOffset, 0.0F}};
             mesh.indices = {0, 2, 6, 6, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0,
                             4, 3, 6, 6, 3, 0, 1, 3, 4, 5, 3, 1, 0, 3, 5};
+            return mesh;
+        }
+
+        /// @brief Closed tetrahedron at a realistic part size whose largest triangle only turns
+        /// degenerate once the writer has quantised the coordinates.
+        /// @details The 9 decimal digits of the writer scale by 1e9 in float32, which at a magnitude
+        /// of 200 mm has an ULP of 16384 and moves coordinates by up to 8.2e-6 mm. That is far below
+        /// the tolerance a triangle is checked with, so a valid sliver at 3.2e-13 becomes a
+        /// zero-area triangle at 3.2e-15 in the file. @ref snapMeshTo3mfWritePrecision removes the
+        /// discrepancy by moving the mesh onto the write grid before it is validated.
+        IndexedTriangleMesh makeWritePrecisionSliverTetrahedron()
+        {
+            IndexedTriangleMesh mesh;
+            mesh.positions = {
+              Eigen::Vector3f{194.285552979F, 207.172683716F, 250.905273438F},
+              Eigen::Vector3f{195.878005981F, 200.940948486F, 210.486175537F},
+              Eigen::Vector3f{195.307495117F, 203.173568726F, 224.967086792F},
+              Eigen::Vector3f{180.0F, 180.0F, 230.0F}};
+            mesh.indices = {0U, 2U, 1U, 0U, 1U, 3U, 1U, 2U, 3U, 2U, 0U, 3U};
             return mesh;
         }
 
@@ -315,6 +336,74 @@ namespace gladius::io::tests
 
         std::error_code cleanupError;
         std::filesystem::remove(filePath, cleanupError);
+    }
+
+    TEST(IndexedTriangleMeshWritePrecision, Snap_TetrahedronAtPartScale_SnapsOntoWriteGrid)
+    {
+        auto const source = makeWritePrecisionSliverTetrahedron();
+        ASSERT_FALSE(source.validationError().has_value());
+
+        auto mesh = source;
+        auto const changedComponents = snapMeshTo3mfWritePrecision(mesh);
+        EXPECT_GT(changedComponents, 0U);
+        EXPECT_LT(changedComponents, mesh.positions.size() * 3U);
+        EXPECT_EQ(snapMeshTo3mfWritePrecision(mesh), 0U);
+
+        EXPECT_EQ(mesh.indices, source.indices);
+        EXPECT_EQ(mesh.positions.size(), source.positions.size());
+        for (std::size_t vertex = 0U; vertex < mesh.positions.size(); ++vertex)
+        {
+            for (Eigen::Index component = 0; component < 3; ++component)
+            {
+                auto const snapped = snapCoordinateTo3mfWritePrecision(mesh.positions[vertex][component]);
+                EXPECT_EQ(snapped, mesh.positions[vertex][component]);
+            }
+        }
+    }
+
+    TEST(IndexedTriangleMeshWritePrecision, SnapAndCollapse_TetrahedronAtPartScale_KeepsMeshStrictlyValid)
+    {
+        auto const source = makeWritePrecisionSliverTetrahedron();
+        ASSERT_FALSE(source.validationError().has_value());
+
+        auto mesh = source;
+        (void)snapMeshTo3mfWritePrecision(mesh);
+        auto const result = collapseGeometricallyDegenerateTriangles(mesh);
+        EXPECT_EQ(result.remainingDegenerateTriangleCount, 0U);
+
+        auto const filePath = makeTemporaryPath();
+        IndexedTriangleMesh3mfWriter writer;
+        ASSERT_NO_THROW(writer.exportMesh(filePath, mesh, "Write precision sliver"));
+        ASSERT_TRUE(std::filesystem::exists(filePath));
+
+        auto const reloaded = readBackMesh(filePath);
+        if (auto const error = reloaded.validationError())
+        {
+            FAIL() << "Exported 3MF is no longer strictly valid: " << *error;
+        }
+        EXPECT_FALSE(reloaded.closedOrientedTopologyError().has_value());
+
+        std::error_code cleanupError;
+        std::filesystem::remove(filePath, cleanupError);
+    }
+
+    TEST(IndexedTriangleMeshWritePrecision, CollapseWithLabels_TetrahedronAtPartScale_KeepsLabelsAligned)
+    {
+        auto const source = makeWritePrecisionSliverTetrahedron();
+        auto mesh = source;
+        (void)snapMeshTo3mfWritePrecision(mesh);
+        ASSERT_NE(mesh.validationError(), std::nullopt);
+
+        std::vector<std::uint32_t> triangleLabels(mesh.indices.size() / 3U);
+        for (std::size_t triangle = 0U; triangle < triangleLabels.size(); ++triangle)
+        {
+            triangleLabels[triangle] = static_cast<std::uint32_t>(triangle);
+        }
+
+        auto const result = collapseGeometricallyDegenerateTriangles(mesh, triangleLabels);
+        EXPECT_EQ(result.remainingDegenerateTriangleCount, 0U);
+        EXPECT_EQ(triangleLabels.size(), mesh.indices.size() / 3U);
+        EXPECT_FALSE(mesh.validationError().has_value());
     }
 
     TEST(IndexedTriangleMesh3mfWriter, ExportWithMmuSegmentation_PrecisionSliver_KeepsMeshStrictlyValid)
