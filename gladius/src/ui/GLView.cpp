@@ -196,6 +196,13 @@ namespace gladius
             m_webgpuSurfaceHeight = 0u;
 #endif
             ImGui_ImplGlfw_Shutdown();
+#ifdef __EMSCRIPTEN__
+            EM_ASM({
+                if (window.__gladiusClipboardView === $0) {
+                    window.__gladiusClipboardView = 0;
+                }
+            }, reinterpret_cast<std::uintptr_t>(this));
+#endif
 
 #ifdef ENABLE_UI_TESTING
             if (m_testEngine)
@@ -527,6 +534,53 @@ namespace gladius
         ImGui_ImplGlfw_InitForOther(m_window, true);
 #ifdef __EMSCRIPTEN__
         ImGui_ImplGlfw_InstallEmscriptenCallbacks(m_window, "#gladius-canvas");
+        ImGuiPlatformIO & platformIO = ImGui::GetPlatformIO();
+        platformIO.Platform_ClipboardUserData = this;
+        platformIO.Platform_GetClipboardTextFn = [](ImGuiContext *) -> char const * {
+            auto const * view =
+              static_cast<GLView const *>(ImGui::GetPlatformIO().Platform_ClipboardUserData);
+            return view != nullptr ? view->getWebClipboardText() : "";
+        };
+        platformIO.Platform_SetClipboardTextFn = [](ImGuiContext *, char const * text) {
+            auto * view =
+              static_cast<GLView *>(ImGui::GetPlatformIO().Platform_ClipboardUserData);
+            std::string const value = (text != nullptr) ? text : "";
+            if (view != nullptr)
+            {
+                view->setWebClipboardText(value);
+            }
+            EM_ASM({
+                const ptr = $0;
+                const len = $1;
+                if (!ptr || len <= 0 || !navigator.clipboard || !navigator.clipboard.writeText) {
+                    return;
+                }
+                const str = new TextDecoder("utf-8").decode(HEAPU8.subarray(ptr, ptr + len));
+                navigator.clipboard.writeText(str).catch(() => {});
+            }, value.data(), static_cast<int>(value.size()));
+        };
+        EM_ASM({
+            window.__gladiusClipboardView = $0;
+            if (!window.__gladiusPasteInstalled) {
+                window.__gladiusPasteInstalled = true;
+                window.addEventListener("paste", (e) => {
+                    const viewPtr = window.__gladiusClipboardView;
+                    if (!viewPtr || !e.clipboardData) {
+                        return;
+                    }
+                    const text = e.clipboardData.getData("text/plain");
+                    if (typeof text !== "string") {
+                        return;
+                    }
+                    const bytes = new TextEncoder().encode(text);
+                    const ptr = _malloc(bytes.length + 1);
+                    HEAPU8.set(bytes, ptr);
+                    HEAPU8[ptr + bytes.length] = 0;
+                    _gladiusOnWebClipboardPaste(viewPtr, ptr);
+                    _free(ptr);
+                }, true);
+            }
+        }, reinterpret_cast<std::uintptr_t>(this));
 #endif
 #endif
 
@@ -1729,4 +1783,29 @@ namespace gladius
     currentPromise->set_value(false);
 #endif
     }
+
+#ifdef __EMSCRIPTEN__
+    void GLView::setWebClipboardText(std::string text)
+    {
+        m_webClipboardText = std::move(text);
+    }
+
+    char const * GLView::getWebClipboardText() const noexcept
+    {
+        return m_webClipboardText.c_str();
+    }
+#endif
 }
+
+#ifdef __EMSCRIPTEN__
+extern "C" EMSCRIPTEN_KEEPALIVE void gladiusOnWebClipboardPaste(void * userData,
+                                                                char const * text)
+{
+    if (userData == nullptr || text == nullptr)
+    {
+        return;
+    }
+    auto * view = static_cast<gladius::GLView *>(userData);
+    view->setWebClipboardText(text);
+}
+#endif

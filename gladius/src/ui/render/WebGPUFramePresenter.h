@@ -37,6 +37,7 @@ namespace gladius::ui::async_rendering
         [[nodiscard]] bool present(compute::RenderFrame const & frame,
                  FramePresentationCandidate const & candidate) override;
         [[nodiscard]] bool supportsGpuDirectPresentation() const noexcept override;
+        void beginFrame() noexcept override;
         void release() noexcept override;
         [[nodiscard]] std::uintptr_t getTextureId() const noexcept override;
         [[nodiscard]] std::uint32_t getWidth() const noexcept override;
@@ -47,9 +48,16 @@ namespace gladius::ui::async_rendering
       private:
         [[nodiscard]] bool allocateTexture(std::uint32_t width, std::uint32_t height);
 
+        struct RetiredTexture
+        {
+            wgpu::Texture texture;
+            wgpu::TextureView textureView;
+        };
+
         std::shared_ptr<webgpu::WebGPUComputeContext> m_context;
         wgpu::Texture m_texture;
         wgpu::TextureView m_textureView;
+        std::vector<RetiredTexture> m_retiredResources;
         std::uint32_t m_width{};
         std::uint32_t m_height{};
         std::uint32_t m_capacityWidth{};

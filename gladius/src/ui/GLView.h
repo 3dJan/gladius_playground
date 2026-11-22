@@ -158,6 +158,10 @@ namespace gladius
         [[nodiscard]] bool isSpanModeAvailable() const;
         
         void startAnimationMode();
+#ifdef __EMSCRIPTEN__
+        void setWebClipboardText(std::string text);
+        [[nodiscard]] char const * getWebClipboardText() const noexcept;
+#endif
         void stopAnimationMode();
 
         // [[nodiscard]]
@@ -245,6 +249,9 @@ namespace gladius
         
 #ifdef ENABLE_UI_TESTING
         ImGuiTestEngine* m_testEngine = nullptr;
+#endif
+#ifdef __EMSCRIPTEN__
+        std::string m_webClipboardText;
 #endif
     };
 }

@@ -2,14 +2,14 @@
   "dependencies": [
     "fmt",
     "openmesh",
-    "glad",
+  
     "glfw3",
     "eigen3",
     "tinyfiledialogs",
     "gtest",
     "nlopt",
     "platform-folders",
-      "opencl",
+
     {
         "name": "dawn",
         "default-features": false,
@@ -41,8 +41,7 @@
         [
           "docking-experimental",
           "glfw-binding",
-          "opengl2-binding",
-          "test-engine"
+          "wgpu-binding"
         ]
     },
     {
@@ -52,8 +51,7 @@
         [
           "docking-experimental",
           "glfw-binding",
-          "opengl2-binding",
-          "test-engine"
+          "wgpu-binding"
         ]
     },
     "imgui-node-editor",

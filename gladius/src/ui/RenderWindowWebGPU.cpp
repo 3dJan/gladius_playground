@@ -816,6 +816,10 @@ namespace gladius::ui
 
     void RenderWindow::renderWindow()
     {
+        if (m_neutralFramePresenter)
+        {
+            m_neutralFramePresenter->beginFrame();
+        }
         m_uiFpsBenchmarkStageTimings = {};
         updateNeutralParameterInteraction();
         if (!m_isVisible || m_view == nullptr)

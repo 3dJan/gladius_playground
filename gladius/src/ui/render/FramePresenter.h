@@ -26,6 +26,7 @@ namespace gladius::ui::async_rendering
         {
             return false;
         }
+        virtual void beginFrame() noexcept {}
         virtual void release() noexcept = 0;
         [[nodiscard]] virtual std::uintptr_t getTextureId() const noexcept = 0;
         [[nodiscard]] virtual std::uint32_t getWidth() const noexcept = 0;

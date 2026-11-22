@@ -21,6 +21,7 @@ namespace gladius::ui::async_rendering
     WebGPUFramePresenter::~WebGPUFramePresenter()
     {
         release();
+        beginFrame();
     }
 
     bool WebGPUFramePresenter::supportsGpuDirectPresentation() const noexcept
@@ -259,13 +260,31 @@ namespace gladius::ui::async_rendering
         return true;
     }
 
-    void WebGPUFramePresenter::release() noexcept
+    void WebGPUFramePresenter::beginFrame() noexcept
     {
+        if (m_retiredResources.empty())
+        {
+            return;
+        }
         if (m_context)
         {
             webgpu::WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
-            m_textureView = nullptr;
-            m_texture = nullptr;
+            m_retiredResources.clear();
+        }
+        else
+        {
+            m_retiredResources.clear();
+        }
+    }
+
+    void WebGPUFramePresenter::release() noexcept
+    {
+        // Defer releasing the WebGPU texture/view until the next frame because ImGui
+        // may have already recorded this texture view into the current frame's draw list.
+        if (m_texture || m_textureView)
+        {
+            m_retiredResources.push_back(
+              RetiredTexture{std::move(m_texture), std::move(m_textureView)});
         }
         m_width = 0u;
         m_height = 0u;
@@ -334,6 +353,11 @@ namespace gladius::ui::async_rendering
             return false;
         }
 
+        if (m_texture || m_textureView)
+        {
+            m_retiredResources.push_back(
+              RetiredTexture{std::move(m_texture), std::move(m_textureView)});
+        }
         m_texture = std::move(texture);
         m_textureView = std::move(textureView);
         m_capacityWidth = width;
