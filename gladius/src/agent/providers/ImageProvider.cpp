@@ -53,7 +53,7 @@ namespace gladius::agent
         };
         httpReq.body = payload.dump();
 
-        HttpResponse const httpRes = m_transport->postJson(httpReq, cancellation);
+        HttpResponse const httpRes = co_await m_transport->postJsonAsync(httpReq, cancellation);
         if (httpRes.cancelled || !httpRes.error.empty())
         {
             co_return ImageGenerationResponse{false, {}, httpRes.error};

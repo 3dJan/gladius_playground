@@ -2917,6 +2917,12 @@ namespace gladius
         boundsRequest.probeSettings.tileSize = {64u, 64u, 64u};
         boundsRequest.probeSettings.allowMetadataFallback = false;
 
+#ifdef __EMSCRIPTEN__
+        // Single-threaded browser builds cannot block waiting for GPU readback callbacks;
+        // asynchronous bounds are driven per-frame by RenderWindow::updateNeutralModelBounds().
+        (void) boundsRequest;
+        return std::nullopt;
+#else
         auto submission = boundsService->submit(std::move(boundsRequest));
         if (!submission)
         {
@@ -2934,6 +2940,7 @@ namespace gladius
             return result;
         }
         return std::nullopt;
+#endif
 #endif
     }
 

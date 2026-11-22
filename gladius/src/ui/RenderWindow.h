@@ -150,6 +150,10 @@ namespace gladius::ui
         /// Used by the status bar to visualize progressive rendering, including when a
         /// render is aborted and restarted (the fraction jumps back toward zero).
         [[nodiscard]] HqProgressiveRenderProgress hqProgressiveRenderProgress() const;
+        [[nodiscard]] std::optional<compute::RenderBounds> neutralModelBounds() const
+        {
+            return getNeutralModelBounds();
+        }
         void invalidateView();
         void invalidateViewDuetoModelUpdate();
         void invalidateViewDueToParameterChange();

@@ -138,10 +138,14 @@ namespace gladius::ui
     AgentPanels::~AgentPanels()
     {
         stopRun();
+#ifdef __EMSCRIPTEN__
+        m_webModelFetchTask.reset();
+#else
         if (m_modelFetchThread.joinable())
         {
             m_modelFetchThread.join();
         }
+#endif
         saveSessionState();
         releaseTextures();
     }
@@ -765,13 +769,21 @@ namespace gladius::ui
         {
             return;
         }
+#ifndef __EMSCRIPTEN__
         if (m_modelFetchThread.joinable())
         {
             m_modelFetchThread.join();
         }
+#else
+        m_webModelFetchTask.reset();
+#endif
         agent::ProviderProfile profileCopy = *pit;
         m_modelFetchStatus = "Fetching models for " + profileCopy.name + "...";
         m_modelFetchRunning.store(true);
+#ifdef __EMSCRIPTEN__
+        m_webModelFetchTask = runModelFetchWeb(std::move(profileCopy), freeOnly, autoAddToProfile);
+        m_webModelFetchTask->resume();
+#else
         m_modelFetchThread = std::thread([this, profileCopy, freeOnly, autoAddToProfile]() {
             agent::CurlHttpTransport transport;
             io::CancellationToken cancel;
@@ -785,10 +797,38 @@ namespace gladius::ui
             }
             m_modelFetchRunning.store(false);
         });
+#endif
     }
+
+#ifdef __EMSCRIPTEN__
+    coro::task<void> AgentPanels::runModelFetchWeb(agent::ProviderProfile profileCopy,
+                                                   bool freeOnly,
+                                                   bool autoAddToProfile)
+    {
+        agent::CurlHttpTransport transport;
+        io::CancellationToken cancel;
+        auto res = co_await agent::ModelDiscovery::fetchModelsAsync(
+          profileCopy, transport, cancel, freeOnly);
+        {
+            std::lock_guard<std::mutex> lock(m_modelFetchMutex);
+            m_modelFetchProfileId = profileCopy.id;
+            m_modelFetchAutoAdd = autoAddToProfile;
+            m_modelFetchResult = std::move(res);
+            m_modelFetchPendingApply = true;
+        }
+        m_modelFetchRunning.store(false);
+        co_return;
+    }
+#endif
 
     void AgentPanels::pollModelFetch()
     {
+#ifdef __EMSCRIPTEN__
+        if (m_webModelFetchTask && m_webModelFetchTask->is_ready())
+        {
+            m_webModelFetchTask.reset();
+        }
+#endif
         bool apply = false;
         bool autoAdd = false;
         std::string targetId;
@@ -859,6 +899,15 @@ namespace gladius::ui
     {
         pollModelFetch();
 #ifdef __EMSCRIPTEN__
+        if (m_webRunTask && m_webRunTask->is_ready())
+        {
+            m_webRunTask.reset();
+        }
+        if (m_webConfirmHandle && m_confirmationResolved)
+        {
+            auto h = std::exchange(m_webConfirmHandle, {});
+            h.resume();
+        }
         {
             ClipboardImageResult webClip;
             if (ClipboardImageHelper::consumePendingWebImage(webClip) && webClip.success)
@@ -924,10 +973,15 @@ namespace gladius::ui
         {
             return;
         }
+#ifndef __EMSCRIPTEN__
         if (m_workerThread.joinable())
         {
             m_workerThread.join();
         }
+#else
+        m_webConfirmHandle = {};
+        m_webRunTask.reset();
+#endif
 
         if (m_startFresh)
         {
@@ -996,6 +1050,14 @@ namespace gladius::ui
         int const legacyProviderIdx = m_providerIndex;
         std::string const promptForKnowledge = userPrompt;
 
+#ifdef __EMSCRIPTEN__
+        m_webRunTask = runAgentWeb(std::move(selections),
+                                   std::move(profilesCopy),
+                                   std::move(legacyCfg),
+                                   legacyProviderIdx,
+                                   promptForKnowledge);
+        m_webRunTask->resume();
+#else
         m_workerThread = std::thread(
           [this, selections, profilesCopy, legacyCfg, legacyProviderIdx, promptForKnowledge]() {
               auto makeProvider = [](agent::ApiType apiType, agent::ProviderConfig const & c)
@@ -1048,7 +1110,8 @@ namespace gladius::ui
                 m_limits,
                 m_cancellation,
                 [this]() { return m_graph.phase() == design::DesignPhase::Complete; },
-                [this](tools::ToolDefinition const &, nlohmann::json const &) {
+                [this](tools::ToolDefinition const &,
+                       nlohmann::json const &) -> coro::task<bool> {
                     std::unique_lock<std::mutex> lock(m_confirmMutex);
                     m_confirmCv.wait(lock, [this]() {
                         return m_confirmationResolved || m_cancellation.isCancelled();
@@ -1056,7 +1119,7 @@ namespace gladius::ui
                     bool const ok = m_confirmationApproved && !m_cancellation.isCancelled();
                     m_awaitingConfirmation = false;
                     m_confirmationResolved = false;
-                    return ok;
+                    co_return ok;
                 },
                 [this, promptForKnowledge]() {
                     agent::DesignContextSnapshot snap;
@@ -1091,7 +1154,127 @@ namespace gladius::ui
                 }));
               m_running.store(false);
           });
+#endif
     }
+
+#ifdef __EMSCRIPTEN__
+    coro::task<void> AgentPanels::runAgentWeb(std::vector<agent::ModelSelection> selections,
+                                              std::vector<agent::ProviderProfile> profilesCopy,
+                                              agent::ProviderConfig legacyCfg,
+                                              int legacyProviderIdx,
+                                              std::string promptForKnowledge)
+    {
+        auto makeProvider = [](agent::ApiType apiType, agent::ProviderConfig const & c)
+          -> std::unique_ptr<agent::IAiProvider> {
+            if (apiType == agent::ApiType::Anthropic)
+            {
+                return std::make_unique<agent::AnthropicProvider>(c);
+            }
+            return std::make_unique<agent::OpenAiProvider>(c);
+        };
+
+        std::vector<agent::FallbackProvider::Candidate> candidates;
+        for (auto const & sel : selections)
+        {
+            auto pit = std::find_if(profilesCopy.begin(),
+                                    profilesCopy.end(),
+                                    [&](agent::ProviderProfile const & p) {
+                                        return p.id == sel.profileId;
+                                    });
+            if (pit == profilesCopy.end() || !pit->isModelAvailable(sel.model))
+            {
+                continue;
+            }
+            agent::ProviderConfig cfg;
+            cfg.endpoint = pit->endpoint;
+            cfg.apiKey = pit->apiKey;
+            cfg.model = sel.model;
+            cfg.stream = true;
+            candidates.push_back(agent::FallbackProvider::Candidate{
+              pit->name + "/" + sel.model, makeProvider(pit->apiType, cfg)});
+        }
+        if (candidates.empty())
+        {
+            auto apiType = (legacyProviderIdx == 1) ? agent::ApiType::Anthropic
+                                                    : agent::ApiType::OpenAiCompatible;
+            candidates.push_back(agent::FallbackProvider::Candidate{
+              legacyCfg.model, makeProvider(apiType, legacyCfg)});
+        }
+
+        struct WebConfirmAwaitable
+        {
+            AgentPanels * self = nullptr;
+
+            bool await_ready() const noexcept
+            {
+                return self->m_confirmationResolved || self->m_cancellation.isCancelled();
+            }
+
+            void await_suspend(std::coroutine_handle<> h) noexcept
+            {
+                self->m_webConfirmHandle = h;
+            }
+
+            bool await_resume() noexcept
+            {
+                bool const ok = self->m_confirmationApproved && !self->m_cancellation.isCancelled();
+                self->m_awaitingConfirmation = false;
+                self->m_confirmationResolved = false;
+                return ok;
+            }
+        };
+
+        agent::FallbackProvider provider(std::move(candidates));
+        agent::AgentLoop loop;
+        (void) co_await loop.run(
+          m_conversation,
+          provider,
+          m_registry,
+          m_executor,
+          m_contextBuilder,
+          m_policy,
+          m_eventQueue,
+          m_limits,
+          m_cancellation,
+          [this]() { return m_graph.phase() == design::DesignPhase::Complete; },
+          [this](tools::ToolDefinition const &, nlohmann::json const &) -> coro::task<bool> {
+              co_return co_await WebConfirmAwaitable{this};
+          },
+          [this, promptForKnowledge]() {
+              agent::DesignContextSnapshot snap;
+              snap.autonomy = m_policy.autonomy();
+              snap.isIncremental = (m_conversation.size() > 1)
+                                   || (m_document && m_document->getAssembly()
+                                       && m_document->getAssembly()->getFunctions().size() > 1);
+              if (snap.isIncremental && m_document && m_document->getAssembly())
+              {
+                  std::string funcList;
+                  for (auto const & [fid, model] : m_document->getAssembly()->getFunctions())
+                  {
+                      if (model)
+                      {
+                          funcList += "- " + model->getDisplayName().value_or(std::to_string(fid))
+                                      + " (id=" + std::to_string(fid) + ")\n";
+                      }
+                  }
+                  snap.existingModelSummary = std::move(funcList);
+              }
+              auto const reqChanges = m_graph.consumePendingRequirementChanges();
+              for (auto const & ch : reqChanges)
+              {
+                  snap.requirementChangesSummary += "- " + ch + "\n";
+              }
+              snap.designPhase = design::toString(m_graph.phase());
+              snap.designGraphSummary = m_graph.summarize();
+              snap.availableSkillsSummary = m_skills.summarizeForPrompt();
+              snap.todoSummary = m_todos.summarize();
+              snap.knowledgeSummary = m_knowledge.summarizeForPrompt(promptForKnowledge, 5);
+              return snap;
+          });
+        m_running.store(false);
+        co_return;
+    }
+#endif
 
     void AgentPanels::stopRun()
     {
@@ -1102,10 +1285,15 @@ namespace gladius::ui
             m_confirmationApproved = false;
         }
         m_confirmCv.notify_all();
+#ifdef __EMSCRIPTEN__
+        m_webConfirmHandle = {};
+        m_webRunTask.reset();
+#else
         if (m_workerThread.joinable())
         {
             m_workerThread.join();
         }
+#endif
         m_running.store(false);
     }
 

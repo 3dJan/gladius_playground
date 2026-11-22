@@ -44,7 +44,7 @@ namespace gladius::agent
       public:
         using CompletionPredicate = std::function<bool()>;
         using ConfirmationCallback =
-          std::function<bool(tools::ToolDefinition const &, nlohmann::json const &)>;
+          std::function<coro::task<bool>(tools::ToolDefinition const &, nlohmann::json const &)>;
         using SnapshotProvider = std::function<DesignContextSnapshot()>;
 
         [[nodiscard]] coro::task<AgentRunResult> run(

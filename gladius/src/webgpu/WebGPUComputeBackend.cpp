@@ -1172,10 +1172,20 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                         std::scoped_lock sdfLock{m_precomputedSdf->mutex};
                         precomputedSdfValid = m_precomputedSdf->valid;
                     }
+#ifdef __EMSCRIPTEN__
+                    // In the browser, each subband waits for an async MapAsync callback on a
+                    // subsequent animation frame (~16ms each). Dispatch normal/prebaked frames
+                    // in a single pass so interactive camera movement is not throttled to <1 FPS.
+                    std::uint32_t const maxPixelsPerDispatch =
+                      (hasHeavyPrimitives && !precomputedSdfValid)
+                        ? 65536u
+                        : std::max(1u, m_width * m_rowCount);
+#else
                     // Keep individual GPU dispatches well below the OS/driver TDR timeout
                     // (~2s on Linux amdgpu), especially for unbaked mesh/beam-lattice scenes.
                     std::uint32_t const maxPixelsPerDispatch =
                       (hasHeavyPrimitives && !precomputedSdfValid) ? 2048u : 32768u;
+#endif
                     std::uint32_t const rowsPerSubband =
                       std::max(1u, maxPixelsPerDispatch / std::max(m_width, 1u));
                     std::uint32_t const subbandOffset = m_nextSubbandRow;

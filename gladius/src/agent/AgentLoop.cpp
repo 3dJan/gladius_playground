@@ -113,7 +113,8 @@ namespace gladius::agent
                     {
                         eventQueue.push(UserDecisionRequiredEvent{
                             call.id, "Confirm tool execution: " + def.name, def, call.arguments});
-                        bool const approved = confirmCallback ? confirmCallback(def, call.arguments) : false;
+                        bool const approved =
+                          confirmCallback ? co_await confirmCallback(def, call.arguments) : false;
                         if (!approved)
                         {
                             toolResult = {{"success", false}, {"error", "User declined tool execution"}};

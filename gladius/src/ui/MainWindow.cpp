@@ -3848,14 +3848,13 @@ namespace gladius::ui
                 }
             }
 #else
-            if (m_doc)
+            if (auto const bb = m_renderWindow.neutralModelBounds(); bb.has_value() && bb->isValid())
             {
-                auto const bb = m_doc->computeBoundingBox();
                 ImGui::Text("%s %.3f x %.3f x %.3f mm",
                             ICON_FA_CUBE,
-                            bb.max.x - bb.min.x,
-                            bb.max.y - bb.min.y,
-                            bb.max.z - bb.min.z);
+                            bb->max[0] - bb->min[0],
+                            bb->max[1] - bb->min[1],
+                            bb->max[2] - bb->min[2]);
                 ImGui::SameLine();
             }
 #endif

@@ -3,6 +3,7 @@
 #include "HttpClient.h"
 #include "ProviderProfile.h"
 
+#include <coro/coro.hpp>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,14 @@ namespace gladius::agent
         /// @brief Fetch available model IDs and metadata for the given profile.
         /// When freeOnly is true (or OpenRouter without an API key), returns only free models.
         [[nodiscard]] static ModelDiscoveryResult fetchModels(
+          ProviderProfile const & profile,
+          IHttpTransport & transport,
+          io::CancellationToken const & cancellation,
+          bool freeOnly = false,
+          std::size_t maxFreeModels = 50);
+
+        /// @brief Coroutine variant of fetchModels for non-blocking browser execution.
+        [[nodiscard]] static coro::task<ModelDiscoveryResult> fetchModelsAsync(
           ProviderProfile const & profile,
           IHttpTransport & transport,
           io::CancellationToken const & cancellation,

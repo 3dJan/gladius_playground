@@ -176,7 +176,7 @@ namespace gladius::agent
 
         if (!m_config.stream)
         {
-            HttpResponse const httpRes = m_transport->postJson(httpReq, cancellation);
+            HttpResponse const httpRes = co_await m_transport->postJsonAsync(httpReq, cancellation);
             if (httpRes.cancelled || !httpRes.error.empty())
             {
                 co_return CompletionResponse{{}, {}, "", false, httpRes.error};
@@ -203,7 +203,7 @@ namespace gladius::agent
         CompletionResponse resp;
         std::map<int, PendingAnthropicBlock> blocks;
 
-        HttpResponse const httpRes = m_transport->postSse(
+        HttpResponse const httpRes = co_await m_transport->postSseAsync(
           httpReq,
           [&](std::string const & eventName, std::string const & data)
           {

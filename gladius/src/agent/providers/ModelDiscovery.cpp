@@ -103,113 +103,160 @@ namespace gladius::agent
         }
     } // namespace
 
+    namespace
+    {
+        bool buildModelsRequest(ProviderProfile const & profile,
+                                HttpRequest & outReq,
+                                std::string & outBase,
+                                std::string & outError)
+        {
+            outBase = trimTrailingSlash(profile.endpoint);
+            if (outBase.empty())
+            {
+                outError = "Endpoint is empty";
+                return false;
+            }
+
+            outReq.timeoutSeconds = 20;
+            outReq.headers.emplace_back("Accept: application/json");
+
+            if (profile.apiType == ApiType::Anthropic)
+            {
+                if (profile.apiKey.empty())
+                {
+                    outError = "API key is required to query Anthropic models";
+                    return false;
+                }
+                outReq.url = outBase + "/v1/models";
+                outReq.headers.emplace_back("x-api-key: " + profile.apiKey);
+                outReq.headers.emplace_back("anthropic-version: 2023-06-01");
+            }
+            else
+            {
+                if (outBase.size() >= 7 && outBase.substr(outBase.size() - 7) == "/models")
+                {
+                    outReq.url = outBase;
+                }
+                else
+                {
+                    outReq.url = outBase + "/models";
+                }
+                if (!profile.apiKey.empty())
+                {
+                    outReq.headers.emplace_back("Authorization: Bearer " + profile.apiKey);
+                }
+                if (isOpenRouterEndpoint(outBase))
+                {
+                    outReq.headers.emplace_back("HTTP-Referer: https://github.com/3MFConsortium/gladius");
+                    outReq.headers.emplace_back("X-Title: Gladius Design Agent");
+                }
+            }
+            return true;
+        }
+
+        ModelDiscoveryResult parseModelsResponse(ProviderProfile const & profile,
+                                                 std::string const & base,
+                                                 HttpResponse const & httpRes,
+                                                 bool freeOnly,
+                                                 std::size_t maxFreeModels)
+        {
+            ModelDiscoveryResult result;
+            if (httpRes.cancelled)
+            {
+                result.error = "Cancelled";
+                return result;
+            }
+            if (!httpRes.error.empty())
+            {
+                result.error = httpRes.error;
+                return result;
+            }
+            if (httpRes.statusCode < 200 || httpRes.statusCode >= 300)
+            {
+                result.error = "HTTP " + std::to_string(httpRes.statusCode);
+                return result;
+            }
+
+            auto parsed = nlohmann::json::parse(httpRes.body, nullptr, false);
+            if (parsed.is_discarded() || !parsed.is_object())
+            {
+                result.error = "Invalid JSON response from models endpoint";
+                return result;
+            }
+
+            if (!parsed.contains("data") || !parsed["data"].is_array())
+            {
+                result.error = "Response missing 'data' array";
+                return result;
+            }
+
+            bool const localEndpoint = isLocalEndpoint(base);
+            bool const filterFreeOnly =
+              freeOnly || (isOpenRouterEndpoint(base) && profile.apiKey.empty());
+            for (auto const & entry : parsed["data"])
+            {
+                if (!entry.is_object())
+                {
+                    continue;
+                }
+                ModelMetadata meta = parseModelMetadata(entry, localEndpoint);
+                if (meta.id.empty())
+                {
+                    continue;
+                }
+                if (filterFreeOnly && !meta.isFree)
+                {
+                    continue;
+                }
+                result.models.push_back(meta.id);
+                result.metadata.push_back(std::move(meta));
+                if (filterFreeOnly && result.models.size() >= maxFreeModels)
+                {
+                    break;
+                }
+            }
+
+            result.success = true;
+            return result;
+        }
+    } // namespace
+
     ModelDiscoveryResult ModelDiscovery::fetchModels(ProviderProfile const & profile,
                                                      IHttpTransport & transport,
                                                      io::CancellationToken const & cancellation,
                                                      bool freeOnly,
                                                      std::size_t maxFreeModels)
     {
-        ModelDiscoveryResult result;
-        std::string const base = trimTrailingSlash(profile.endpoint);
-        if (base.empty())
-        {
-            result.error = "Endpoint is empty";
-            return result;
-        }
-
         HttpRequest req;
-        req.timeoutSeconds = 20;
-        req.headers.emplace_back("Accept: application/json");
-
-        if (profile.apiType == ApiType::Anthropic)
+        std::string base;
+        std::string err;
+        if (!buildModelsRequest(profile, req, base, err))
         {
-            if (profile.apiKey.empty())
-            {
-                result.error = "API key is required to query Anthropic models";
-                return result;
-            }
-            req.url = base + "/v1/models";
-            req.headers.emplace_back("x-api-key: " + profile.apiKey);
-            req.headers.emplace_back("anthropic-version: 2023-06-01");
+            ModelDiscoveryResult result;
+            result.error = std::move(err);
+            return result;
         }
-        else
-        {
-            if (base.size() >= 7 && base.substr(base.size() - 7) == "/models")
-            {
-                req.url = base;
-            }
-            else
-            {
-                req.url = base + "/models";
-            }
-            if (!profile.apiKey.empty())
-            {
-                req.headers.emplace_back("Authorization: Bearer " + profile.apiKey);
-            }
-            if (isOpenRouterEndpoint(base))
-            {
-                req.headers.emplace_back("HTTP-Referer: https://github.com/3MFConsortium/gladius");
-                req.headers.emplace_back("X-Title: Gladius Design Agent");
-            }
-        }
-
         HttpResponse const httpRes = transport.getJson(req, cancellation);
-        if (httpRes.cancelled)
-        {
-            result.error = "Cancelled";
-            return result;
-        }
-        if (!httpRes.error.empty())
-        {
-            result.error = httpRes.error;
-            return result;
-        }
-        if (httpRes.statusCode < 200 || httpRes.statusCode >= 300)
-        {
-            result.error = "HTTP " + std::to_string(httpRes.statusCode);
-            return result;
-        }
+        return parseModelsResponse(profile, base, httpRes, freeOnly, maxFreeModels);
+    }
 
-        auto parsed = nlohmann::json::parse(httpRes.body, nullptr, false);
-        if (parsed.is_discarded() || !parsed.is_object())
+    coro::task<ModelDiscoveryResult> ModelDiscovery::fetchModelsAsync(
+      ProviderProfile const & profile,
+      IHttpTransport & transport,
+      io::CancellationToken const & cancellation,
+      bool freeOnly,
+      std::size_t maxFreeModels)
+    {
+        HttpRequest req;
+        std::string base;
+        std::string err;
+        if (!buildModelsRequest(profile, req, base, err))
         {
-            result.error = "Invalid JSON response from models endpoint";
-            return result;
+            ModelDiscoveryResult result;
+            result.error = std::move(err);
+            co_return result;
         }
-
-        if (!parsed.contains("data") || !parsed["data"].is_array())
-        {
-            result.error = "Response missing 'data' array";
-            return result;
-        }
-
-        bool const localEndpoint = isLocalEndpoint(base);
-        bool const filterFreeOnly =
-          freeOnly || (isOpenRouterEndpoint(base) && profile.apiKey.empty());
-        for (auto const & entry : parsed["data"])
-        {
-            if (!entry.is_object())
-            {
-                continue;
-            }
-            ModelMetadata meta = parseModelMetadata(entry, localEndpoint);
-            if (meta.id.empty())
-            {
-                continue;
-            }
-            if (filterFreeOnly && !meta.isFree)
-            {
-                continue;
-            }
-            result.models.push_back(meta.id);
-            result.metadata.push_back(std::move(meta));
-            if (filterFreeOnly && result.models.size() >= maxFreeModels)
-            {
-                break;
-            }
-        }
-
-        result.success = true;
-        return result;
+        HttpResponse const httpRes = co_await transport.getJsonAsync(req, cancellation);
+        co_return parseModelsResponse(profile, base, httpRes, freeOnly, maxFreeModels);
     }
 } // namespace gladius::agent

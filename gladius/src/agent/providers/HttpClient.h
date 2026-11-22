@@ -2,6 +2,7 @@
 
 #include "../../io/CancellationToken.h"
 
+#include <coro/coro.hpp>
 #include <functional>
 #include <string>
 #include <vector>
@@ -72,9 +73,29 @@ namespace gladius::agent
         postSse(HttpRequest const & request,
                 SseEventCallback onEvent,
                 io::CancellationToken const & cancellation) = 0;
+
+        [[nodiscard]] virtual coro::task<HttpResponse>
+        getJsonAsync(HttpRequest const & request, io::CancellationToken const & cancellation)
+        {
+            co_return getJson(request, cancellation);
+        }
+
+        [[nodiscard]] virtual coro::task<HttpResponse>
+        postJsonAsync(HttpRequest const & request, io::CancellationToken const & cancellation)
+        {
+            co_return postJson(request, cancellation);
+        }
+
+        [[nodiscard]] virtual coro::task<HttpResponse>
+        postSseAsync(HttpRequest const & request,
+                     SseEventCallback onEvent,
+                     io::CancellationToken const & cancellation)
+        {
+            co_return postSse(request, std::move(onEvent), cancellation);
+        }
     };
 
-    /// @brief libcurl-backed HTTPS + SSE transport for native builds
+    /// @brief libcurl-backed HTTPS + SSE transport for native builds (Fetch API on Emscripten)
     class CurlHttpTransport final : public IHttpTransport
     {
       public:
@@ -90,5 +111,18 @@ namespace gladius::agent
         postSse(HttpRequest const & request,
                 SseEventCallback onEvent,
                 io::CancellationToken const & cancellation) override;
+
+        [[nodiscard]] coro::task<HttpResponse>
+        getJsonAsync(HttpRequest const & request,
+                     io::CancellationToken const & cancellation) override;
+
+        [[nodiscard]] coro::task<HttpResponse>
+        postJsonAsync(HttpRequest const & request,
+                      io::CancellationToken const & cancellation) override;
+
+        [[nodiscard]] coro::task<HttpResponse>
+        postSseAsync(HttpRequest const & request,
+                     SseEventCallback onEvent,
+                     io::CancellationToken const & cancellation) override;
     };
 } // namespace gladius::agent

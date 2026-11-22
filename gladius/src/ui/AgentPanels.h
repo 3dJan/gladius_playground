@@ -24,11 +24,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <coro/coro.hpp>
+#include <coroutine>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -131,6 +134,16 @@ namespace gladius::ui
                              bool freeOnly = false,
                              bool autoAddToProfile = false);
         void pollModelFetch();
+#ifdef __EMSCRIPTEN__
+        coro::task<void> runModelFetchWeb(agent::ProviderProfile profileCopy,
+                                          bool freeOnly,
+                                          bool autoAddToProfile);
+        coro::task<void> runAgentWeb(std::vector<agent::ModelSelection> selections,
+                                     std::vector<agent::ProviderProfile> profilesCopy,
+                                     agent::ProviderConfig legacyCfg,
+                                     int legacyProviderIdx,
+                                     std::string promptForKnowledge);
+#endif
 
         bool m_visible = false;
         bool m_showSettings = false;
@@ -203,6 +216,11 @@ namespace gladius::ui
 
         std::atomic<bool> m_running{false};
         std::thread m_workerThread;
+#ifdef __EMSCRIPTEN__
+        std::optional<coro::task<void>> m_webModelFetchTask;
+        std::optional<coro::task<void>> m_webRunTask;
+        std::coroutine_handle<> m_webConfirmHandle;
+#endif
 
         // Confirmation handshake between worker thread and UI thread
         std::mutex m_confirmMutex;
