@@ -1,6 +1,9 @@
 #include "agent/AgentLoop.h"
+#include "agent/KnowledgeStore.h"
 #include "agent/SkillLoader.h"
+#include "agent/providers/FallbackProvider.h"
 
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <chrono>
 #include <queue>
@@ -368,6 +371,68 @@ namespace gladius::agent::tests
         }
         EXPECT_TRUE(sawImage);
         EXPECT_FALSE(sawBase64Text);
+    }
+
+    TEST(FallbackProvider, Complete_WhenPrimaryFails_FallsBackToSecondary)
+    {
+        // Arrange
+        auto primary = std::make_unique<ScriptedProvider>();
+        primary->responses.push(CompletionResponse{{}, {}, "", false, "HTTP 429 rate limit"});
+        auto secondary = std::make_unique<ScriptedProvider>();
+        secondary->responses.push(CompletionResponse{"Recovered via fallback", {}, "stop", true, ""});
+
+        std::vector<FallbackProvider::Candidate> candidates;
+        candidates.push_back(FallbackProvider::Candidate{"primary", std::move(primary)});
+        candidates.push_back(FallbackProvider::Candidate{"secondary", std::move(secondary)});
+        FallbackProvider fallback(std::move(candidates));
+
+        CompletionRequest req;
+        io::CancellationToken cancel;
+
+        // Act
+        auto const resp = coro::sync_wait(fallback.complete(req, nullptr, cancel));
+
+        // Assert
+        EXPECT_TRUE(resp.success);
+        EXPECT_EQ(resp.text, "Recovered via fallback");
+    }
+
+    TEST(KnowledgeStore, StoreSearchUpdateDelete_PersistsAndRanksResults)
+    {
+        // Arrange
+        std::filesystem::path const tmpPath =
+          std::filesystem::temp_directory_path() / "gladius_test_knowledge.json";
+        std::error_code ec;
+        std::filesystem::remove(tmpPath, ec);
+
+        KnowledgeStore store(tmpPath);
+        auto const k1 = store.store(
+          "Gyroid wall thickness",
+          "lattices",
+          {"gyroid", "fdm", "wall"},
+          "Keep gyroid minimum wall >= 1.2mm for 0.4mm nozzle FDM prints.");
+        (void) store.store(
+          "Gear tooth clearance",
+          "mechanical",
+          {"gear", "clearance"},
+          "Use 0.25mm radial backlash clearance for printed spur gears.");
+
+        // Act
+        auto const hits = store.search("gyroid fdm", "", 5);
+        ASSERT_FALSE(hits.empty());
+        EXPECT_EQ(hits[0].id, k1);
+
+        ASSERT_TRUE(store.update(k1, "", "", {}, "Keep gyroid wall >= 1.4mm for strength."));
+
+        KnowledgeStore reloaded(tmpPath);
+        ASSERT_TRUE(reloaded.load());
+        auto const reloadedHits = reloaded.search("gyroid", "", 5);
+
+        // Assert
+        ASSERT_EQ(reloadedHits.size(), 1u);
+        EXPECT_EQ(reloadedHits[0].summary, "Keep gyroid wall >= 1.4mm for strength.");
+        EXPECT_TRUE(reloaded.remove(k1));
+        std::filesystem::remove(tmpPath, ec);
     }
 
     TEST(AgentLoop, Run_AutonomousModeHesitatesWithoutTools_NudgesAndCompletes)

@@ -55,6 +55,31 @@ namespace gladius::design
         return "ClarifyRequirements";
     }
 
+    [[nodiscard]] inline DesignPhase designPhaseFromString(std::string const & str) noexcept
+    {
+        if (str == "DecomposeFunctions")
+            return DesignPhase::DecomposeFunctions;
+        if (str == "GenerateSolutionPrinciples")
+            return DesignPhase::GenerateSolutionPrinciples;
+        if (str == "BuildSystemConcepts")
+            return DesignPhase::BuildSystemConcepts;
+        if (str == "EvaluateConcepts")
+            return DesignPhase::EvaluateConcepts;
+        if (str == "InstantiateEnvelopes")
+            return DesignPhase::InstantiateEnvelopes;
+        if (str == "DevelopComponents")
+            return DesignPhase::DevelopComponents;
+        if (str == "IntegrateSystem")
+            return DesignPhase::IntegrateSystem;
+        if (str == "Validate")
+            return DesignPhase::Validate;
+        if (str == "Refine")
+            return DesignPhase::Refine;
+        if (str == "Complete")
+            return DesignPhase::Complete;
+        return DesignPhase::ClarifyRequirements;
+    }
+
     enum class FidelityLevel
     {
         Symbolic,
@@ -79,6 +104,17 @@ namespace gladius::design
         return "symbolic";
     }
 
+    [[nodiscard]] inline FidelityLevel fidelityLevelFromString(std::string const & str) noexcept
+    {
+        if (str == "envelope")
+            return FidelityLevel::Envelope;
+        if (str == "structural")
+            return FidelityLevel::Structural;
+        if (str == "detailed")
+            return FidelityLevel::Detailed;
+        return FidelityLevel::Symbolic;
+    }
+
     enum class DesignStatus
     {
         Proposed,
@@ -86,6 +122,33 @@ namespace gladius::design
         Frozen,
         Rejected
     };
+
+    [[nodiscard]] inline char const * toString(DesignStatus status) noexcept
+    {
+        switch (status)
+        {
+        case DesignStatus::Proposed:
+            return "proposed";
+        case DesignStatus::Active:
+            return "active";
+        case DesignStatus::Frozen:
+            return "frozen";
+        case DesignStatus::Rejected:
+            return "rejected";
+        }
+        return "proposed";
+    }
+
+    [[nodiscard]] inline DesignStatus designStatusFromString(std::string const & str) noexcept
+    {
+        if (str == "active")
+            return DesignStatus::Active;
+        if (str == "frozen")
+            return DesignStatus::Frozen;
+        if (str == "rejected")
+            return DesignStatus::Rejected;
+        return DesignStatus::Proposed;
+    }
 
     enum class DesignNodeType
     {
@@ -95,6 +158,37 @@ namespace gladius::design
         Component,
         Feature
     };
+
+    [[nodiscard]] inline char const * toString(DesignNodeType type) noexcept
+    {
+        switch (type)
+        {
+        case DesignNodeType::System:
+            return "system";
+        case DesignNodeType::FunctionGroup:
+            return "function_group";
+        case DesignNodeType::Function:
+            return "function";
+        case DesignNodeType::Component:
+            return "component";
+        case DesignNodeType::Feature:
+            return "feature";
+        }
+        return "function";
+    }
+
+    [[nodiscard]] inline DesignNodeType designNodeTypeFromString(std::string const & str) noexcept
+    {
+        if (str == "system")
+            return DesignNodeType::System;
+        if (str == "function_group")
+            return DesignNodeType::FunctionGroup;
+        if (str == "component")
+            return DesignNodeType::Component;
+        if (str == "feature")
+            return DesignNodeType::Feature;
+        return DesignNodeType::Function;
+    }
 
     struct Requirement
     {
@@ -143,6 +237,7 @@ namespace gladius::design
         Evaluation evaluation;
         uint32_t modelResourceId = 0;
         std::vector<std::byte> previewPng;
+        std::string userFeedback;
     };
 
     struct DesignNode
@@ -164,5 +259,6 @@ namespace gladius::design
         Evaluation evaluation;
         bool active = false;
         std::vector<std::byte> previewPng;
+        std::string userFeedback;
     };
 } // namespace gladius::design

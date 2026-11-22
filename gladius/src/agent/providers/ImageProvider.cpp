@@ -1,5 +1,7 @@
 #include "ImageProvider.h"
 
+#include "../Conversation.h"
+
 #include <array>
 
 namespace gladius::agent
@@ -23,41 +25,6 @@ namespace gladius::agent
             return endpoint + "/images/generations";
         }
     } // namespace
-
-    std::vector<std::byte> decodeBase64(std::string const & encoded)
-    {
-        std::array<int, 256> table{};
-        table.fill(-1);
-        for (int i = 0; i < 64; ++i)
-        {
-            static constexpr char const kAlphabet[] =
-              "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            table[static_cast<unsigned char>(kAlphabet[i])] = i;
-        }
-
-        std::vector<std::byte> out;
-        int val = 0;
-        int valb = -8;
-        for (unsigned char c : encoded)
-        {
-            if (table[c] == -1)
-            {
-                if (c == '=')
-                {
-                    break;
-                }
-                continue;
-            }
-            val = (val << 6) + table[c];
-            valb += 6;
-            if (valb >= 0)
-            {
-                out.push_back(static_cast<std::byte>((val >> valb) & 0xFF));
-                valb -= 8;
-            }
-        }
-        return out;
-    }
 
     OpenAiImageProvider::OpenAiImageProvider(ProviderConfig config,
                                              std::shared_ptr<IHttpTransport> transport)

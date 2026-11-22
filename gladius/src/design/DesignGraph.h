@@ -28,6 +28,22 @@ namespace gladius::design
                                    std::string category = "functional",
                                    bool mandatory = true);
 
+        bool updateRequirement(std::string const & id,
+                               std::string description,
+                               std::string category,
+                               bool mandatory,
+                               bool trackUserChange = true);
+
+        bool removeRequirement(std::string const & id, bool trackUserChange = true);
+
+        void recordUserAddedRequirement(std::string const & id);
+
+        [[nodiscard]] std::vector<std::string> consumePendingRequirementChanges();
+        [[nodiscard]] bool hasPendingRequirementChanges() const noexcept
+        {
+            return !m_pendingRequirementChanges.empty();
+        }
+
         std::string addNode(DesignNodeType type,
                             std::string name,
                             std::string const & parentNodeId = "",
@@ -48,6 +64,8 @@ namespace gladius::design
         bool setVariantEvaluation(std::string const & variantId, Evaluation eval);
         bool setVariantPreview(std::string const & variantId, std::vector<std::byte> pngBytes);
         bool setConfigurationPreview(std::string const & configId, std::vector<std::byte> pngBytes);
+        bool setVariantFeedback(std::string const & variantId, std::string feedback);
+        bool setConfigurationFeedback(std::string const & configId, std::string feedback);
 
         std::string createConfiguration(std::string name,
                                         std::unordered_map<std::string, std::string> selectedVariants);
@@ -83,6 +101,7 @@ namespace gladius::design
         [[nodiscard]] std::optional<Configuration> activeConfiguration() const;
 
         [[nodiscard]] nlohmann::json toJson() const;
+        bool fromJson(nlohmann::json const & json);
         [[nodiscard]] std::string summarize() const;
 
         void clear();
@@ -93,6 +112,7 @@ namespace gladius::design
         std::map<std::string, DesignNode> m_nodes;
         std::map<std::string, DesignVariant> m_variants;
         std::map<std::string, Configuration> m_configurations;
+        std::vector<std::string> m_pendingRequirementChanges;
         std::size_t m_nextReqId = 1;
         std::size_t m_nextNodeId = 1;
         std::size_t m_nextVariantId = 1;

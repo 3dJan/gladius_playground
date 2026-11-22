@@ -19,6 +19,7 @@ namespace gladius::tools
         std::size_t functionCount = 0;
         std::chrono::system_clock::time_point createdAt;
         std::vector<std::byte> previewPng;
+        std::string userFeedback;
     };
 
     /// @brief Manages named Assembly checkpoints for design-level branching and rollback
@@ -43,6 +44,9 @@ namespace gladius::tools
 
         /// @brief Check whether a checkpoint with the given ID exists
         [[nodiscard]] bool hasCheckpoint(std::string const & id) const;
+
+        /// @brief Attach or update user feedback/comments on a checkpoint
+        bool setFeedback(std::string const & id, std::string feedback);
 
         /// @brief Remove all stored checkpoints
         void clear();

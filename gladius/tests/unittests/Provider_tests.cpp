@@ -1,5 +1,8 @@
+#include "agent/CredentialStore.h"
 #include "agent/providers/AnthropicProvider.h"
+#include "agent/providers/ModelDiscovery.h"
 #include "agent/providers/OpenAiProvider.h"
+#include "agent/providers/ProviderProfile.h"
 
 #include <gtest/gtest.h>
 #include <utility>
@@ -15,6 +18,13 @@ namespace gladius::agent::tests
             std::vector<std::pair<std::string, std::string>> sseEvents;
             HttpResponse nextResponse{200, "{}", "", false};
             HttpRequest lastRequest;
+
+            HttpResponse getJson(HttpRequest const & request,
+                                 io::CancellationToken const & /*cancellation*/) override
+            {
+                lastRequest = request;
+                return nextResponse;
+            }
 
             HttpResponse postJson(HttpRequest const & request,
                                   io::CancellationToken const & /*cancellation*/) override
@@ -136,5 +146,114 @@ namespace gladius::agent::tests
         EXPECT_EQ(res.toolCalls[0].id, "toolu_1");
         EXPECT_EQ(res.toolCalls[0].name, "validate_model");
         EXPECT_TRUE(res.toolCalls[0].arguments.value("strict", false));
+    }
+
+    TEST(ModelDiscovery, FetchModels_OpenRouterWithoutApiKey_ReturnsOnlyFreeModels)
+    {
+        // Arrange
+        MockHttpTransport mock;
+        mock.nextResponse = HttpResponse{
+          200,
+          R"({"data":[
+                {"id":"openai/gpt-4o","pricing":{"prompt":"0.000005","completion":"0.000015"}},
+                {"id":"meta-llama/llama-3.3-70b-instruct:free","pricing":{"prompt":"0","completion":"0"}},
+                {"id":"google/gemma-3-27b-it:free","pricing":{"prompt":"0","completion":"0"}}
+              ]})",
+          "",
+          false};
+
+        ProviderProfile prof{
+          "or", "OpenRouter", ApiType::OpenAiCompatible, "https://openrouter.ai/api/v1", {}, ""};
+        io::CancellationToken cancel;
+
+        // Act
+        auto const res = ModelDiscovery::fetchModels(prof, mock, cancel);
+
+        // Assert
+        EXPECT_TRUE(res.success);
+        ASSERT_EQ(res.models.size(), 2u);
+        EXPECT_EQ(res.models[0], "meta-llama/llama-3.3-70b-instruct:free");
+        EXPECT_EQ(res.models[1], "google/gemma-3-27b-it:free");
+    }
+
+    TEST(ModelDiscovery, FetchModels_OpenRouterWithApiKeyAndFreeOnly_ExcludesPaidModelsAndParsesMetadata)
+    {
+        // Arrange
+        MockHttpTransport mock;
+        mock.nextResponse = HttpResponse{
+          200,
+          R"({"data":[
+                {"id":"openai/gpt-4o","context_length":128000,
+                 "architecture":{"input_modalities":["text","image"]},
+                 "pricing":{"prompt":"0.0000025","completion":"0.00001"}},
+                {"id":"google/gemma-3-27b-it:free","context_length":96000,
+                 "architecture":{"input_modalities":["text","image"]},
+                 "pricing":{"prompt":"0","completion":"0"}}
+              ]})",
+          "",
+          false};
+
+        ProviderProfile prof{
+          "or",
+          "OpenRouter",
+          ApiType::OpenAiCompatible,
+          "https://openrouter.ai/api/v1",
+          {},
+          "sk-or-test"};
+        io::CancellationToken cancel;
+
+        // Act
+        auto const freeRes = ModelDiscovery::fetchModels(prof, mock, cancel, true);
+        auto const allRes = ModelDiscovery::fetchModels(prof, mock, cancel, false);
+
+        // Assert
+        ASSERT_TRUE(freeRes.success);
+        ASSERT_EQ(freeRes.models.size(), 1u);
+        EXPECT_EQ(freeRes.models[0], "google/gemma-3-27b-it:free");
+        EXPECT_TRUE(freeRes.metadata[0].isFree);
+        EXPECT_TRUE(freeRes.metadata[0].supportsVision);
+        EXPECT_EQ(freeRes.metadata[0].contextLength, 96000);
+
+        ASSERT_TRUE(allRes.success);
+        ASSERT_EQ(allRes.models.size(), 2u);
+        EXPECT_NEAR(allRes.metadata[0].promptPricePerMillion, 2.5, 1e-6);
+        EXPECT_NEAR(allRes.metadata[0].completionPricePerMillion, 10.0, 1e-6);
+        EXPECT_TRUE(allRes.metadata[0].supportsVision);
+    }
+
+    TEST(ProviderProfile, IsModelAvailable_LocalAndApiKeyAndFreeOpenRouter_FiltersCorrectly)
+    {
+        // Arrange
+        ProviderProfile local{
+          "loc", "Local", ApiType::OpenAiCompatible, "http://localhost:11434/v1", {"qwen2.5"}, ""};
+        ProviderProfile remoteNoKey{
+          "rem", "Remote", ApiType::OpenAiCompatible, "https://api.openai.com/v1", {"gpt-4o"}, ""};
+        ProviderProfile orNoKey{
+          "or", "OpenRouter", ApiType::OpenAiCompatible, "https://openrouter.ai/api/v1", {}, ""};
+
+        // Assert
+        EXPECT_TRUE(local.isModelAvailable("qwen2.5"));
+        EXPECT_FALSE(remoteNoKey.isModelAvailable("gpt-4o"));
+        EXPECT_TRUE(orNoKey.isModelAvailable("google/gemma-3-27b-it:free"));
+        EXPECT_FALSE(orNoKey.isModelAvailable("openai/gpt-4o"));
+    }
+
+    TEST(OsCredentialStore, StoreLoadDelete_RoundTripsSecret)
+    {
+        // Arrange
+        OsCredentialStore store;
+        std::string const service = "gladius.unittest";
+        std::string const account = "test_openrouter_key";
+        std::string const secret = "sk-or-v1-test-secret-12345";
+
+        // Act
+        ASSERT_TRUE(store.storeSecret(service, account, secret));
+        auto const loaded = store.loadSecret(service, account);
+        ASSERT_TRUE(loaded.has_value());
+        EXPECT_EQ(*loaded, secret);
+
+        // Cleanup & verify delete
+        EXPECT_TRUE(store.deleteSecret(service, account));
+        EXPECT_FALSE(store.loadSecret(service, account).has_value());
     }
 } // namespace gladius::agent::tests

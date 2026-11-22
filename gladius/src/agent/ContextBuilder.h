@@ -14,14 +14,19 @@ namespace gladius::agent
     struct DesignContextSnapshot
     {
         AutonomyLevel autonomy = AutonomyLevel::AskAtMajorDecisions;
+        bool isIncremental = false;
         std::string designPhase = "ClarifyRequirements";
         std::string requirementsSummary;
+        std::string requirementChangesSummary;
+        std::string existingModelSummary;
         std::string designGraphSummary;
         std::string activeConfigurationSummary;
         std::string manufacturingConstraints;
         std::string relevantCatalogueSummary;
         std::string availableSkillsSummary;
         std::string validationSummary;
+        std::string todoSummary;
+        std::string knowledgeSummary;
     };
 
     /// @brief Builds provider-neutral CompletionRequests while respecting privacy settings

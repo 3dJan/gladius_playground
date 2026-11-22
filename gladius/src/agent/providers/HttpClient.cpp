@@ -55,9 +55,10 @@ namespace gladius::agent
             return 0;
         }
 
-        HttpResponse performCurlPost(HttpRequest const & request,
-                                     SseStreamParser * sseParser,
-                                     io::CancellationToken const & cancellation)
+        HttpResponse performCurlRequest(HttpRequest const & request,
+                                        bool isGet,
+                                        SseStreamParser * sseParser,
+                                        io::CancellationToken const & cancellation)
         {
             HttpResponse response;
             if (cancellation.isCancelled())
@@ -85,9 +86,16 @@ namespace gladius::agent
             writeCtx.sseParser = sseParser;
 
             curl_easy_setopt(curl, CURLOPT_URL, request.url.c_str());
-            curl_easy_setopt(curl, CURLOPT_POST, 1L);
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request.body.data());
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
+            if (isGet)
+            {
+                curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+            }
+            else
+            {
+                curl_easy_setopt(curl, CURLOPT_POST, 1L);
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request.body.data());
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
+            }
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerList);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &curlWriteCallback);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &writeCtx);
@@ -225,11 +233,23 @@ namespace gladius::agent
 #endif
     }
 
+    HttpResponse CurlHttpTransport::getJson(HttpRequest const & request,
+                                            io::CancellationToken const & cancellation)
+    {
+#if !defined(__EMSCRIPTEN__)
+        return performCurlRequest(request, true, nullptr, cancellation);
+#else
+        (void) request;
+        (void) cancellation;
+        return HttpResponse{0, "", "Browser fetch transport not yet wired", false};
+#endif
+    }
+
     HttpResponse CurlHttpTransport::postJson(HttpRequest const & request,
                                              io::CancellationToken const & cancellation)
     {
 #if !defined(__EMSCRIPTEN__)
-        return performCurlPost(request, nullptr, cancellation);
+        return performCurlRequest(request, false, nullptr, cancellation);
 #else
         (void) request;
         (void) cancellation;
@@ -243,7 +263,7 @@ namespace gladius::agent
     {
 #if !defined(__EMSCRIPTEN__)
         SseStreamParser parser(std::move(onEvent));
-        return performCurlPost(request, &parser, cancellation);
+        return performCurlRequest(request, false, &parser, cancellation);
 #else
         (void) request;
         (void) onEvent;

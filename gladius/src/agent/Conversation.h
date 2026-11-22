@@ -81,10 +81,16 @@ namespace gladius::agent
             return m_messages.size();
         }
 
+        [[nodiscard]] nlohmann::json toJson() const;
+        bool fromJson(nlohmann::json const & json);
+
       private:
         std::vector<Message> m_messages;
     };
 
     /// @brief Encode binary bytes to standard Base64 string
     [[nodiscard]] std::string encodeBase64(std::vector<std::byte> const & data);
+
+    /// @brief Decode standard Base64 string to binary bytes
+    [[nodiscard]] std::vector<std::byte> decodeBase64(std::string const & encoded);
 } // namespace gladius::agent

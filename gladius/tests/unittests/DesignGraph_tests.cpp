@@ -1,5 +1,6 @@
 #include "design/DesignCatalogue.h"
 #include "design/DesignGraph.h"
+#include "design/TodoStore.h"
 
 #include <gtest/gtest.h>
 
@@ -66,5 +67,71 @@ namespace gladius::design::tests
         ASSERT_EQ(beam.size(), 2u);
         EXPECT_EQ(beam[0].id, "c3");
         EXPECT_EQ(beam[1].id, "c2");
+    }
+
+    TEST(DesignGraph, UpdateAndRemoveRequirement_TracksPendingChangesAndClearsOnConsume)
+    {
+        // Arrange
+        DesignGraph graph;
+        auto const r1 = graph.addRequirement("Height >= 50mm", "dimensions", true);
+        auto const r2 = graph.addRequirement("PLA printable", "manufacturing", true);
+
+        // Act
+        ASSERT_TRUE(graph.updateRequirement(r1, "Height >= 60mm", "dimensions", true, true));
+        ASSERT_TRUE(graph.removeRequirement(r2, true));
+        EXPECT_TRUE(graph.hasPendingRequirementChanges());
+        auto const changes = graph.consumePendingRequirementChanges();
+
+        // Assert
+        ASSERT_EQ(changes.size(), 2u);
+        EXPECT_FALSE(graph.hasPendingRequirementChanges());
+        ASSERT_EQ(graph.requirements().size(), 1u);
+        EXPECT_EQ(graph.requirements()[0].description, "Height >= 60mm");
+    }
+
+    TEST(DesignGraph, ToAndFromJson_RoundTripsFeedbackAndConfigurations)
+    {
+        // Arrange
+        DesignGraph graph;
+        auto const n1 = graph.addNode(DesignNodeType::Component, "Base");
+        auto const v1 = graph.createVariant(n1, "Hex", "Strong", FidelityLevel::Structural);
+        ASSERT_TRUE(graph.setVariantFeedback(v1, "Looks sturdy"));
+        auto const c1 = graph.createConfiguration("Config 1", {{n1, v1}});
+        ASSERT_TRUE(graph.setConfigurationFeedback(c1, "Prefer thinner walls"));
+        ASSERT_TRUE(graph.activateConfiguration(c1));
+
+        // Act
+        nlohmann::json const serialized = graph.toJson();
+        DesignGraph restored;
+        ASSERT_TRUE(restored.fromJson(serialized));
+
+        // Assert
+        ASSERT_EQ(restored.variants().size(), 1u);
+        EXPECT_EQ(restored.variants().at(v1).userFeedback, "Looks sturdy");
+        ASSERT_TRUE(restored.activeConfiguration().has_value());
+        EXPECT_EQ(restored.activeConfiguration()->userFeedback, "Prefer thinner walls");
+    }
+
+    TEST(TodoStore, AddUpdateAndJson_RoundTripsChecklistState)
+    {
+        // Arrange
+        TodoStore store;
+        auto const id = store.addItem(
+          "Build base",
+          "Create mounting flange",
+          {ChecklistEntry{"Sketch", false}, ChecklistEntry{"Validate", false}});
+
+        // Act
+        ASSERT_TRUE(store.updateItem(id, TodoStatus::InProgress));
+        ASSERT_TRUE(store.toggleChecklistEntry(id, 0, true));
+        nlohmann::json const j = store.toJson();
+        TodoStore restored;
+        ASSERT_TRUE(restored.fromJson(j));
+
+        // Assert
+        ASSERT_EQ(restored.items().size(), 1u);
+        EXPECT_EQ(restored.items()[0].status, TodoStatus::InProgress);
+        EXPECT_TRUE(restored.items()[0].checklist[0].checked);
+        EXPECT_FALSE(restored.items()[0].checklist[1].checked);
     }
 } // namespace gladius::design::tests

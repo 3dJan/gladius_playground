@@ -224,6 +224,18 @@ namespace gladius::agent
         {
             httpReq.headers.emplace_back("Authorization: Bearer " + m_config.apiKey);
         }
+        if (m_config.endpoint.find("openrouter.ai") != std::string::npos)
+        {
+            httpReq.headers.emplace_back("HTTP-Referer: https://github.com/3MFConsortium/gladius");
+            httpReq.headers.emplace_back("X-Title: Gladius Design Agent");
+        }
+        for (auto const & h : m_config.extraHeaders)
+        {
+            if (!h.empty())
+            {
+                httpReq.headers.emplace_back(h);
+            }
+        }
         httpReq.body = buildPayload(request).dump();
 
         if (!m_config.stream)

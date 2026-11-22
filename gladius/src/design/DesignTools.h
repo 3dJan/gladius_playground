@@ -2,6 +2,8 @@
 
 #include "DesignCatalogue.h"
 #include "DesignGraph.h"
+#include "TodoStore.h"
+#include "../agent/KnowledgeStore.h"
 #include "../agent/SkillLoader.h"
 #include "../tools/CheckpointManager.h"
 #include "../tools/ToolRegistry.h"
@@ -39,6 +41,8 @@ namespace gladius::design
         ModelValidationCallback validateModel;
         std::function<void()> onDocumentModified;
         agent::SkillLoader * skills = nullptr;
+        TodoStore * todos = nullptr;
+        agent::KnowledgeStore * knowledge = nullptr;
     };
 
     /// @brief Register all canonical design-space, lifecycle, evaluation, and viewport tools

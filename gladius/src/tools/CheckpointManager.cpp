@@ -95,6 +95,19 @@ namespace gladius::tools
         });
     }
 
+    bool CheckpointManager::setFeedback(std::string const & id, std::string feedback)
+    {
+        auto it = std::find_if(m_entries.begin(), m_entries.end(), [&](Entry const & entry) {
+            return entry.summary.id == id;
+        });
+        if (it == m_entries.end())
+        {
+            return false;
+        }
+        it->summary.userFeedback = std::move(feedback);
+        return true;
+    }
+
     void CheckpointManager::clear()
     {
         m_entries.clear();

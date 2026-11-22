@@ -213,6 +213,20 @@ namespace gladius::ui
         m_mainView.setFileDropCallback(
           [&](std::filesystem::path const & path, ImVec2 screenPos)
           {
+              std::string ext = path.extension().string();
+              std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+                  return static_cast<char>(std::tolower(c));
+              });
+              if (m_agentPanels.isVisible()
+                  && (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp"))
+              {
+                  (void) m_agentPanels.attachImageFile(path);
+                  return;
+              }
+              if (m_agentPanels.isDocumentLocked())
+              {
+                  return;
+              }
               if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
                   !m_doc->isLoadingInProgress())
               {
@@ -664,6 +678,20 @@ namespace gladius::ui
         m_mainView.setFileDropCallback(
           [&](std::filesystem::path const & path, ImVec2 screenPos)
           {
+              std::string ext = path.extension().string();
+              std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+                  return static_cast<char>(std::tolower(c));
+              });
+              if (m_agentPanels.isVisible()
+                  && (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp"))
+              {
+                  (void) m_agentPanels.attachImageFile(path);
+                  return;
+              }
+              if (m_agentPanels.isDocumentLocked())
+              {
+                  return;
+              }
               if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
                   !m_doc->isLoadingInProgress())
               {
@@ -1726,7 +1754,9 @@ namespace gladius::ui
                 // Render library browser only when the model editor is visible.
                 if (m_modelEditor.isVisible())
                 {
+                    ImGui::BeginDisabled(m_agentPanels.isDocumentLocked());
                     m_modelEditor.renderLibraryBrowser();
+                    ImGui::EndDisabled();
                 }
 
                 if (m_shortcutSettingsDialog.isVisible())
@@ -1999,13 +2029,16 @@ namespace gladius::ui
                   return;
               }
 
+              bool const docLocked = m_agentPanels.isDocumentLocked();
               // Process model editor shortcuts if visible and hovered
-              if (m_modelEditor.isHovered())
+              if (!docLocked && m_modelEditor.isHovered())
               {
                   processShortcuts(ShortcutContext::ModelEditor);
               }
 
+              ImGui::BeginDisabled(docLocked);
               const auto parameterModifiedByModelEditor = m_modelEditor.showAndEdit();
+              ImGui::EndDisabled();
               // T047: Route parameter changes through throttle
               if (parameterModifiedByModelEditor)
               {
@@ -2109,8 +2142,8 @@ namespace gladius::ui
             }
             return;
         }
-        // Don't allow new model while loading is in progress
-        if (m_doc->isLoadingInProgress())
+        // Don't allow new model while loading or agent work is in progress
+        if (m_doc->isLoadingInProgress() || m_agentPanels.isDocumentLocked())
         {
             return;
         }
@@ -2131,6 +2164,7 @@ namespace gladius::ui
         m_currentAssemblyFileName.reset();
     m_asyncLoadState = AsyncLoadState::LoadingWithReset;
     m_doc->newFromTemplate();
+    m_agentPanels.onNewDocument();
     }
 
     void MainWindow::renderWindow()
@@ -2714,8 +2748,8 @@ namespace gladius::ui
             }
             return;
         }
-        // Don't allow opening while loading is in progress
-        if (m_doc->isLoadingInProgress())
+        // Don't allow opening while loading or agent work is in progress
+        if (m_doc->isLoadingInProgress() || m_agentPanels.isDocumentLocked())
         {
             return;
         }
@@ -2807,6 +2841,7 @@ namespace gladius::ui
         // Defer editor reset until the new Assembly has been loaded.
         m_asyncLoadState = AsyncLoadState::LoadingWithReset;
         m_doc->loadNonBlocking(filename);
+        m_agentPanels.onDocumentOpened(filename);
 
         // Add to recent files list
         addToRecentFiles(filename);
@@ -2833,6 +2868,7 @@ namespace gladius::ui
             return saveAs();
         }
         enqueueNativeSave(m_currentAssemblyFileName.value());
+        m_agentPanels.onDocumentSaved(m_currentAssemblyFileName.value());
         return true;
 #endif
     }

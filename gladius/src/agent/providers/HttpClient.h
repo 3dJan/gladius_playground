@@ -60,6 +60,12 @@ namespace gladius::agent
         virtual ~IHttpTransport() = default;
 
         [[nodiscard]] virtual HttpResponse
+        getJson(HttpRequest const & /*request*/, io::CancellationToken const & /*cancellation*/)
+        {
+            return HttpResponse{0, "", "GET not implemented", false};
+        }
+
+        [[nodiscard]] virtual HttpResponse
         postJson(HttpRequest const & request, io::CancellationToken const & cancellation) = 0;
 
         [[nodiscard]] virtual HttpResponse
@@ -73,6 +79,9 @@ namespace gladius::agent
     {
       public:
         CurlHttpTransport();
+
+        [[nodiscard]] HttpResponse
+        getJson(HttpRequest const & request, io::CancellationToken const & cancellation) override;
 
         [[nodiscard]] HttpResponse
         postJson(HttpRequest const & request, io::CancellationToken const & cancellation) override;

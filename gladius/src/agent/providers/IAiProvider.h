@@ -20,6 +20,7 @@ namespace gladius::agent
         int maxTokens = 4096;
         double temperature = 0.2;
         bool stream = true;
+        std::vector<std::string> extraHeaders;
     };
 
     /// @brief Provider-neutral completion request

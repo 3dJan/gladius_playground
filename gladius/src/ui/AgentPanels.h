@@ -5,12 +5,16 @@
 #include "../agent/ContextBuilder.h"
 #include "../agent/Conversation.h"
 #include "../agent/CredentialStore.h"
+#include "../agent/KnowledgeStore.h"
 #include "../agent/PermissionPolicy.h"
 #include "../agent/SkillLoader.h"
 #include "../agent/providers/IAiProvider.h"
+#include "../agent/providers/ModelDiscovery.h"
+#include "../agent/providers/ProviderProfile.h"
 #include "../design/DesignCatalogue.h"
 #include "../design/DesignGraph.h"
 #include "../design/DesignTools.h"
+#include "../design/TodoStore.h"
 #include "../io/CancellationToken.h"
 #include "../tools/CheckpointManager.h"
 #include "../tools/ToolExecutor.h"
@@ -21,6 +25,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -63,6 +68,22 @@ namespace gladius::ui
             m_visible = !m_visible;
         }
 
+        /// @brief True while the agent is actively executing and mutating the document
+        [[nodiscard]] bool isDocumentLocked() const noexcept
+        {
+            return m_running.load();
+        }
+
+        /// @brief Attach an image file (e.g. from drag-and-drop) to the pending prompt attachments
+        bool attachImageFile(std::filesystem::path const & path);
+
+        /// @brief Save/load agent state associated with the given .3mf document (sidecar/session)
+        void saveSessionState();
+        void loadSessionState();
+        void onNewDocument();
+        void onDocumentSaved(std::filesystem::path const & docPath);
+        void onDocumentOpened(std::filesystem::path const & docPath);
+
         /// @brief Render all visible agent, design-tree, variant-comparison, and settings panels
         void render();
 
@@ -79,6 +100,8 @@ namespace gladius::ui
             std::string filename;
             std::vector<std::byte> bytes;
             std::string mimeType = "image/png";
+            std::string comment;
+            std::string previewKey;
         };
 
         struct CachedTexture
@@ -104,6 +127,10 @@ namespace gladius::ui
         void renderDesignTreePanel();
         void renderVariantComparisonPanel();
         void renderProviderSettingsPanel();
+        void startModelFetch(std::string const & profileId,
+                             bool freeOnly = false,
+                             bool autoAddToProfile = false);
+        void pollModelFetch();
 
         bool m_visible = false;
         bool m_showSettings = false;
@@ -116,6 +143,7 @@ namespace gladius::ui
 
         design::DesignGraph m_graph;
         design::DesignCatalogue m_catalogue;
+        design::TodoStore m_todos;
         tools::TransactionManager m_transactions;
         tools::CheckpointManager m_checkpoints;
         tools::ToolRegistry m_registry;
@@ -128,14 +156,42 @@ namespace gladius::ui
         agent::AgentEventQueue m_eventQueue;
         agent::AgentLimits m_limits;
         agent::OsCredentialStore m_credentialStore;
+        agent::KnowledgeStore m_knowledge;
         agent::SkillLoader m_skills;
         io::CancellationToken m_cancellation;
 
-        int m_providerIndex = 0; // 0 = OpenAI-compatible, 1 = Anthropic
-        char m_endpointBuf[512] = "https://api.openai.com/v1";
-        char m_modelBuf[256] = "gpt-4o";
+        bool m_startFresh = true;
+        bool m_promptFocused = false;
+        int m_inspectedImageIndex = -1;
+
+        std::vector<agent::ProviderProfile> m_providerProfiles;
+        int m_editingProfileIndex = 0;
+        agent::ModelSelection m_primarySelection;
+        std::vector<agent::ModelSelection> m_fallbackSelections;
+        std::vector<std::string> m_selectedRecombineConfigs;
+
+        int m_providerIndex = 0; // legacy fallback
+        char m_endpointBuf[512] = "";
+        char m_modelBuf[256] = "";
         char m_apiKeyBuf[512] = "";
+
+        std::atomic<bool> m_modelFetchRunning{false};
+        std::thread m_modelFetchThread;
+        std::mutex m_modelFetchMutex;
+        bool m_modelFetchPendingApply = false;
+        bool m_modelFetchAutoAdd = false;
+        std::string m_modelFetchProfileId;
+        agent::ModelDiscoveryResult m_modelFetchResult;
+        std::string m_modelFetchStatus;
+        std::string m_queriedModelsProfileId;
+        std::vector<agent::ModelMetadata> m_queriedModels;
+        char m_modelFilterBuf[128] = "";
+        std::string m_credentialWarning;
         char m_promptBuf[2048] = "";
+        char m_newReqBuf[256] = "";
+        char m_newReqCatBuf[64] = "functional";
+        bool m_newReqMandatory = true;
+        std::size_t m_nextAttachmentId = 1;
 
         std::string m_streamingBuffer;
         std::string m_activeToolName;

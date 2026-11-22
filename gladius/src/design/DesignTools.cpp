@@ -892,5 +892,410 @@ namespace gladius::design
                   return {{"success", false}, {"error", ex.what()}};
               }
           });
+
+        registry.registerSyncTool(
+          {"hybridize_configurations",
+           "Recombine two existing system configurations into a new hybrid configuration by overriding selected node IDs.",
+           {{"type", "object"},
+            {"required", {"newName", "baseConfigId", "overrideConfigId", "overrideNodeIds"}},
+            {"properties",
+             {{"newName", {{"type", "string"}}},
+              {"baseConfigId", {{"type", "string"}}},
+              {"overrideConfigId", {{"type", "string"}}},
+              {"overrideNodeIds", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+              {"activate", {{"type", "boolean"}}}}}},
+           tools::ToolPolicy::DesignGraphModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              std::string const newName = args.value("newName", "");
+              std::string const baseId = args.value("baseConfigId", "");
+              std::string const overId = args.value("overrideConfigId", "");
+              auto const nodeIds = args.value("overrideNodeIds", std::vector<std::string>{});
+              if (newName.empty() || baseId.empty() || overId.empty())
+              {
+                  return {{"success", false},
+                          {"error", "newName, baseConfigId, and overrideConfigId are required"}};
+              }
+              auto const newId = ctx.graph.hybridizeConfigurations(newName, baseId, overId, nodeIds);
+              if (!newId.has_value())
+              {
+                  return {{"success", false}, {"error", "Base or override configuration not found"}};
+              }
+              if (args.value("activate", false))
+              {
+                  ctx.graph.activateConfiguration(*newId);
+              }
+              return {{"success", true}, {"configurationId", *newId}};
+          });
+
+        registry.registerSyncTool(
+          {"add_variant_feedback",
+           "Attach feedback or review comments to a design variant or configuration.",
+           {{"type", "object"},
+            {"required", {"targetId", "feedback"}},
+            {"properties",
+             {{"targetId", {{"type", "string"}}},
+              {"feedback", {{"type", "string"}}}}}},
+           tools::ToolPolicy::DesignGraphModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              std::string const targetId = args.value("targetId", "");
+              std::string const feedback = args.value("feedback", "");
+              if (targetId.empty())
+              {
+                  return {{"success", false}, {"error", "targetId is required"}};
+              }
+              if (ctx.graph.setVariantFeedback(targetId, feedback)
+                  || ctx.graph.setConfigurationFeedback(targetId, feedback)
+                  || ctx.checkpoints.setFeedback(targetId, feedback))
+              {
+                  return {{"success", true}, {"targetId", targetId}};
+              }
+              return {{"success", false}, {"error", "Target ID not found: " + targetId}};
+          });
+
+        registry.registerSyncTool(
+          {"score_component_reusability",
+           "Score a finished component/function for engineering quality and library reusability (0.0-1.0).",
+           {{"type", "object"},
+            {"required", {"componentName", "qualityScore", "reusabilityScore"}},
+            {"properties",
+             {{"componentName", {{"type", "string"}}},
+              {"qualityScore", {{"type", "number"}}},
+              {"reusabilityScore", {{"type", "number"}}},
+              {"rationale", {{"type", "string"}}},
+              {"suggestedCategory", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const & args) -> nlohmann::json {
+              double const quality = std::clamp(args.value("qualityScore", 0.0), 0.0, 1.0);
+              double const reusability = std::clamp(args.value("reusabilityScore", 0.0), 0.0, 1.0);
+              bool const recommendExport = (quality >= 0.75 && reusability >= 0.75);
+              return {{"success", true},
+                      {"componentName", args.value("componentName", "")},
+                      {"qualityScore", quality},
+                      {"reusabilityScore", reusability},
+                      {"recommendLibraryExport", recommendExport},
+                      {"suggestedCategory", args.value("suggestedCategory", "components")},
+                      {"rationale", args.value("rationale", "")}};
+          });
+
+        registry.registerSyncTool(
+          {"export_library_item",
+           "Non-destructively export a reusable function from the active document into the user 3MF library without modifying the open document.",
+           {{"type", "object"},
+            {"required", {"functionId", "category", "name", "description"}},
+            {"properties",
+             {{"functionId", {{"type", "integer"}}},
+              {"category", {{"type", "string"}}},
+              {"name", {{"type", "string"}}},
+              {"description", {{"type", "string"}}},
+              {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+              {"overwrite", {{"type", "boolean"}}}}}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.document || !ctx.document->getAssembly() || !ctx.document->get3mfModel())
+              {
+                  return {{"success", false}, {"error", "No active document"}};
+              }
+              uint32_t const functionId = args.value("functionId", 0u);
+              std::string const category = args.value("category", "");
+              std::string const name = args.value("name", "");
+              std::string const description = args.value("description", "");
+              bool const overwrite = args.value("overwrite", false);
+              if (functionId == 0 || category.empty() || name.empty())
+              {
+                  return {{"success", false},
+                          {"error", "functionId, category, and name are required"}};
+              }
+
+              auto const assembly = ctx.document->getAssembly();
+              if (assembly->getFunctions().find(functionId) == assembly->getFunctions().end())
+              {
+                  return {{"success", false},
+                          {"error", "Function ID not found in active document"}};
+              }
+
+              std::filesystem::path const targetDir = getUserLibraryDir() / category;
+              std::filesystem::path const targetPath = targetDir / (name + ".3mf");
+              std::error_code ec;
+              if (std::filesystem::exists(targetPath, ec) && !overwrite)
+              {
+                  return {{"success", false},
+                          {"error", "Library item already exists (set overwrite=true to replace)"}};
+              }
+
+              try
+              {
+                  std::filesystem::create_directories(targetDir, ec);
+                  std::filesystem::path const tempPath =
+                    std::filesystem::temp_directory_path()
+                    / ("gladius_lib_export_" + std::to_string(functionId) + ".3mf");
+
+                  ctx.document->update3mfModel();
+                  {
+                      auto writer = ctx.document->get3mfModel()->QueryWriter("3mf");
+                      writer->WriteToFile(tempPath.string());
+                  }
+
+                  auto wrapper = io::loadLib3mfScoped();
+                  auto exportedModel = wrapper->CreateModel();
+                  {
+                      auto reader = exportedModel->QueryReader("3mf");
+                      reader->ReadFromFile(tempPath.string());
+                  }
+
+                  io::LibraryMetadata meta;
+                  meta.libraryFunctions =
+                    io::serializeResourceIds({static_cast<Lib3MF_uint32>(functionId)});
+                  meta.libraryDescription = description;
+                  auto const tagsVec = args.value("tags", std::vector<std::string>{});
+                  for (std::size_t i = 0; i < tagsVec.size(); ++i)
+                  {
+                      if (i > 0)
+                      {
+                          meta.libraryTags += ",";
+                      }
+                      meta.libraryTags += tagsVec[i];
+                  }
+                  io::writeLibraryMetadata(exportedModel, meta);
+
+                  if (ctx.captureViewport)
+                  {
+                      auto pngBytes = ctx.captureViewport(256, 256, "iso");
+                      if (!pngBytes.empty())
+                      {
+                          std::vector<Lib3MF_uint8> buf(pngBytes.size());
+                          std::transform(pngBytes.begin(),
+                                         pngBytes.end(),
+                                         buf.begin(),
+                                         [](std::byte b) { return static_cast<Lib3MF_uint8>(b); });
+                          if (exportedModel->HasPackageThumbnailAttachment())
+                          {
+                              exportedModel->RemovePackageThumbnailAttachment();
+                          }
+                          auto thumb = exportedModel->CreatePackageThumbnailAttachment();
+                          thumb->ReadFromBuffer(buf);
+                      }
+                  }
+
+                  {
+                      auto writer = exportedModel->QueryWriter("3mf");
+                      writer->WriteToFile(targetPath.string());
+                  }
+                  std::filesystem::remove(tempPath, ec);
+
+                  return {{"success", true},
+                          {"category", category},
+                          {"name", name},
+                          {"path", targetPath.string()},
+                          {"functionId", functionId}};
+              }
+              catch (std::exception const & ex)
+              {
+                  return {{"success", false}, {"error", ex.what()}};
+              }
+          });
+
+        registry.registerSyncTool(
+          {"create_todo_list",
+           "Replace or initialize the planning todo list with structured items and optional checklists.",
+           {{"type", "object"},
+            {"required", {"items"}},
+            {"properties",
+             {{"items",
+               {{"type", "array"},
+                {"items",
+                 {{"type", "object"},
+                  {"required", {"title"}},
+                  {"properties",
+                   {{"title", {{"type", "string"}}},
+                    {"description", {{"type", "string"}}},
+                    {"checklist", {{"type", "array"}, {"items", {{"type", "string"}}}}}}}}}}}}}},
+           tools::ToolPolicy::DesignGraphModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.todos)
+              {
+                  return {{"success", false}, {"error", "TodoStore unavailable"}};
+              }
+              ctx.todos->clear();
+              nlohmann::json created = nlohmann::json::array();
+              if (args.contains("items") && args["items"].is_array())
+              {
+                  for (auto const & item : args["items"])
+                  {
+                      std::vector<ChecklistEntry> checks;
+                      for (auto const & c : item.value("checklist", std::vector<std::string>{}))
+                      {
+                          checks.push_back(ChecklistEntry{c, false});
+                      }
+                      std::string const id = ctx.todos->addItem(
+                        item.value("title", ""), item.value("description", ""), std::move(checks));
+                      created.push_back(id);
+                  }
+              }
+              return {{"success", true}, {"todoIds", std::move(created)}};
+          });
+
+        registry.registerSyncTool(
+          {"add_todo_item",
+           "Add a single planning todo item with optional checklist steps.",
+           {{"type", "object"},
+            {"required", {"title"}},
+            {"properties",
+             {{"title", {{"type", "string"}}},
+              {"description", {{"type", "string"}}},
+              {"checklist", {{"type", "array"}, {"items", {{"type", "string"}}}}}}}},
+           tools::ToolPolicy::DesignGraphModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.todos)
+              {
+                  return {{"success", false}, {"error", "TodoStore unavailable"}};
+              }
+              std::vector<ChecklistEntry> checks;
+              for (auto const & c : args.value("checklist", std::vector<std::string>{}))
+              {
+                  checks.push_back(ChecklistEntry{c, false});
+              }
+              std::string const id = ctx.todos->addItem(
+                args.value("title", ""), args.value("description", ""), std::move(checks));
+              return {{"success", true}, {"todoId", id}};
+          });
+
+        registry.registerSyncTool(
+          {"update_todo_item",
+           "Update a planning todo item's status or checklist step completion.",
+           {{"type", "object"},
+            {"required", {"todoId", "status"}},
+            {"properties",
+             {{"todoId", {{"type", "string"}}},
+              {"status", {{"type", "string"}, {"enum", {"pending", "in_progress", "done", "blocked"}}}},
+              {"description", {{"type", "string"}}},
+              {"checkIndex", {{"type", "integer"}}},
+              {"checked", {{"type", "boolean"}}}}}},
+           tools::ToolPolicy::DesignGraphModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.todos)
+              {
+                  return {{"success", false}, {"error", "TodoStore unavailable"}};
+              }
+              std::string const id = args.value("todoId", "");
+              TodoStatus const st = todoStatusFromString(args.value("status", "pending"));
+              bool ok = ctx.todos->updateItem(id, st, args.value("description", ""));
+              if (ok && args.contains("checkIndex"))
+              {
+                  ok = ctx.todos->toggleChecklistEntry(
+                    id, args.value("checkIndex", 0u), args.value("checked", true));
+              }
+              return {{"success", ok}, {"todoId", id}};
+          });
+
+        registry.registerSyncTool(
+          {"list_todos",
+           "List all planning todos and their checklist items.",
+           {{"type", "object"}, {"properties", nlohmann::json::object()}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const &) -> nlohmann::json {
+              if (!ctx.todos)
+              {
+                  return {{"success", false}, {"error", "TodoStore unavailable"}};
+              }
+              nlohmann::json res = ctx.todos->toJson();
+              res["success"] = true;
+              return res;
+          });
+
+        registry.registerSyncTool(
+          {"store_knowledge",
+           "Store a concise, reusable engineering learning or pattern in persistent cross-platform knowledge storage.",
+           {{"type", "object"},
+            {"required", {"title", "summary"}},
+            {"properties",
+             {{"title", {{"type", "string"}}},
+              {"category", {{"type", "string"}}},
+              {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+              {"summary", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.knowledge)
+              {
+                  return {{"success", false}, {"error", "KnowledgeStore unavailable"}};
+              }
+              std::string const id = ctx.knowledge->store(
+                args.value("title", ""),
+                args.value("category", "general"),
+                args.value("tags", std::vector<std::string>{}),
+                args.value("summary", ""));
+              return {{"success", true}, {"knowledgeId", id}};
+          });
+
+        registry.registerSyncTool(
+          {"search_knowledge",
+           "Search persistent agent knowledge and past learnings by keyword or category.",
+           {{"type", "object"},
+            {"properties",
+             {{"query", {{"type", "string"}}},
+              {"category", {{"type", "string"}}},
+              {"limit", {{"type", "integer"}}}}}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.knowledge)
+              {
+                  return {{"success", false}, {"error", "KnowledgeStore unavailable"}};
+              }
+              auto const hits = ctx.knowledge->search(
+                args.value("query", ""),
+                args.value("category", ""),
+                static_cast<std::size_t>(std::max(1, args.value("limit", 8))));
+              nlohmann::json arr = nlohmann::json::array();
+              for (auto const & e : hits)
+              {
+                  arr.push_back({{"id", e.id},
+                                 {"title", e.title},
+                                 {"category", e.category},
+                                 {"tags", e.tags},
+                                 {"summary", e.summary},
+                                 {"useCount", e.useCount}});
+              }
+              return {{"success", true}, {"count", arr.size()}, {"entries", std::move(arr)}};
+          });
+
+        registry.registerSyncTool(
+          {"update_knowledge",
+           "Update an existing persistent knowledge entry.",
+           {{"type", "object"},
+            {"required", {"id"}},
+            {"properties",
+             {{"id", {{"type", "string"}}},
+              {"title", {{"type", "string"}}},
+              {"category", {{"type", "string"}}},
+              {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+              {"summary", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.knowledge)
+              {
+                  return {{"success", false}, {"error", "KnowledgeStore unavailable"}};
+              }
+              bool const ok = ctx.knowledge->update(
+                args.value("id", ""),
+                args.value("title", ""),
+                args.value("category", ""),
+                args.value("tags", std::vector<std::string>{}),
+                args.value("summary", ""));
+              return {{"success", ok}};
+          });
+
+        registry.registerSyncTool(
+          {"delete_knowledge",
+           "Delete an outdated or incorrect knowledge entry by ID.",
+           {{"type", "object"},
+            {"required", {"id"}},
+            {"properties", {{"id", {{"type", "string"}}}}}},
+           tools::ToolPolicy::ReadOnly},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.knowledge)
+              {
+                  return {{"success", false}, {"error", "KnowledgeStore unavailable"}};
+              }
+              return {{"success", ctx.knowledge->remove(args.value("id", ""))}};
+          });
     }
 } // namespace gladius::design
