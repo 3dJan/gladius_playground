@@ -142,6 +142,9 @@ namespace gladius::agent
                     {"input_schema", tool.inputSchema.is_object() ? tool.inputSchema : nlohmann::json{{"type", "object"}}}
                 });
             }
+            // One breakpoint at the end of the tool block is enough to cache the stable system prompt
+            // plus the tool schemas, which is the part that must not be re-prefilled every turn.
+            toolsArr.back()["cache_control"] = {{"type", "ephemeral"}};
             payload["tools"] = std::move(toolsArr);
         }
 

@@ -8,11 +8,25 @@
 #include <chrono>
 #include <queue>
 #include <thread>
+#include <variant>
 
 namespace gladius::agent::tests
 {
     namespace
     {
+        std::string messageText(Message const & message)
+        {
+            std::string text;
+            for (auto const & part : message.parts)
+            {
+                if (auto const * content = std::get_if<TextContent>(&part))
+                {
+                    text += content->text;
+                }
+            }
+            return text;
+        }
+
         class ScriptedProvider final : public IAiProvider
         {
           public:
@@ -140,13 +154,16 @@ namespace gladius::agent::tests
         // Act
         auto const req = ctxBuilder.build(conv, registry, PrivacySettings{}, snap);
 
-        // Assert
-        EXPECT_NE(req.systemPrompt.find("FOLLOW-UP REQUEST ON A FINISHED DESIGN"), std::string::npos);
-        EXPECT_NE(req.systemPrompt.find("Requirements:"), std::string::npos);
+        // Assert: run-volatile guidance travels in the last user message, never in the system
+        // prompt, because changing the system block invalidates the provider prompt cache.
+        EXPECT_NE(messageText(req.messages.back()).find("FOLLOW-UP REQUEST ON A FINISHED DESIGN"),
+                  std::string::npos);
+        EXPECT_NE(messageText(req.messages.back()).find("Requirements:"), std::string::npos);
+        EXPECT_EQ(req.systemPrompt.find("FOLLOW-UP REQUEST ON A FINISHED DESIGN"), std::string::npos);
 
         DesignContextSnapshot const plain;
         auto const plainReq = ctxBuilder.build(conv, registry, PrivacySettings{}, plain);
-        EXPECT_EQ(plainReq.systemPrompt.find("FOLLOW-UP REQUEST ON A FINISHED DESIGN"),
+        EXPECT_EQ(messageText(plainReq.messages.back()).find("FOLLOW-UP REQUEST ON A FINISHED DESIGN"),
                   std::string::npos);
     }
 

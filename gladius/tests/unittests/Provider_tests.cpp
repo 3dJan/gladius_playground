@@ -148,6 +148,43 @@ namespace gladius::agent::tests
         EXPECT_TRUE(res.toolCalls[0].arguments.value("strict", false));
     }
 
+    TEST(AnthropicProvider, BuildPayload_WithTools_AnnotatesOnlyLastToolWithCacheControl)
+    {
+        // Arrange
+        AnthropicProvider provider({"", "", "claude-test"}, std::make_shared<MockHttpTransport>());
+        CompletionRequest request;
+        request.systemPrompt = "stable instructions";
+        request.tools = {
+            tools::ToolDefinition{"create_function", "Create", nlohmann::json{{"type", "object"}}},
+            tools::ToolDefinition{"capture_viewport", "Capture", nlohmann::json{{"type", "object"}}},
+        };
+
+        // Act
+        auto const payload = provider.buildPayload(request);
+
+        // Assert: one breakpoint caches system prompt plus all tool schemas
+        EXPECT_EQ(payload["tools"].size(), 2u);
+        EXPECT_FALSE(payload["tools"][0].contains("cache_control"));
+        ASSERT_TRUE(payload["tools"][1].contains("cache_control"));
+        EXPECT_EQ(payload["tools"][1]["cache_control"]["type"], "ephemeral");
+    }
+
+    TEST(OpenAiProvider, BuildPayload_WithTools_LeavesThemUntouched)
+    {
+        // Arrange
+        OpenAiProvider provider({"", "", "gpt-test"}, std::make_shared<MockHttpTransport>());
+        CompletionRequest request;
+        request.tools = {
+            tools::ToolDefinition{"create_function", "Create", nlohmann::json{{"type", "object"}}},
+        };
+
+        // Act
+        auto const payload = provider.buildPayload(request);
+
+        // Assert: cache_control is an Anthropic-only convention
+        EXPECT_EQ(payload["tools"].dump().find("cache_control"), std::string::npos);
+    }
+
     TEST(ModelDiscovery, FetchModels_OpenRouterWithoutApiKey_ReturnsOnlyFreeModels)
     {
         // Arrange
