@@ -7,6 +7,7 @@
 #include "../FileSystemUtils.h"
 #include "../ProgramSnippetApplier.h"
 #include "../agent/Conversation.h"
+#include "AgentToolOutput.h"
 #include "../io/3mf/Lib3mfLoader.h"
 #include "../io/3mf/LibraryMetadata.h"
 #include "../nodes/Assembly.h"
@@ -21,6 +22,9 @@ namespace gladius::design
 {
     namespace
     {
+        /// @brief Bytes a program listing may occupy; a tool result is re-prefilled every later turn
+        constexpr std::size_t kMaxSnippetChars = 12000;
+
         /**
          * @brief Reads a string array argument, tolerating a single string.
          * @details Models frequently emit "tags": "gyroid" where an array is declared, which makes
@@ -152,7 +156,9 @@ namespace gladius::design
            {{"type", "object"}, {"properties", nlohmann::json::object()}},
            tools::ToolPolicy::ReadOnly},
           [&ctx](nlohmann::json const &) -> nlohmann::json {
-              nlohmann::json res = ctx.graph.toJson();
+              // Compact: the full dump (previews included) rode along in history for every later
+              // turn and cost more prompt tokens than any other single tool result.
+              nlohmann::json res = agent_tool_output::compactDesignGraph(ctx.graph.toJson());
               res["success"] = true;
               res["summary"] = ctx.graph.summarize();
               return res;
@@ -576,10 +582,13 @@ namespace gladius::design
 
         registry.registerSyncTool(
           {"get_program_snippet",
-           "Read the current open document's implicit function program listing.",
-           {{"type", "object"}, {"properties", nlohmann::json::object()}},
+           "Read the current open document's implicit function program listing. Pass functions to "
+           "read only the named ones; otherwise the listing is trimmed to keep the prompt small.",
+           {{"type", "object"},
+            {"properties",
+             {{"functions", {{"type", "array"}, {"items", {{"type", "string"}}}}}}}},
            tools::ToolPolicy::ReadOnly},
-          [&ctx](nlohmann::json const &) -> nlohmann::json {
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
               if (!ctx.document || !ctx.document->getAssembly())
               {
                   return {{"success", false}, {"error", "No active document"}};
@@ -587,7 +596,24 @@ namespace gladius::design
               auto const assembly = ctx.document->getAssembly();
               std::string const snippet =
                 ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
-              return {{"success", true}, {"snippet", snippet}};
+              std::vector<std::string> wanted;
+              if (args.contains("functions") && args["functions"].is_array())
+              {
+                  wanted = args["functions"].get<std::vector<std::string>>();
+              }
+              if (!wanted.empty())
+              {
+                  std::string const filtered = agent_tool_output::filterProgramListing(snippet, wanted);
+                  if (filtered.empty())
+                  {
+                      return {{"success", false},
+                              {"error", "No function matched the requested names. Read the listing "
+                                        "without 'functions' to see the names, then ask again."}};
+                  }
+                  return {{"success", true}, {"snippet", filtered}};
+              }
+              return {{"success", true},
+                      {"snippet", agent_tool_output::capProgramListing(snippet, kMaxSnippetChars)}};
           });
 
         registry.registerSyncTool(
@@ -611,6 +637,7 @@ namespace gladius::design
               {
                   std::string normalizedSnippet;
                   std::size_t appliedCount = 0;
+                  std::vector<std::string> appliedNames;
                   {
                       auto const token = ctx.document->waitForAssemblyToken();
                       auto assembly = ctx.document->getAssembly();
@@ -625,7 +652,12 @@ namespace gladius::design
                           }
                           return {{"success", false},
                                   {"error", report.failed.front().message},
-                                  {"failed", std::move(errs)}};
+                                  {"failed", std::move(errs)},
+                                  {"hint", "Nothing was applied: the snippet is only accepted when "
+                                           "every listed function converts. List each function with "
+                                           "its own "// Function: name (ID: n)" header, use the "
+                                           "qualified name name_ID when calling another function, and "
+                                           "give every called parameter a source in the caller."}};
                       }
                       for (auto & [fid, funcModel] : assembly->getFunctions())
                       {
@@ -635,6 +667,10 @@ namespace gladius::design
                           }
                       }
                       appliedCount = report.parsed.size();
+                      for (auto const & parsed : report.parsed)
+                      {
+                          appliedNames.push_back(parsed.displayName);
+                      }
                       normalizedSnippet =
                         ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
                   }
@@ -671,11 +707,14 @@ namespace gladius::design
                               {"error", errors.front()},
                               {"errors", errors},
                               {"appliedFunctions", appliedCount},
-                              {"snippet", normalizedSnippet}};
+                              {"snippet", agent_tool_output::capProgramListing(normalizedSnippet,
+                                                                              kMaxSnippetChars)}};
                   }
+                  // The snippet is not echoed back on success: the model just wrote it, and the copy
+                  // would sit in history and be re-prefilled for every later turn.
                   return {{"success", true},
                           {"appliedFunctions", appliedCount},
-                          {"snippet", normalizedSnippet}};
+                          {"appliedNames", appliedNames}};
               }
               catch (std::exception const & ex)
               {
@@ -1112,8 +1151,13 @@ namespace gladius::design
               std::error_code ec;
               if (std::filesystem::exists(targetPath, ec) && !overwrite)
               {
+                  // Naming the existing entry tells the model the goal is already met, so it moves on
+                  // instead of retrying the export for several more turns.
                   return {{"success", false},
-                          {"error", "Library item already exists (set overwrite=true to replace)"}};
+                          {"error", "Library item already exists at " + targetPath.string()
+                                    + ". The component is already reusable: import_library_item to use "
+                                    "it, or call export_library_item again with overwrite=true only "
+                                    "if the geometry actually changed."}};
               }
 
               try

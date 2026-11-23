@@ -151,6 +151,29 @@ namespace gladius::design::tests
         EXPECT_TRUE(result.at("recommendLibraryExport").get<bool>());
     }
 
+    TEST(GetDesignSummary_ToolCall, ReturnedWithoutInternalCountersOrPreviews)
+    {
+        // Arrange
+        ToolHarness harness;
+        (void)harness.executor.executeSync("add_requirement",
+                                          {{"description", "3x4 brick footprint"}},
+                                          harness.cancellation);
+
+        // Act
+        auto const result = harness.executor.executeSync("get_design_summary", {},
+                                                        harness.cancellation);
+
+        // Assert: the tool result rides along in history for every later turn, so the internal
+        // bookkeeping fields must not be part of it
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+        EXPECT_FALSE(result.contains("nextReqId"));
+        EXPECT_FALSE(result.contains("nextNodeId"));
+        EXPECT_FALSE(result.contains("nextVariantId"));
+        EXPECT_FALSE(result.contains("nextConfigId"));
+        EXPECT_NE(result.value("summary", "").find("Requirements: 1"), std::string::npos);
+        EXPECT_EQ(result["requirements"].size(), 1u);
+    }
+
     TEST(ScoreComponentReusability_UnparsableScore, ToolCall_FallsBackToZero)
     {
         ToolHarness harness;
