@@ -146,8 +146,18 @@ namespace gladius::agent::bench
         request.systemPrompt = kJudgeSystemPrompt;
         request.messages = conversation.messages();
 
+        std::int64_t const judgeStartMs = m_trace ? m_trace->mark() : 0;
         CompletionResponse const response = coro::sync_wait(
           m_provider->complete(request, nullptr, io::CancellationToken{}));
+        if (m_trace)
+        {
+            m_trace->recordPhase("judge",
+                                 judgeStartMs,
+                                 {{"views", views.size()},
+                                  {"success", response.success},
+                                  {"promptTokens", response.usage.totalPromptTokens()},
+                                  {"completionTokens", response.usage.outputTokens}});
+        }
         verdict.usage = response.usage;
         m_usage.accumulate(response.usage);
 

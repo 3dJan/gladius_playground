@@ -94,7 +94,20 @@ namespace gladius::agent::bench
                   {"visualPassed", judge.available && judge.passes},
                   {"judgeAvailable", judge.available},
                   {"taskPassed", taskPassed()}}},
-                {"artifacts", artifacts}};
+                {"artifacts", artifacts},
+                {"trace",
+                 [&] {
+                     nlohmann::json out = nlohmann::json::object();
+                     if (!tracePath.empty())
+                     {
+                         out["path"] = tracePath;
+                     }
+                     if (profile)
+                     {
+                         out["profile"] = profile->toJson();
+                     }
+                     return out;
+                 }()}};
     }
 
     AgentBenchReport::AgentBenchReport(BenchRunConfig const & config,
@@ -119,6 +132,11 @@ namespace gladius::agent::bench
                                                             m_config.model,
                                                             counter);
 
+        auto const taskDir = m_outputDir / task.id;
+        std::error_code ec;
+        std::filesystem::create_directories(taskDir, ec);
+        host.setTraceDirectory(taskDir);
+
         AgentBenchMetricsCollector collector{task.id};
         AgentRunResult const result = host.runTask(task, std::move(observing));
         collector.collectFrom(host, result, counter->failures);
@@ -129,15 +147,19 @@ namespace gladius::agent::bench
         record.metrics = collector.metrics();
         record.metrics.providerName = result.providerName;
 
-        auto const taskDir = m_outputDir / task.id;
-        std::error_code ec;
-        std::filesystem::create_directories(taskDir, ec);
-
+        auto * trace = host.trace();
         std::string stlError;
         auto const stlPath = taskDir / "model.stl";
-        if (host.exportStl(stlPath, stlError))
+        auto stlMark = host.traceMark();
+        bool const stlExported = host.exportStl(stlPath, stlError);
+        host.tracePhase("export_stl", stlMark, {{"success", stlExported}});
+        if (stlExported)
         {
+            auto const measureMark = host.traceMark();
             record.geometry = measureStl(stlPath.string());
+            host.tracePhase("measure_mesh",
+                            measureMark,
+                            {{"triangles", record.geometry.triangleCount}});
             record.artifacts.push_back(stlPath.string());
         }
         else if (record.geometry.error.empty())
@@ -146,7 +168,10 @@ namespace gladius::agent::bench
         }
         auto const doc3mf = taskDir / "model.3mf";
         std::string saveError;
-        if (host.saveDocument(doc3mf, saveError))
+        auto const saveMark = host.traceMark();
+        bool const saved = host.saveDocument(doc3mf, saveError);
+        host.tracePhase("save_document", saveMark, {{"success", saved}});
+        if (saved)
         {
             record.artifacts.push_back(doc3mf.string());
         }
@@ -154,7 +179,13 @@ namespace gladius::agent::bench
         std::vector<std::vector<std::byte>> views;
         for (auto const & view : task.judgeViews)
         {
+            auto const renderMark = host.traceMark();
             auto bytes = host.renderView(view, m_config.renderWidth);
+            host.tracePhase("render:" + view,
+                            renderMark,
+                            {{"view", view},
+                             {"bytes", bytes.size()},
+                             {"width", m_config.renderWidth}});
             if (bytes.empty())
             {
                 continue;
@@ -172,9 +203,30 @@ namespace gladius::agent::bench
             judgeProvider = makeJudgeProvider(m_config);
         }
         AgentBenchJudge judge(std::move(judgeProvider), m_config.renderWidth);
+        judge.setTraceRecorder(trace);
         record.judge = judge.judge(task, views);
+
+        if (trace)
+        {
+            record.tracePath = trace->outputFile().string();
+            auto const timeline = host.writeTaskTimeline();
+            if (!timeline.empty())
+            {
+                record.artifacts.push_back(timeline.string());
+            }
+            // Wall time comes from the trace extent, not from `metrics.wallMs`: the trace starts at
+            // document seeding and ends after the judge, so the time split can add up to the whole task.
+            record.profile = trace::analyzeTrace(trace->records());
+            record.artifacts.push_back(record.tracePath);
+        }
+
         m_records.push_back(record);
         return record;
+    }
+
+    std::filesystem::path AgentBenchReport::taskTracePath(std::string const & taskId) const
+    {
+        return m_outputDir / taskId / "trace.jsonl";
     }
 
     void AgentBenchReport::add(BenchRunRecord record)

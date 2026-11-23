@@ -5,6 +5,7 @@
 #include "AgentBenchMetrics.h"
 #include "AgentBenchTask.h"
 #include "HeadlessAgentHost.h"
+#include "agent/trace/AgentTraceProfile.h"
 
 #include <chrono>
 #include <filesystem>
@@ -26,6 +27,9 @@ namespace gladius::agent::bench
         std::vector<GeometryCheck> geometryChecks;
         JudgeVerdict judge;
         std::vector<std::string> artifacts;
+        /// @brief Per-step trace aggregate; set only when the task was traced
+        std::optional<trace::AgentTraceProfile> profile;
+        std::string tracePath;
 
         [[nodiscard]] bool geometryPassed() const noexcept
         {
@@ -52,6 +56,9 @@ namespace gladius::agent::bench
                                              AgentBenchTask const & task,
                                              std::unique_ptr<IAiProvider> agentProvider,
                                              std::unique_ptr<IAiProvider> judgeProvider = nullptr);
+
+        /// @brief JSONL trace path for one task, empty when tracing is disabled
+        [[nodiscard]] std::filesystem::path taskTracePath(std::string const & taskId) const;
 
         void add(BenchRunRecord record);
 

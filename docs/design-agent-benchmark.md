@@ -106,6 +106,10 @@ aggregate report test must see the other runs in the same process.
 | `GLADIUS_AGENT_BENCH_OUTPUT` | `agent_bench` | output directory for report + artifacts |
 | `GLADIUS_USER_LIBRARY_DIR` | unset | hermetic user-library sandbox (also used by the benchmark) |
 
+Benchmark runs are always traced (`<output>/<taskId>/trace.jsonl`). For the interactive app the
+trace is opt-in — see [Profiling and bottleneck analysis](#profiling-and-bottleneck-analysis):
+`GLADIUS_AGENT_TRACE=<file>` and `GLADIUS_AGENT_TRACE_PROMPT=1`.
+
 ## Metrics
 
 Per run ([`results.json`](../tests/unittests/agentBench/AgentBenchReport.h)):
@@ -118,9 +122,12 @@ Per run ([`results.json`](../tests/unittests/agentBench/AgentBenchReport.h)):
 * `usage` — prompt/completion/cache tokens summed over all turns, plus `usageWithJudge`
 * `wallMs`, `agentCompleted`, `agentError`, `failureDetails`
 * `geometry`, `geometryChecks`, `judge`, `verdict`, `artifacts`
+* `trace.profile` — the per-step aggregate described under
+  [Profiling and bottleneck analysis](#profiling-and-bottleneck-analysis)
 
 Artifacts per task under `<output>/<taskId>/`: `view-isometric.png`, `view-front.png`,
-`view-top.png`, `model.stl`, `model.3mf`; the sandboxed library is `<output>/user-library`.
+`view-top.png`, `model.stl`, `model.3mf`, `trace.jsonl`, `timeline.json`; the sandboxed library is
+`<output>/user-library`.
 
 ## Comparing against a baseline
 
@@ -136,6 +143,85 @@ provider failures, unknown tool calls, truncated turns, prompt/output tokens) ad
 when they worsen by more than *both* `--token-tolerance` (default 50 %) and `--counter-grace`
 (default 5 absolute), so a single extra retry is noise while a systemic regression is not.
 `wallMs` is reported but never gates: the local server's throughput depends on machine load.
+
+## Profiling and bottleneck analysis
+
+`results.json` says *how much* a run cost. The trace says *where it went*, which is what makes the
+harness optimizable. One recorder lives in the product ([`src/agent/trace/AgentTrace.h`](../src/agent/trace/AgentTrace.h))
+so an interactive session and a benchmark run produce the same records.
+
+### Records
+
+Every run writes `<output>/<taskId>/trace.jsonl`, one JSON object per line. All records carry `tMs`
+(milliseconds since run start) and `runId`; the type decides the rest.
+
+| `type` | emitted by | interesting fields |
+| --- | --- | --- |
+| `run_meta` | host | model, endpoint, limits — describes the run, never a timeline span |
+| `turn` | `AgentLoop` | `durationMs`, `buildMs` (context assembly), `completionMs`, `ttftMs`, `streamEvents`, `thinkingChars`, `textChars`, `toolJsonChars`, `promptBytes` (per component), `usage`, `stopReason` |
+| `tool_call` | `AgentLoop` | `name`, `policy`, `durationMs`, `success`, `denied`, `argsBytes`, `resultBytes`, trimmed `error` |
+| `phase` | harness | `name` (`seed_document`, `export_stl`, `measure_mesh`, `save_document`, `render:isometric`, `judge`), `durationMs` |
+| `note` | `AgentLoop` | `kind`: `retry_after_failure`, `autonomous_nudge`, `truncation_nudge` — this is how wasted turns get attributed |
+
+With `GLADIUS_AGENT_TRACE_PROMPT=1` each `turn` also carries the full request (system prompt plus
+messages). That is megabytes per run, so it stays opt-in; it is the only way to see *what* the model
+was actually sent when the aggregate says the prompt is too big.
+
+Alongside it, `<output>/<taskId>/timeline.json` is Chrome Trace Event JSON: open it in
+[Perfetto](https://ui.perfetto.dev) or `chrome://tracing`. Two lanes keep agent work and measurement
+work from overlapping, and each turn is split into nested `context build` / `queue+prefill` /
+`generate` slices, which is exactly the three-way split an optimization can attack.
+
+### Aggregates
+
+The same records are aggregated into `trace.profile` inside `results.json` (and printed per task), and
+[`scripts/agent_bench_profile.py`](../scripts/agent_bench_profile.py) recomputes them from a trace file
+without rebuilding:
+
+```bash
+python3 scripts/agent_bench_profile.py /tmp/agent_bench_v6/sphere_r5/trace.jsonl
+python3 scripts/agent_bench_profile.py /tmp/agent_bench_v6   # whole run, all tasks
+python3 scripts/agent_bench_profile.py /tmp/agent_bench_v4 /tmp/agent_bench_v6   # before/after diff
+```
+
+| question | aggregate |
+| --- | --- |
+| Is the harness or the model the bottleneck? | time split: `modelMs` / `toolMs` / `harnessMs` / `contextBuildMs` / `unaccountedMs` (`unaccountedMs` is reported instead of being hidden) |
+| Is a turn slow because of prefill or because of decoding? | `modelPrefillMs` vs `modelGenerateMs`, `ttftP50Ms`/`ttftP95Ms` and `prefillTokPerSec`/`decodeTokPerSec` — prefill is measured until the **first visible output**, because a local server opens the stream long before it has prefilled |
+| Is the prompt the problem, and which part of it? | `contextTax` (Σ per-turn prompt tokens ÷ final-turn prompt tokens — how much history is re-sent), `promptBytesByComponent` |
+| Did one tool result poison the context? | `largestToolResultBytes` + turn |
+| Which tool should be made cheaper first? | tool ranking by total time, with failures and output bytes |
+| How much did we spend on mistakes? | `failedToolCalls`, `turnsAfterFailure` with their milliseconds and prompt tokens, `truncatedTurns`, nudges |
+| Is the model acting or talking? | `turnsWithoutToolCalls` (one is the closing turn, more is hesitation) vs `mutatingToolCalls` |
+| Did the last change help? | run the script with two traces and read the diff |
+
+A run directory works as input too: the script then aggregates every `<taskId>/trace.jsonl` below it.
+Wall time and `contextTax` are combined per task, because each task's clock restarts at zero.
+
+### What the first profiled run showed
+
+With the strata `iq3_s` model all three tasks passed and the wall time broke down as roughly 88%
+prompt prefill, 9% output generation, 3% harness measurement (the vision judge alone is about two
+thirds of that) and under 1% tool execution. Tools are therefore not the place to optimize; the prompt
+is. `promptBytesByComponent` says why: images dominate by an order of magnitude (about 60 MB of image
+bytes over a run against 2.9 MB of other tool results), and `capture_viewport` alone returned 6.3 MB.
+`contextTax` of roughly 15x means most prompt tokens are re-sent history. The two obvious next
+experiments are resizing/re-encoding captured images before they enter the conversation and dropping
+superseded screenshots, both of which the same aggregates can then confirm.
+
+### Interactive sessions
+
+The same trace is available while using the app, so a problem seen live does not have to be
+reproduced as a test:
+
+```bash
+GLADIUS_AGENT_TRACE=/tmp/gladius_agent/trace.jsonl \
+GLADIUS_AGENT_TRACE_PROMPT=1 \
+./gladius
+```
+
+On run completion the profile summary goes to `stderr` and `trace.jsonl.timeline.json` is written next
+to the trace.
 
 ## Known limitations
 

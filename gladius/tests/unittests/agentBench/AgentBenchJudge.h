@@ -2,6 +2,7 @@
 
 #include "AgentBenchTask.h"
 #include "agent/providers/IAiProvider.h"
+#include "agent/trace/AgentTrace.h"
 
 #include <nlohmann/json.hpp>
 #include <string>
@@ -38,6 +39,14 @@ namespace gladius::agent::bench
         [[nodiscard]] JudgeVerdict judge(AgentBenchTask const & task,
                                          std::vector<std::vector<std::byte>> const & views);
 
+        /// @brief Records the judge completion as a `phase: judge` record when set.
+        /// @details The judge is measurement cost, not agent cost, so it is recorded as a harness
+        ///          phase (with its own usage) instead of a `turn`.
+        void setTraceRecorder(agent::trace::AgentTraceRecorder * recorder) noexcept
+        {
+            m_trace = recorder;
+        }
+
         [[nodiscard]] TokenUsage totalUsage() const noexcept
         {
             return m_usage;
@@ -50,5 +59,6 @@ namespace gladius::agent::bench
         std::unique_ptr<IAiProvider> m_provider;
         std::uint32_t m_imageSize = 512;
         TokenUsage m_usage;
+        agent::trace::AgentTraceRecorder * m_trace = nullptr;
     };
 } // namespace gladius::agent::bench

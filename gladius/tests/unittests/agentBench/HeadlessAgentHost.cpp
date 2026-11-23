@@ -223,6 +223,63 @@ namespace gladius::agent::bench
         return std::make_unique<AnthropicProvider>(providerCfg);
     }
 
+    void HeadlessAgentHost::setTraceDirectory(std::filesystem::path directory)
+    {
+        m_traceDir = std::move(directory);
+    }
+
+    void HeadlessAgentHost::beginTaskTrace(AgentBenchTask const & task)
+    {
+        m_trace.reset();
+        if (m_traceDir.empty())
+        {
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(m_traceDir, ec);
+        m_trace = std::make_unique<agent::trace::AgentTraceRecorder>(m_traceDir / "trace.jsonl");
+        m_trace->setRunId(task.id);
+        m_trace->recordRunMeta({{"taskId", task.id},
+                                {"title", task.title},
+                                {"endpoint", m_config.endpoint},
+                                {"model", m_config.model},
+                                {"api", m_config.api},
+                                {"streaming", m_config.stream},
+                                {"maxModelTurns", m_config.maxModelTurns},
+                                {"maxToolCalls", m_config.maxToolCalls},
+                                {"renderSize", m_config.renderWidth}});
+    }
+
+    std::int64_t HeadlessAgentHost::traceMark() const
+    {
+        return m_trace ? m_trace->mark() : 0;
+    }
+
+    void HeadlessAgentHost::tracePhase(std::string const & name,
+                                       std::int64_t startedMark,
+                                       nlohmann::json fields)
+    {
+        if (m_trace)
+        {
+            m_trace->recordPhase(name, startedMark, std::move(fields));
+        }
+    }
+
+    std::filesystem::path HeadlessAgentHost::writeTaskTimeline() const
+    {
+        if (!m_trace)
+        {
+            return {};
+        }
+        std::string error;
+        auto const path = m_traceDir / "timeline.json";
+        if (!m_trace->writeTimeline(path, error))
+        {
+            return {};
+        }
+        return path;
+    }
+
     AgentRunResult HeadlessAgentHost::runTask(AgentBenchTask const & task,
                                               std::unique_ptr<IAiProvider> provider)
     {
@@ -233,14 +290,18 @@ namespace gladius::agent::bench
 
         // Every task starts from an untouched document and design state so nothing measured for
         // one task leaks into the next one.
-        seedTemplateDocument();
-        m_graph.clear();
-        m_todos.clear();
-        m_checkpoints.clear();
-        m_knowledge.clear();
-        m_graph.setPhase(design::DesignPhase::ClarifyRequirements);
-        m_conversation.clear();
-        m_conversation.appendUserText(task.prompt);
+        beginTaskTrace(task);
+        {
+            agent::trace::ScopedTracePhase seeding(m_trace.get(), "seed_document");
+            seedTemplateDocument();
+            m_graph.clear();
+            m_todos.clear();
+            m_checkpoints.clear();
+            m_knowledge.clear();
+            m_graph.setPhase(design::DesignPhase::ClarifyRequirements);
+            m_conversation.clear();
+            m_conversation.appendUserText(task.prompt);
+        }
 
         AgentLimits limits;
         limits.maxModelTurns = m_config.maxModelTurns;
@@ -276,7 +337,8 @@ namespace gladius::agent::bench
                                               + req.description + "\"\n";
               }
               return snap;
-          }));
+          },
+          m_trace.get()));
     }
 
     std::vector<AgentEvent> HeadlessAgentHost::drainEvents()

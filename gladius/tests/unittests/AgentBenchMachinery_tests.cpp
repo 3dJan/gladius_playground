@@ -427,7 +427,54 @@ namespace gladius::agent::bench::tests
         auto const doc = nlohmann::json::parse(in);
         EXPECT_EQ(doc["summary"]["passed"], 1);
         EXPECT_EQ(doc["runs"][0]["taskId"], "sphere_r5");
+
+        // Assert: the same run is traceable, and the aggregate agrees with the counters
+        ASSERT_TRUE(record.profile.has_value());
+        EXPECT_EQ(record.profile->turns, record.metrics.modelTurns);
+        EXPECT_EQ(record.profile->toolCalls, record.metrics.toolCalls);
+        EXPECT_EQ(record.profile->failedToolCalls, record.metrics.toolFailures);
+        EXPECT_GT(record.profile->harnessMs, 0) << "export, render and judge must be spans";
+        EXPECT_GT(record.profile->totalPromptTokens, 0);
+        auto const & traceJson = doc["runs"][0]["trace"];
+        EXPECT_EQ(traceJson["path"], record.tracePath);
+        EXPECT_GT(traceJson["profile"]["timeSplit"]["harnessMs"].get<std::int64_t>(), 0);
+        EXPECT_TRUE(traceJson["profile"].contains("context"));
+
         std::error_code ec;
+        EXPECT_TRUE(std::filesystem::exists(record.tracePath, ec)) << record.tracePath;
+        auto const timeline = outputDir / "sphere_r5" / "timeline.json";
+        EXPECT_TRUE(std::filesystem::exists(timeline, ec)) << timeline;
+
+        std::ifstream traceIn{record.tracePath};
+        std::vector<std::string> types;
+        std::vector<std::string> phaseNames;
+        std::string line;
+        while (std::getline(traceIn, line))
+        {
+            if (line.empty())
+            {
+                continue;
+            }
+            auto const parsed = nlohmann::json::parse(line);
+            types.push_back(parsed["type"].get<std::string>());
+            if (parsed["type"] == "phase")
+            {
+                phaseNames.push_back(parsed["name"].get<std::string>());
+            }
+        }
+        auto const hasType = [&](std::string const & type)
+        { return std::find(types.begin(), types.end(), type) != types.end(); };
+        auto const hasPhase = [&](std::string const & name)
+        { return std::find(phaseNames.begin(), phaseNames.end(), name) != phaseNames.end(); };
+        EXPECT_TRUE(hasType("run_meta"));
+        EXPECT_TRUE(hasType("turn"));
+        EXPECT_TRUE(hasType("tool_call"));
+        for (auto const & phase : {"seed_document", "export_stl", "measure_mesh", "save_document",
+                                   "render:isometric", "judge"})
+        {
+            EXPECT_TRUE(hasPhase(phase)) << phase << " missing from "
+                                         << nlohmann::json(phaseNames).dump();
+        }
         std::filesystem::remove_all(outputDir, ec);
     }
 

@@ -101,6 +101,14 @@ namespace gladius::agent::bench::tests
             {
                 benchLog() << "agent error: " << m.agentError << "\n";
             }
+            if (record.profile)
+            {
+                benchLog() << trace::formatProfileSummary(*record.profile);
+                if (!record.tracePath.empty())
+                {
+                    benchLog() << "trace=" << record.tracePath << "\n";
+                }
+            }
         }
 
         /**
@@ -188,5 +196,14 @@ namespace gladius::agent::bench::tests
         benchLog() << "report=" << path.string()
                    << " passed=" << session.report().passedCount() << "/"
                    << session.report().records().size() << "\n";
+
+        // Every measured task must leave a trace and a timeline behind, otherwise the run cannot be
+        // profiled afterwards.
+        for (auto const & record : session.report().records())
+        {
+            EXPECT_TRUE(record.profile.has_value()) << record.task.id;
+            EXPECT_TRUE(std::filesystem::exists(record.tracePath)) << record.tracePath;
+            EXPECT_TRUE(std::filesystem::exists(session.report().taskTracePath(record.task.id)));
+        }
     }
 } // namespace gladius::agent::bench::tests

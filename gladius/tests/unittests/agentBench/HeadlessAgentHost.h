@@ -9,6 +9,7 @@
 #include "agent/PermissionPolicy.h"
 #include "agent/SkillLoader.h"
 #include "agent/providers/IAiProvider.h"
+#include "agent/trace/AgentTrace.h"
 #include "compute/ApplicationComputeRuntime.h"
 #include "design/DesignCatalogue.h"
 #include "design/DesignGraph.h"
@@ -117,6 +118,27 @@ namespace gladius::agent::bench
         [[nodiscard]] AgentRunResult runTask(AgentBenchTask const & task,
                                              std::unique_ptr<IAiProvider> provider);
 
+        /// @brief Redirects the per-task JSONL trace + Perfetto timeline into `directory`
+        /// @details Call before `runTask`; without it no trace files are written.
+        void setTraceDirectory(std::filesystem::path directory);
+
+        /// @brief Trace of the task currently being measured, null when tracing is off
+        [[nodiscard]] agent::trace::AgentTraceRecorder * trace() noexcept
+        {
+            return m_trace.get();
+        }
+
+        /// @brief Forwarded mark of now, for measuring a phase that runs outside the agent loop
+        [[nodiscard]] std::int64_t traceMark() const;
+
+        /// @brief Forwarded `phase` record; used by the report for its own measurement steps
+        void tracePhase(std::string const & name,
+                        std::int64_t startedMark,
+                        nlohmann::json fields = {});
+
+        /// @brief Writes the Perfetto timeline of the current task trace; empty path when off
+        [[nodiscard]] std::filesystem::path writeTaskTimeline() const;
+
         /// @brief Drains the agent event queue accumulated since the last drain
         [[nodiscard]] std::vector<AgentEvent> drainEvents();
 
@@ -157,6 +179,9 @@ namespace gladius::agent::bench
                                                              int height,
                                                              std::string const & preset) const;
 
+        /// @brief (Re)creates the per-task recorder when a trace directory is configured
+        void beginTaskTrace(AgentBenchTask const & task);
+
         /// @brief Loads the shipped template so the document has a renderable root function
         void seedTemplateDocument();
 
@@ -185,5 +210,7 @@ namespace gladius::agent::bench
         agent::Conversation m_conversation;
         io::CancellationToken m_cancellation;
         std::string m_initializeError;
+        std::filesystem::path m_traceDir;
+        std::unique_ptr<agent::trace::AgentTraceRecorder> m_trace;
     };
 } // namespace gladius::agent::bench
