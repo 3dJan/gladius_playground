@@ -173,6 +173,10 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/testdata/mechanical")
 file(COPY ${BUILDING_BLOCK_LIBRARY_ASSETS}
   DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/testdata/mechanical")
 
+# The shipped library is resolved relative to the executable (getShippedLibraryDir()),
+# so it must exist next to the test binary for library browsing/importing tests.
+file(COPY "${CMAKE_SOURCE_DIR}/library/" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/library/")
+
 # Use gtest_discover_tests for automatic test discovery with 'unit' label
 # DISCOVERY_MODE POST_BUILD allows set_tests_properties to work after discovery
 gtest_discover_tests(${BINARY}

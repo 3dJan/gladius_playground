@@ -41,7 +41,8 @@
         [
           "docking-experimental",
           "glfw-binding",
-          "wgpu-binding"
+          "wgpu-binding",
+          "test-engine"
         ]
     },
     {
@@ -51,7 +52,8 @@
         [
           "docking-experimental",
           "glfw-binding",
-          "wgpu-binding"
+          "wgpu-binding",
+          "test-engine"
         ]
     },
     "imgui-node-editor",
