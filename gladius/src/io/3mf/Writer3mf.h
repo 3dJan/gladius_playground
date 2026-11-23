@@ -14,6 +14,7 @@
 #include <lib3mf_implicit.hpp>
 
 #include <filesystem>
+#include <map>
 
 namespace gladius
 {
@@ -109,8 +110,12 @@ namespace gladius::io
          * @brief Adds the function to the 3MF model.
          * @param model The model to which the function will be added.
          * @param model3mf The 3MF model.
+         * @param function Implicit function which was created upfront. A new one is added when
+         *                 this is empty.
          */
-        void addFunctionTo3mf(gladius::nodes::Model & model, Lib3MF::PModel model3mf);
+        void addFunctionTo3mf(gladius::nodes::Model & model,
+                              Lib3MF::PModel model3mf,
+                              Lib3MF::PImplicitFunction const & function = {});
 
         /**
          * @brief Fills the function data in the 3MF model.
@@ -123,6 +128,23 @@ namespace gladius::io
                           Lib3MF::PModel model3mf);
 
         void updateModel(Lib3MF::PModel model3mf, nodes::Assembly const & assembly);
+
+        /**
+         * @brief Adds an implicit function for every assembly function which has no 3MF resource yet.
+         *
+         * Lib3MF assigns the resource ids of newly added functions itself, therefore the ids of the
+         * assembly cannot be reproduced. Functions are written in ascending assembly id order, so a
+         * function which is called by a lower id function would not exist yet while that caller is
+         * written. Pre-creating all missing functions resolves every resource reference, no matter
+         * in which order the functions are filled.
+         *
+         * @return Mapping of assembly resource id to the according 3MF function.
+         */
+        std::map<nodes::ResourceId, Lib3MF::PImplicitFunction>
+        createMissingFunctions(Lib3MF::PModel model3mf,
+                               std::vector<std::shared_ptr<nodes::Model>> const & functions);
+
+        std::map<nodes::ResourceId, Lib3MF::PImplicitFunction> m_implicitFunctions;
     };
 
     /**

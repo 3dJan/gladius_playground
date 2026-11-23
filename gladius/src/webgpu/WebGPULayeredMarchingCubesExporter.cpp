@@ -1,6 +1,8 @@
 #include "webgpu/WebGPULayeredMarchingCubesExporter.h"
 
+#include "io/IndexedTriangleMeshRepair.h"
 #include "io/MeshExportJob.h"
+#include "io/WindingRepair.h"
 #include "webgpu/WebGPUSdfEvaluationRequest.h"
 
 #include <Eigen/Core>
@@ -108,6 +110,14 @@ namespace gladius::webgpu
                 {
                     throw std::runtime_error("WebGPU layered marching-cubes produced an empty mesh");
                 }
+                // Interpolating the isovalue inside a cell can produce zero-area slivers, and a
+                // single such triangle makes strict validation fail. Collapse them the same way the
+                // manifold exporter does: closing the shortest edge keeps the surface closed.
+                if (auto const repair = io::collapseGeometricallyDegenerateTriangles(mesh);
+                    repair.collapsedEdgeCount != 0u)
+                {
+                    (void)io::repairTriangleWindingConsistency(mesh.positions, mesh.indices, nullptr);
+                }
                 if (auto const error = mesh.validationError())
                 {
                     throw std::runtime_error("WebGPU layered marching-cubes produced an invalid mesh: " +
@@ -139,35 +149,10 @@ namespace gladius::webgpu
               std::unordered_map<std::uint64_t, std::uint32_t> & edgeVertices,
               io::IndexedTriangleMesh & mesh)
             {
-                                auto zeroEndpoint = std::numeric_limits<std::size_t>::max();
-                                if (m_values[first] == 0.0F)
-                                {
-                                    zeroEndpoint = first;
-                                }
-                                else if (m_values[second] == 0.0F)
-                                {
-                                    zeroEndpoint = second;
-                                }
-                                if (zeroEndpoint != std::numeric_limits<std::size_t>::max())
-                                {
-                                        std::uint64_t const key = (std::uint64_t{1} << 62u) |
-                                                                                            static_cast<std::uint64_t>(zeroEndpoint);
-                                        auto const found = edgeVertices.find(key);
-                                        if (found != edgeVertices.end())
-                                        {
-                                                return found->second;
-                                        }
-                                        if (mesh.positions.size() >= std::numeric_limits<std::uint32_t>::max())
-                                        {
-                                                throw std::length_error(
-                                                    "WebGPU layered marching-cubes mesh has too many vertices");
-                                        }
-                                        auto const vertexIndex = static_cast<std::uint32_t>(mesh.positions.size());
-                                        mesh.positions.push_back(gridPosition(zeroEndpoint));
-                                        edgeVertices.emplace(key, vertexIndex);
-                                        return vertexIndex;
-                                }
-
+                // Interpolating with a zero-valued endpoint lands exactly on that grid sample, so the
+                // vertex must stay keyed by the edge: keying it by the shared endpoint would let the
+                // three corners of a triangle collapse onto one index (isosurface-aligned grid values,
+                // e.g. planar faces), which strict mesh validation rejects.
                 auto const low = std::min(first, second);
                 auto const high = std::max(first, second);
                                 std::uint64_t const key = (std::uint64_t{1} << 63u) |

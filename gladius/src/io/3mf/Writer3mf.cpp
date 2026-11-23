@@ -177,15 +177,29 @@ namespace gladius::io
     class NodeCreator : public nodes::Visitor
     {
       public:
-        explicit NodeCreator(Lib3MF::PImplicitFunction targetFunc, Lib3MF::PModel model)
+        explicit NodeCreator(Lib3MF::PImplicitFunction targetFunc,
+                             Lib3MF::PModel model,
+                             std::map<nodes::ResourceId, Lib3MF::PImplicitFunction> implicitFunctions = {})
             : m_targetFunc(targetFunc)
             , m_model(model)
+            , m_implicitFunctions(std::move(implicitFunctions))
         {
         }
 
         void setTargetFunction(Lib3MF::PImplicitFunction targetFunc)
         {
             m_targetFunc = targetFunc;
+        }
+
+        /// @brief Finds the 3MF resource which represents the given assembly resource id.
+        Lib3MF::PResource findResource(nodes::ResourceId resourceId) const
+        {
+            auto const iter = m_implicitFunctions.find(resourceId);
+            if (iter != m_implicitFunctions.end())
+            {
+                return iter->second;
+            }
+            return findResourceByModelResourceId(m_model, resourceId);
         }
 
         void visit(nodes::Begin &) override
@@ -257,7 +271,7 @@ namespace gladius::io
 
             initNode(node, node3mf);
 
-            auto resource = findResourceByModelResourceId(m_model, node.getResourceId());
+            auto resource = findResource(node.getResourceId());
 
             if (!resource)
             {
@@ -295,7 +309,7 @@ namespace gladius::io
                   node.getTag());
 
                 node.resolveFunctionId();
-                auto resource = findResourceByModelResourceId(m_model, node.getFunctionId());
+                auto resource = findResource(node.getFunctionId());
 
                 if (!resource)
                 {
@@ -351,7 +365,7 @@ namespace gladius::io
                 node.resolveFunctionId();
                 auto const functionId = node.getFunctionId();
 
-                auto resource = findResourceByModelResourceId(m_model, functionId);
+                auto resource = findResource(functionId);
                 if (!resource)
                 {
                     throw std::runtime_error(
@@ -386,6 +400,7 @@ namespace gladius::io
       private:
         Lib3MF::PImplicitFunction m_targetFunc;
         Lib3MF::PModel m_model;
+        std::map<nodes::ResourceId, Lib3MF::PImplicitFunction> m_implicitFunctions;
 
         NodeTypeMap const m_typeMap;
 
@@ -713,38 +728,38 @@ namespace gladius::io
         auto functions = assembly.getFunctions();
         m_logger->logInfo(fmt::format("Found {} functions to process", functions.size()));
 
+        // Detect unsupported NormalizeDistanceField nodes and skip serialization until
+        // support is implemented.
+        // TODO(NormalizeDistanceField-3MF): Add full serialization support for
+        // NormalizeDistanceField nodes once the 3MF implicit function extension defines a
+        // corresponding node type.
+        struct UnsupportedNodeDetector : nodes::Visitor
+        {
+            bool found = false;
+
+            void visit(nodes::NormalizeDistanceField & /*ndf*/) override
+            {
+                found = true;
+            }
+
+            void visit(nodes::NodeBase & /*nb*/) override
+            {
+                return; // Do nothing for other nodes
+            }
+            // Inherit other visits from base (which will traverse children via
+            // Model::visitNodes)
+        };
+
+        std::vector<nodes::SharedModel> functionsToWrite;
         for (auto & [name, model] : functions)
         {
-            m_logger->logInfo(fmt::format("Processing function: {}", name));
-
             if (model->isManaged())
             {
                 m_logger->logInfo(fmt::format("Skipping managed function: {}", name));
                 continue; // dont write functions that represent other aspects the 3mf model
             }
 
-            // Detect unsupported NormalizeDistanceField nodes and skip serialization until
-            // support is implemented.
-            // TODO(NormalizeDistanceField-3MF): Add full serialization support for
-            // NormalizeDistanceField nodes once the 3MF implicit function extension defines a
-            // corresponding node type.
-            struct UnsupportedNodeDetector : nodes::Visitor
-            {
-                bool found = false;
-
-                void visit(nodes::NormalizeDistanceField & /*ndf*/) override
-                {
-                    found = true;
-                }
-
-                void visit(nodes::NodeBase & /*nb*/) override
-                {
-                    return; // Do nothing for other nodes
-                }
-                // Inherit other visits from base (which will traverse children via
-                // Model::visitNodes)
-            } detector;
-
+            UnsupportedNodeDetector detector;
             model->visitNodes(detector);
             if (detector.found)
             {
@@ -756,11 +771,28 @@ namespace gladius::io
                    events::Severity::Warning});
                 continue; // Skip this function until NormalizeDistance serialization exists
             }
+            functionsToWrite.push_back(model);
+        }
+
+        m_implicitFunctions = createMissingFunctions(model3mf, functionsToWrite);
+
+        for (auto const & model : functionsToWrite)
+        {
+            auto const name = std::to_string(model->getResourceId());
+            m_logger->logInfo(fmt::format("Processing function: {}", name));
 
             try
             {
-                auto function3mf = findExistingFunction(model3mf, *model);
+                auto const newFunction = m_implicitFunctions.find(model->getResourceId());
+                if (newFunction != m_implicitFunctions.end())
+                {
+                    m_logger->logInfo(fmt::format("Adding new function: {}", name));
+                    addFunctionTo3mf(*model, model3mf, newFunction->second);
+                    m_logger->logInfo(fmt::format("Successfully added new function: {}", name));
+                    continue;
+                }
 
+                auto function3mf = findExistingFunction(model3mf, *model);
                 if (function3mf)
                 {
                     m_logger->logInfo(fmt::format("Updating existing function: {}", name));
@@ -785,13 +817,29 @@ namespace gladius::io
         m_logger->logInfo("updateModel operation completed");
     }
 
-    void Writer3mf::addFunctionTo3mf(gladius::nodes::Model & model, Lib3MF::PModel model3mf)
+    std::map<nodes::ResourceId, Lib3MF::PImplicitFunction> Writer3mf::createMissingFunctions(
+      Lib3MF::PModel model3mf, std::vector<std::shared_ptr<nodes::Model>> const & functions)
+    {
+        std::map<nodes::ResourceId, Lib3MF::PImplicitFunction> result;
+        for (auto const & model : functions)
+        {
+            if (!findExistingFunction(model3mf, *model))
+            {
+                result[model->getResourceId()] = model3mf->AddImplicitFunction();
+            }
+        }
+        return result;
+    }
+
+    void Writer3mf::addFunctionTo3mf(gladius::nodes::Model & model,
+                                     Lib3MF::PModel model3mf,
+                                     Lib3MF::PImplicitFunction const & function)
     {
         m_logger->logInfo(
           fmt::format("Creating new implicit function for model: {}", model.getModelName()));
         try
         {
-            auto newFunction = model3mf->AddImplicitFunction();
+            auto newFunction = function ? function : model3mf->AddImplicitFunction();
             m_logger->logInfo("Implicit function created, filling with data");
             fillFunction(newFunction, model, model3mf);
             m_logger->logInfo("Function data filled successfully");
@@ -811,7 +859,7 @@ namespace gladius::io
         m_logger->logInfo(fmt::format("Starting fillFunction for model: {}", model.getModelName()));
         try
         {
-            NodeCreator nodeCreator{function, model3mf};
+            NodeCreator nodeCreator{function, model3mf, m_implicitFunctions};
             LinkCreator linkCreator{function};
 
             if (model.getDisplayName().has_value())

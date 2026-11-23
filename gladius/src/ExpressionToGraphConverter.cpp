@@ -237,7 +237,7 @@ namespace gladius
         // Preprocess if blocks into select function calls
         std::regex if_regex(R"(if\s*\(\s*(.+?)\s*(<|>|<=|>=|==|!=)\s*(.+?)\s*\)\s*\{\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*;\s*\}\s*else\s*\{\s*(?:(?:float|vec2|vec3|vec4|int|bool)\s+)?\4\s*=\s*(.+?)\s*;\s*\})");
         
-        std::string processedSnippet = snippet;
+        std::string processedSnippet = stripComments(snippet);
         std::smatch match;
         while (std::regex_search(processedSnippet, match, if_regex))
         {
@@ -1716,6 +1716,61 @@ namespace gladius
         static const std::set<std::string> ternaryFunctions = {"clamp"};
 
         return ternaryFunctions.find(functionName) != ternaryFunctions.end();
+    }
+
+    std::string ExpressionToGraphConverter::stripComments(std::string const & text)
+    {
+        // Statements are split on ';' without any lexical awareness, so a comment that spans a
+        // semicolon (or a "//" line comment swallowed into the next statement) would otherwise
+        // surface as an "Unrecognized statement" error. Comments are meaningless to the graph, so
+        // remove them before splitting. Quoted string literals are copied verbatim.
+        std::string out;
+        out.reserve(text.size());
+        std::size_t i = 0;
+        while (i < text.size())
+        {
+            auto const c = text[i];
+            if (c == '"' || c == '\'')
+            {
+                out.push_back(c);
+                ++i;
+                auto const quote = c;
+                while (i < text.size() && text[i] != quote)
+                {
+                    if (text[i] == '\\' && i + 1 < text.size())
+                    {
+                        out.push_back(text[i++]);
+                    }
+                    out.push_back(text[i++]);
+                }
+                if (i < text.size())
+                {
+                    out.push_back(text[i++]);
+                }
+                continue;
+            }
+            if (c == '/' && i + 1 < text.size() && text[i + 1] == '/')
+            {
+                while (i < text.size() && text[i] != '\n')
+                {
+                    ++i;
+                }
+                continue;
+            }
+            if (c == '/' && i + 1 < text.size() && text[i + 1] == '*')
+            {
+                auto const end = text.find("*/", i + 2);
+                if (end == std::string::npos)
+                {
+                    break;
+                }
+                i = end + 2;
+                continue;
+            }
+            out.push_back(c);
+            ++i;
+        }
+        return out;
     }
 
     std::string ExpressionToGraphConverter::removeWhitespace(std::string const & expr)

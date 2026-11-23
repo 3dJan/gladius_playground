@@ -2493,4 +2493,37 @@ namespace gladius::tests
         }
     }
 
+    TEST_F(ExpressionToGraphConverterTest,
+           StripComments_LineAndBlockComments_ReturnsStatementText)
+    {
+        // Arrange
+        std::string const text = "float a = 1.0; // note\n/* skip\nthis */ float b = 2.0;";
+
+        // Act
+        auto const stripped = ExpressionToGraphConverter::stripComments(text);
+
+        // Assert
+        EXPECT_EQ(stripped, "float a = 1.0; \n float b = 2.0;");
+    }
+
+    TEST_F(ExpressionToGraphConverterTest,
+           ConvertSnippetWithComments_AssignmentsBeforeReturn_AreParsed)
+    {
+        // Arrange
+        m_model->createBeginEndWithDefaultInAndOuts();
+
+        // Act: a comment carrying a semicolon used to swallow the next assignment
+        auto const nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+          "// scale = 2.5; keeps the lattice period\n"
+          "float r = sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z);\n"
+          "return r - 5.0;",
+          *m_model,
+          *m_parser,
+          {{"pos", ArgumentType::Vector}},
+          FunctionOutput::defaultOutput());
+
+        // Assert
+        ASSERT_NE(nodeId, 0u);
+    }
+
 } // namespace gladius::tests

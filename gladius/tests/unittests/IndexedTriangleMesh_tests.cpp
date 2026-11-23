@@ -448,6 +448,27 @@ namespace gladius::io::tests
         EXPECT_EQ(mesh.indices, source.indices);
     }
 
+    TEST(IndexedTriangleMeshRepair, Collapse_TriangleWithRepeatedIndex_DropsFaceAndKeepsRest)
+    {
+        // Arrange: grid extractors emit an index-degenerate face when the three sampled corners
+        // of a cell land on the isosurface at exactly the same grid sample.
+        auto mesh = makeTetrahedron();
+        mesh.positions.push_back(Eigen::Vector3f{0.0F, 0.0F, 0.0F});
+        mesh.positions.push_back(Eigen::Vector3f{1.0F, 0.0F, 0.0F});
+        auto const extra = static_cast<std::uint32_t>(mesh.positions.size() - 2U);
+        mesh.indices.insert(mesh.indices.end(), {extra, extra, extra + 1U});
+
+        // Act
+        auto const result = collapseGeometricallyDegenerateTriangles(mesh);
+
+        // Assert
+        EXPECT_EQ(result.removedTriangleCount, 1U);
+        EXPECT_EQ(result.remainingDegenerateTriangleCount, 0U);
+        EXPECT_FALSE(mesh.validationError().has_value());
+        EXPECT_EQ(mesh.indices.size() % 3U, 0U);
+        EXPECT_EQ(computeIndexedTriangleMeshDiagnostics(mesh).triangleCount, 4U);
+    }
+
     TEST(IndexedTriangleMeshRepair, Collapse_SliverOnOpenBoundary_LeavesTriangleInPlace)
     {
         auto mesh = makeSingleTriangle();

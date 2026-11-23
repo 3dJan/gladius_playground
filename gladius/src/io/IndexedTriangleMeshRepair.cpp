@@ -128,6 +128,22 @@ namespace gladius::io
             return sharedNeighbours.size() == 2U;
         }
 
+        /// @brief Counts triangles that repeat a vertex index.
+        [[nodiscard]] std::size_t countTrianglesWithRepeatedIndices(IndexedTriangleMesh const& mesh)
+        {
+            std::size_t count = 0U;
+            for (std::size_t offset = 0U; offset + 2U < mesh.indices.size(); offset += 3U)
+            {
+                if (mesh.indices[offset] == mesh.indices[offset + 1U] ||
+                    mesh.indices[offset + 1U] == mesh.indices[offset + 2U] ||
+                    mesh.indices[offset + 2U] == mesh.indices[offset])
+                {
+                    ++count;
+                }
+            }
+            return count;
+        }
+
         /// @brief Drops triangles that lost distinct corners and removes unreferenced vertices.
         /// @param triangleLabels Optional per-triangle labels filtered with the same predicate.
         void compactMesh(IndexedTriangleMesh& mesh,
@@ -236,6 +252,15 @@ namespace gladius::io
         {
             result.remainingDegenerateTriangleCount = countGeometricallyDegenerateTriangles(mesh);
             return result;
+        }
+
+        // A triangle that already repeats a vertex index contributes no area and cannot be collapsed
+        // (there is no edge to fold), so it is dropped up front. Grid extractors can emit such faces
+        // when a grid sample sits exactly on the isosurface.
+        if (auto const repeated = countTrianglesWithRepeatedIndices(mesh); repeated != 0U)
+        {
+            result.removedTriangleCount += repeated;
+            compactMesh(mesh, labels);
         }
 
         for (std::size_t pass = 0U; pass < kMaximumRepairPasses; ++pass)

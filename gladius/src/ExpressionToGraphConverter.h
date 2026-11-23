@@ -38,6 +38,9 @@ namespace gladius
       public:
         /// Marker prefix embedded in generated snippets for node types that cannot be converted
         static constexpr char const * UNSUPPORTED_NODE_MARKER = "/* unsupported:";
+
+        /// @brief Removes // and /* */ comments from snippet text before statement splitting
+        [[nodiscard]] static std::string stripComments(std::string const & text);
         /**
          * @brief Convert a mathematical expression to a node graph
          * @param expression The mathematical expression string
