@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Compare design-agent benchmark JSON reports against a baseline.
 
-Usage:
-    agent_bench_compare.py BASELINE.json CURRENT.json [--token-tolerance 0.5]
-                                                    [--counter-grace 5]
-                                                    [--allow-same-pass-count]
-
 The primary gate is the number of tasks that passed (visual judge AND deterministic
 geometry checks): any drop fails. Secondary metrics (model turns, tool calls, tool
 failures, tokens, wall time) are reported per task and fail when they regress beyond
 both a relative tolerance and an absolute counter grace, because a worse harness should
 show up there even when the task still passes.
+
+Prompt cost is gated harder than the other effort metrics: prompt prefill dominates wall time, so
+`usageWithJudge.totalPromptTokens` gets its own tighter tolerance and the prompt-cache hit rate
+(`trace.profile.context.promptCacheHitRate`) may not drop. The cache hit rate is what catches a
+harness change that quietly makes every turn re-prefill the whole prompt again.
+
+Usage:
+    agent_bench_compare.py BASELINE.json CURRENT.json [--token-tolerance 0.5]
+                                                    [--prompt-token-tolerance 0.25]
+                                                    [--cache-hit-slack 0.05]
+                                                    [--counter-grace 5]
+                                                    [--allow-same-pass-count]
 
 Exit codes:
     0  no regression beyond the tolerances
@@ -32,8 +39,27 @@ SECONDARY_METRICS = (
     ("metrics", "providerFailures", False),
     ("metrics", "unknownToolCalls", False),
     ("metrics", "truncatedTurns", False),
-    ("usageWithJudge", "totalPromptTokens", False),
     ("usageWithJudge", "outputTokens", False),
+)
+
+# Gated with the tighter --prompt-token-tolerance, because prefill is where the wall time is.
+PROMPT_COST_METRICS = (
+    ("usageWithJudge", "totalPromptTokens"),
+)
+
+# (path, higher_is_better) rates: a rate regression is a drop below baseline by more than slack.
+RATE_METRICS = (
+    (("trace", "profile", "context", "promptCacheHitRate"), True),
+)
+
+# Reported for diagnosis only, never gating.
+DIAGNOSTIC_METRICS = (
+    ("trace", "profile", "context", "contextTax"),
+    ("trace", "profile", "context", "cacheMissTurns"),
+    ("trace", "profile", "context", "systemPromptMutations"),
+    ("trace", "profile", "context", "imagesInHistoryLastTurn"),
+    ("trace", "profile", "context", "compactedToolResults"),
+    ("trace", "profile", "timeSplit", "modelPrefillMs"),
 )
 
 # Reported but never gating: a local LLM server's throughput depends on whatever else
@@ -113,6 +139,20 @@ def main():
              "regression fails the gate (default 5)",
     )
     parser.add_argument(
+        "--prompt-token-tolerance",
+        type=float,
+        default=0.25,
+        help="Relative regression fraction for totalPromptTokens (default 0.25). Tighter than "
+             "--token-tolerance because prompt bytes are what a harness optimisation targets.",
+    )
+    parser.add_argument(
+        "--cache-hit-slack",
+        type=float,
+        default=0.05,
+        help="How far the prompt-cache hit rate may drop below baseline before it fails "
+             "(default 0.05, i.e. 5 percentage points)",
+    )
+    parser.add_argument(
         "--allow-same-pass-count",
         action="store_true",
         help="Do not fail when the pass count stays equal but an individual task regressed",
@@ -155,6 +195,33 @@ def main():
             b, c = dig(base, path), dig(now, path)
             if b is not None and c is not None:
                 print(f"  {path[1]}: {b} -> {c}")
+
+        for path in DIAGNOSTIC_METRICS:
+            b, c = dig(base, path), dig(now, path)
+            if b is not None and c is not None:
+                print(f"  {path[-1]}: {b} -> {c}")
+
+        for group, metric in PROMPT_COST_METRICS:
+            b, c = dig(base, (group, metric)), dig(now, (group, metric))
+            if b is None or c is None:
+                continue
+            print(f"  {metric}: {b} -> {c} ({c - b:+d})")
+            if b > 0 and c - b > b * args.prompt_token_tolerance:
+                regressions.append(
+                    f"{task_id}: {metric} regressed {b} -> {c} "
+                    f"(> {args.prompt_token_tolerance:.0%} of baseline)"
+                )
+
+        for path, higher_is_better in RATE_METRICS:
+            b, c = dig(base, path), dig(now, path)
+            if b is None or c is None or not isinstance(b, float):
+                continue
+            print(f"  {path[-1]}: {b:.3f} -> {c:.3f}")
+            if higher_is_better and c + args.cache_hit_slack < b:
+                regressions.append(
+                    f"{task_id}: {path[-1]} regressed {b:.3f} -> {c:.3f} "
+                    f"(more than {args.cache_hit_slack:.2f} below baseline)"
+                )
 
         for group, metric, higher_is_better in SECONDARY_METRICS:
             b, c = dig(base, (group, metric)), dig(now, (group, metric))
