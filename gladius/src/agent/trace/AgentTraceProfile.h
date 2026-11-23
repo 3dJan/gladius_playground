@@ -66,6 +66,16 @@ namespace gladius::agent::trace
         double contextTax = 0.0;
         /// @brief Share of prompt tokens the provider served from its prompt cache
         double promptCacheHitRate = 0.0;
+        /// @brief Turns whose system prompt hash differs from the previous turn, i.e. turns that threw
+        ///        away the cached prefix
+        std::size_t systemPromptMutations = 0;
+        /// @brief Turns the provider reported no cached prompt tokens for
+        std::size_t cacheMissTurns = 0;
+        /// @brief Viewport images actually sent in the last turn
+        std::size_t imagesInHistoryLastTurn = 0;
+        std::size_t imagesKept = 0;
+        std::size_t imagesDropped = 0;
+        std::size_t compactedToolResults = 0;
         nlohmann::json promptBytesByComponent = nlohmann::json::object();
         std::int64_t largestToolResultBytes = 0;
         std::size_t largestToolResultTurn = 0;

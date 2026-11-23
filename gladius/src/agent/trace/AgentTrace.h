@@ -29,6 +29,8 @@ namespace gladius::agent::trace
         std::int64_t imageBytes = 0;
         std::size_t messages = 0;
         std::size_t toolDefinitions = 0;
+        /// @brief Number of image blocks in the request; an image costs prompt tokens whatever its size
+        std::size_t images = 0;
 
         [[nodiscard]] nlohmann::json toJson() const;
         [[nodiscard]] std::int64_t totalBytes() const noexcept;
@@ -36,6 +38,9 @@ namespace gladius::agent::trace
 
     /// @brief Measures the component sizes of a completion request
     [[nodiscard]] RequestSizeBreakdown breakdownRequest(CompletionRequest const & request);
+
+    /// @brief FNV-1a hash of the system prompt, cheap enough to log per turn
+    [[nodiscard]] std::int64_t systemPromptHash(std::string const & systemPrompt);
 
     /**
      * @brief Records a chronological, machine-readable trace of one agent run.

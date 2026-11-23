@@ -93,6 +93,12 @@ def analyze(records, wall_ms=0):
         "cacheReadTokens": 0,
         "contextTax": 0.0,
         "cacheHitRate": 0.0,
+        "cacheMissTurns": 0,
+        "systemPromptMutations": 0,
+        "imagesKept": 0,
+        "imagesDropped": 0,
+        "compactedToolResults": 0,
+        "imagesInHistoryLastTurn": 0,
         "promptBytes": {},
         "largestToolResult": (0, 0),
         "tools": {},
@@ -124,6 +130,7 @@ def analyze(records, wall_ms=0):
         elif kind == "truncation_nudge":
             out["truncationNudges"] += 1
 
+    seen_hash_state: dict = {}
     turn_durations = []
     ttft_samples = []
     prefill_rates = []
@@ -150,6 +157,20 @@ def analyze(records, wall_ms=0):
                 ttft_samples.append(ttft)
 
             usage = rec.get("usage", {})
+            if usage.get("cacheReadTokens", 0) <= 0:
+                out["cacheMissTurns"] += 1
+            # A changed system prompt invalidates the whole cached prefix: every such turn is a
+            # full re-prefill, which is the most expensive mistake a harness can make.
+            if "promptHashSeen" not in seen_hash_state:
+                seen_hash_state["promptHashSeen"] = True
+            elif rec.get("systemPromptHash", 0) != seen_hash_state["hash"]:
+                out["systemPromptMutations"] += 1
+            seen_hash_state["hash"] = rec.get("systemPromptHash", 0)
+            ctx = rec.get("context") or {}
+            out["imagesKept"] += ctx.get("imagesKept", 0)
+            out["imagesDropped"] += ctx.get("imagesDropped", 0)
+            out["compactedToolResults"] += ctx.get("toolResultsCompacted", 0)
+
             prompt = usage.get("totalPromptTokens", 0)
             output = usage.get("outputTokens", 0)
             out["totalPromptTokens"] += prompt
@@ -178,7 +199,9 @@ def analyze(records, wall_ms=0):
                 out["turnsAfterFailureMs"] += duration
                 out["turnsAfterFailurePromptTokens"] += prompt
 
-            for key, value in (rec.get("promptBytes") or {}).items():
+            prompt_bytes = rec.get("promptBytes") or {}
+            out["imagesInHistoryLastTurn"] = prompt_bytes.get("images", 0)
+            for key, value in prompt_bytes.items():
                 if key.endswith("Bytes") and key != "totalBytes":
                     out["promptBytes"][key] = out["promptBytes"].get(key, 0) + value
 
@@ -305,6 +328,12 @@ def print_profile(profile, label):
                                     profile["totalPromptTokens"],
                                     profile["contextTax"],
                                     profile["cacheHitRate"] * 100.0))
+    print("  prompt cache: misses={}/{} systemPromptMutations={} | images kept={} dropped={} "
+          "inLastTurn={} | toolResultsCompacted={}".format(
+              profile["cacheMissTurns"], profile["turns"],
+              profile["systemPromptMutations"], profile["imagesKept"],
+              profile["imagesDropped"], profile["imagesInHistoryLastTurn"],
+              profile["compactedToolResults"]))
     if profile["promptBytes"]:
         print("  prompt bytes by component:")
         for key, value in sorted(profile["promptBytes"].items(), key=lambda kv: -kv[1]):
@@ -345,7 +374,9 @@ SCALAR_KEYS = (
     "unaccountedMs", "turnP50Ms", "turnP95Ms", "turnMaxMs", "ttftP50Ms", "ttftP95Ms",
     "prefillTokPerSec", "decodeTokPerSec", "thinkingChars", "textChars", "toolJsonChars",
     "firstPromptTokens", "lastPromptTokens", "peakPromptTokens", "totalPromptTokens",
-    "contextTax", "cacheHitRate", "failedToolCalls", "turnsAfterFailure",
+    "contextTax", "cacheHitRate", "cacheMissTurns", "systemPromptMutations",
+    "imagesKept", "imagesDropped", "compactedToolResults", "imagesInHistoryLastTurn",
+    "failedToolCalls", "turnsAfterFailure",
     "turnsAfterFailureMs", "turnsAfterFailurePromptTokens", "truncatedTurns",
     "turnsWithoutToolCalls", "readOnlyTurnsMs", "judgeMs", "mutatingToolCalls",
 )

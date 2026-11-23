@@ -40,6 +40,7 @@ namespace gladius::agent::trace
                 {"imageBytes", imageBytes},
                 {"messages", messages},
                 {"toolDefinitions", toolDefinitions},
+                {"images", images},
                 {"totalBytes", totalBytes()}};
     }
 
@@ -77,6 +78,7 @@ namespace gladius::agent::trace
                 else if (auto const * image = std::get_if<ImageContent>(&part))
                 {
                     out.imageBytes += static_cast<std::int64_t>(image->data.size());
+                    ++out.images;
                 }
                 else if (auto const * call = std::get_if<ToolCall>(&part))
                 {
@@ -89,6 +91,19 @@ namespace gladius::agent::trace
             }
         }
         return out;
+    }
+
+    std::int64_t systemPromptHash(std::string const & systemPrompt)
+    {
+        // FNV-1a 64-bit. Only used to spot turns where the prompt prefix changed, which is what
+        // throws away the provider's prompt cache.
+        std::uint64_t hash = 1469598103934665603ULL;
+        for (char c : systemPrompt)
+        {
+            hash ^= static_cast<std::uint64_t>(static_cast<std::uint8_t>(c));
+            hash *= 1099511628211ULL;
+        }
+        return static_cast<std::int64_t>(hash);
     }
 
     AgentTraceRecorder::AgentTraceRecorder(std::filesystem::path outputFile)

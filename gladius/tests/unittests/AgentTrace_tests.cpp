@@ -495,6 +495,49 @@ namespace gladius::agent::trace::tests
         EXPECT_DOUBLE_EQ(profile.meanPrefillTokensPerSec, 2000.0 / 0.8);
     }
 
+    TEST(AgentTraceProfile, AnalyzeTrace_FlagsPromptCacheLossAndContextShaping)
+    {
+        // Arrange: turn 2 sends a different system prompt and gets nothing back from the cache
+        std::vector<nlohmann::json> records;
+        records.push_back({{"type", "turn"},
+                           {"turnIndex", 1},
+                           {"tMs", 1000},
+                           {"durationMs", 1000},
+                           {"completionMs", 1000},
+                           {"ttftMs", 900},
+                           {"firstContentMs", 900},
+                           {"systemPromptHash", 1},
+                           {"context",
+                            {{"imagesKept", 1},
+                             {"imagesDropped", 2},
+                             {"toolResultsKept", 6},
+                             {"toolResultsCompacted", 3}}},
+                           {"promptBytes", {{"imageBytes", 120}, {"images", 1}}},
+                           {"usage", {{"totalPromptTokens", 5000}, {"cacheReadTokens", 4000}}}});
+        records.push_back({{"type", "turn"},
+                           {"turnIndex", 2},
+                           {"tMs", 2000},
+                           {"durationMs", 1000},
+                           {"completionMs", 1000},
+                           {"ttftMs", 990},
+                           {"firstContentMs", 990},
+                           {"systemPromptHash", 2},
+                           {"context", {{"imagesKept", 1}, {"imagesDropped", 0}}},
+                           {"promptBytes", {{"imageBytes", 0}, {"images", 0}}},
+                           {"usage", {{"totalPromptTokens", 6000}, {"cacheReadTokens", 0}}}});
+
+        // Act
+        auto const profile = analyzeTrace(records, 2000);
+
+        // Assert
+        EXPECT_EQ(profile.systemPromptMutations, 1u);
+        EXPECT_EQ(profile.cacheMissTurns, 1u);
+        EXPECT_EQ(profile.imagesKept, 2u);
+        EXPECT_EQ(profile.imagesDropped, 2u);
+        EXPECT_EQ(profile.compactedToolResults, 3u);
+        EXPECT_EQ(profile.imagesInHistoryLastTurn, 0u);
+    }
+
     TEST(AgentTrace, WriteTimeline_EmitsValidChromeEvents)
     {
         // Arrange

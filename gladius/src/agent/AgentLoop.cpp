@@ -28,7 +28,8 @@ namespace gladius::agent
                                                     std::int64_t turnStartMs,
                                                     std::int64_t buildMs,
                                                     CompletionRequest const & request,
-                                                    CompletionResponse const & response)
+                                                    CompletionResponse const & response,
+                                                    ContextBuildStats const & contextStats)
         {
             auto const usage = response.usage;
             auto const timing = response.timing;
@@ -47,6 +48,12 @@ namespace gladius::agent
               {"stopReason", response.stopReason},
               {"success", response.success},
               {"toolCallsIssued", response.toolCalls.size()},
+              {"systemPromptHash", trace::systemPromptHash(request.systemPrompt)},
+              {"context",
+               {{"imagesKept", contextStats.imagesKept},
+                {"imagesDropped", contextStats.imagesDropped},
+                {"toolResultsKept", contextStats.toolResultsKept},
+                {"toolResultsCompacted", contextStats.toolResultsCompacted}}},
               {"promptBytes", trace::breakdownRequest(request).toJson()},
               {"usage",
                {{"inputTokens", usage.inputTokens},
@@ -147,8 +154,9 @@ namespace gladius::agent
             DesignContextSnapshot const snapshot =
               snapshotProvider ? snapshotProvider() : DesignContextSnapshot{};
             std::int64_t const buildStartMs = traceRecorder ? traceRecorder->mark() : 0;
+            ContextBuildStats contextStats;
             CompletionRequest const req =
-              contextBuilder.build(conversation, registry, policy.privacy(), snapshot);
+              contextBuilder.build(conversation, registry, policy.privacy(), snapshot, &contextStats);
             std::int64_t const buildMs = traceRecorder ? traceRecorder->mark() - buildStartMs : 0;
 
             ++result.modelTurns;
@@ -182,7 +190,8 @@ namespace gladius::agent
                                                           turnStartMs,
                                                           buildMs,
                                                           req,
-                                                          response));
+                                                          response,
+                                                          contextStats));
             }
 
             if (cancellation.isCancelled())

@@ -128,6 +128,12 @@ namespace gladius::agent::trace
                   {"totalPromptTokens", totalPromptTokens},
                   {"contextTax", std::round(contextTax * 100.0) / 100.0},
                   {"promptCacheHitRate", std::round(promptCacheHitRate * 1000.0) / 1000.0},
+                  {"systemPromptMutations", systemPromptMutations},
+                  {"cacheMissTurns", cacheMissTurns},
+                  {"imagesInHistoryLastTurn", imagesInHistoryLastTurn},
+                  {"imagesKept", imagesKept},
+                  {"imagesDropped", imagesDropped},
+                  {"compactedToolResults", compactedToolResults},
                   {"promptBytesByComponent", promptBytesByComponent},
                   {"largestToolResultBytes", largestToolResultBytes},
                   {"largestToolResultTurn", largestToolResultTurn}}},
@@ -177,6 +183,8 @@ namespace gladius::agent::trace
             }
         }
 
+        bool havePreviousHash = false;
+        std::int64_t previousPromptHash = 0;
         std::vector<std::int64_t> turnDurations;
         std::vector<std::int64_t> ttftSamples;
         std::vector<std::int64_t> toolDurations;
@@ -213,6 +221,24 @@ namespace gladius::agent::trace
                 profile.modelGenerateMs += completionMs > prefillMs ? completionMs - prefillMs : 0;
 
                 std::int64_t const promptTokens = readNestedInt(record, "usage", "totalPromptTokens");
+                std::int64_t const cacheReadForTurn = readNestedInt(record, "usage", "cacheReadTokens");
+                if (cacheReadForTurn <= 0)
+                {
+                    ++profile.cacheMissTurns;
+                }
+                // A changed system prompt invalidates the whole cached prefix, so every such turn is
+                // a full re-prefill: the single most expensive mistake a harness can make.
+                std::int64_t const promptHash = readInt(record, "systemPromptHash");
+                if (havePreviousHash && promptHash != previousPromptHash)
+                {
+                    ++profile.systemPromptMutations;
+                }
+                havePreviousHash = true;
+                previousPromptHash = promptHash;
+                profile.imagesKept += static_cast<std::size_t>(readNestedInt(record, "context", "imagesKept"));
+                profile.imagesDropped += static_cast<std::size_t>(readNestedInt(record, "context", "imagesDropped"));
+                profile.compactedToolResults +=
+                  static_cast<std::size_t>(readNestedInt(record, "context", "toolResultsCompacted"));
                 std::int64_t const outputTokens = readNestedInt(record, "usage", "outputTokens");
                 profile.totalPromptTokens += promptTokens;
                 cacheReadTokens += readNestedInt(record, "usage", "cacheReadTokens");
@@ -253,6 +279,10 @@ namespace gladius::agent::trace
                 {
                     ++profile.turnsWithoutToolCalls;
                     profile.readOnlyTurnsMs += durationMs;
+                }
+                if (record.contains("promptBytes") && record["promptBytes"].is_object())
+                {
+                    profile.imagesInHistoryLastTurn = record["promptBytes"].value("images", std::size_t{0});
                 }
 
                 if (record.contains("promptBytes") && record["promptBytes"].is_object())
@@ -419,6 +449,11 @@ namespace gladius::agent::trace
             << profile.lastTurnPromptTokens << " total=" << profile.totalPromptTokens
             << " tax=" << profile.contextTax << "x cacheHit="
             << (profile.promptCacheHitRate * 100.0) << "%\n";
+        out << "  prompt cache: misses=" << profile.cacheMissTurns << "/" << profile.turns
+            << " systemPromptMutations=" << profile.systemPromptMutations
+            << " | images kept=" << profile.imagesKept << " dropped=" << profile.imagesDropped
+            << " inLastTurn=" << profile.imagesInHistoryLastTurn
+            << " | toolResultsCompacted=" << profile.compactedToolResults << "\n";
         out << "  waste: failedToolCalls=" << profile.failedToolCalls << " denied="
             << profile.deniedToolCalls << " turnsAfterFailure=" << profile.turnsAfterFailure
             << " (" << profile.turnsAfterFailureMs << "ms, "
