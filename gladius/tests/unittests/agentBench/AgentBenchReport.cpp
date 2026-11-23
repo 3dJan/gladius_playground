@@ -1,0 +1,292 @@
+#include "AgentBenchReport.h"
+
+#include "FileSystemUtils.h"
+#include "agent/providers/AnthropicProvider.h"
+#include "agent/providers/OpenAiProvider.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <utility>
+
+namespace gladius::agent::bench
+{
+    namespace
+    {
+        std::string envOrReport(char const * name, std::string const & fallback)
+        {
+            char const * const value = std::getenv(name);
+            return (value != nullptr && *value != '\0') ? std::string{value} : fallback;
+        }
+
+        /// @brief Judge runs are a single toolless turn; streaming is not needed
+        [[nodiscard]] std::unique_ptr<IAiProvider>
+        makeJudgeProvider(BenchRunConfig const & config)
+        {
+            ProviderConfig cfg;
+            cfg.endpoint = config.endpoint;
+            cfg.apiKey = config.apiKey;
+            cfg.model = config.model;
+            cfg.stream = false;
+            cfg.maxTokens = 2000;
+            cfg.temperature = 0.0;
+            cfg.timeoutSeconds = config.providerTimeoutSeconds;
+            if (config.api == "openai")
+            {
+                return std::make_unique<OpenAiProvider>(cfg);
+            }
+            return std::make_unique<AnthropicProvider>(cfg);
+        }
+
+        void writeFileBytes(std::filesystem::path const & path, std::vector<std::byte> const & bytes)
+        {
+            std::ofstream out(path, std::ios::binary);
+            if (!out || bytes.empty())
+            {
+                return;
+            }
+            out.write(reinterpret_cast<char const *>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+        }
+
+        [[nodiscard]] std::string isoNow()
+        {
+            auto const t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            std::tm tm{};
+#if defined(_WIN32)
+            gmtime_s(&tm, &t);
+#else
+            gmtime_r(&t, &tm);
+#endif
+            std::ostringstream out;
+            out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+            return out.str();
+        }
+    } // namespace
+
+    nlohmann::json BenchRunRecord::toJson() const
+    {
+        return {{"taskId", task.id},
+                {"title", task.title},
+                {"prompt", task.prompt},
+                {"metrics", metrics.toJson()},
+                {"usageWithJudge",
+                 [&] {
+                     auto total = metrics.usage;
+                     total.accumulate(judge.usage);
+                     return nlohmann::json{{"inputTokens", total.inputTokens},
+                                           {"outputTokens", total.outputTokens},
+                                           {"cacheReadTokens", total.cacheReadTokens},
+                                           {"cacheWriteTokens", total.cacheWriteTokens},
+                                           {"totalPromptTokens", total.totalPromptTokens()}};
+                 }()},
+                {"geometry", geometry.toJson()},
+                {"geometryChecks", checksToJson(geometryChecks)},
+                {"judge", judge.toJson()},
+                {"verdict",
+                 {{"agentCompleted", metrics.agentCompleted},
+                  {"geometryPassed", geometryPassed()},
+                  {"visualPassed", judge.available && judge.passes},
+                  {"judgeAvailable", judge.available},
+                  {"taskPassed", taskPassed()}}},
+                {"artifacts", artifacts}};
+    }
+
+    AgentBenchReport::AgentBenchReport(BenchRunConfig const & config,
+                                       std::filesystem::path outputDir)
+        : m_config(config)
+        , m_outputDir(std::move(outputDir))
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(m_outputDir, ec);
+    }
+
+    BenchRunRecord AgentBenchReport::runTask(HeadlessAgentHost & host,
+                                             AgentBenchTask const & task,
+                                             std::unique_ptr<IAiProvider> agentProvider,
+                                             std::unique_ptr<IAiProvider> judgeProvider)
+    {
+        auto const userLibrary = getUserLibraryDir();
+        auto const libraryBefore = listLibraryFiles(userLibrary);
+
+        auto const counter = std::make_shared<ProviderFailureCounter>();
+        auto observing = std::make_unique<ObservingProvider>(std::move(agentProvider),
+                                                            m_config.model,
+                                                            counter);
+
+        AgentBenchMetricsCollector collector{task.id};
+        AgentRunResult const result = host.runTask(task, std::move(observing));
+        collector.collectFrom(host, result, counter->failures);
+        collector.diffUserLibrary(userLibrary, libraryBefore);
+
+        BenchRunRecord record;
+        record.task = task;
+        record.metrics = collector.metrics();
+        record.metrics.providerName = result.providerName;
+
+        auto const taskDir = m_outputDir / task.id;
+        std::error_code ec;
+        std::filesystem::create_directories(taskDir, ec);
+
+        std::string stlError;
+        auto const stlPath = taskDir / "model.stl";
+        if (host.exportStl(stlPath, stlError))
+        {
+            record.geometry = measureStl(stlPath.string());
+            record.artifacts.push_back(stlPath.string());
+        }
+        else if (record.geometry.error.empty())
+        {
+            record.geometry.error = stlError.empty() ? "STL export failed" : stlError;
+        }
+        auto const doc3mf = taskDir / "model.3mf";
+        std::string saveError;
+        if (host.saveDocument(doc3mf, saveError))
+        {
+            record.artifacts.push_back(doc3mf.string());
+        }
+
+        std::vector<std::vector<std::byte>> views;
+        for (auto const & view : task.judgeViews)
+        {
+            auto bytes = host.renderView(view, m_config.renderWidth);
+            if (bytes.empty())
+            {
+                continue;
+            }
+            auto const viewPath = taskDir / ("view-" + view + ".png");
+            writeFileBytes(viewPath, bytes);
+            record.artifacts.push_back(viewPath.string());
+            views.push_back(std::move(bytes));
+        }
+
+        record.geometryChecks = evaluateGeometry(task, record.geometry);
+
+        if (!judgeProvider)
+        {
+            judgeProvider = makeJudgeProvider(m_config);
+        }
+        AgentBenchJudge judge(std::move(judgeProvider), m_config.renderWidth);
+        record.judge = judge.judge(task, views);
+        m_records.push_back(record);
+        return record;
+    }
+
+    void AgentBenchReport::add(BenchRunRecord record)
+    {
+        m_records.push_back(std::move(record));
+    }
+
+    std::size_t AgentBenchReport::passedCount() const
+    {
+        return countIf([](BenchRunRecord const & r) { return r.taskPassed(); });
+    }
+
+    std::size_t AgentBenchReport::countIf(
+      std::function<bool(BenchRunRecord const &)> const & predicate) const
+    {
+        return static_cast<std::size_t>(
+          std::count_if(m_records.begin(), m_records.end(), predicate));
+    }
+
+    nlohmann::json AgentBenchReport::runMetadata() const
+    {
+        return {{"schemaVersion", 1},
+                {"generatedAt", isoNow()},
+                {"endpoint", m_config.endpoint},
+                {"model", m_config.model},
+                {"api", m_config.api},
+                {"streaming", m_config.stream},
+                {"limits",
+                 {{"maxModelTurns", m_config.maxModelTurns},
+                  {"maxToolCalls", m_config.maxToolCalls},
+                  {"wallTimeMs", m_config.maxWallTime.count()}}},
+                {"renderSize", m_config.renderWidth},
+                {"userLibraryDir", getUserLibraryDir().string()},
+                {"elapsedMs",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - m_startTime)
+                   .count()}};
+    }
+
+    nlohmann::json AgentBenchReport::toJson() const
+    {
+        nlohmann::json runs = nlohmann::json::array();
+        for (auto const & record : m_records)
+        {
+            runs.push_back(record.toJson());
+        }
+        return {{"schemaVersion", 1},
+                {"metadata", runMetadata()},
+                {"summary",
+                 {{"runs", m_records.size()},
+                  {"passed", passedCount()},
+                  {"agentCompleted",
+                   countIf([](BenchRunRecord const & r) { return r.metrics.agentCompleted; })},
+                  {"geometryPassed",
+                   countIf([](BenchRunRecord const & r) { return r.geometryPassed(); })},
+                  {"visualPassed",
+                   countIf([](BenchRunRecord const & r) {
+                       return r.judge.available && r.judge.passes;
+                   })}}},
+                {"runs", std::move(runs)}};
+    }
+
+    std::filesystem::path AgentBenchReport::write(std::string const & fileName) const
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(m_outputDir, ec);
+        auto const path = m_outputDir / fileName;
+        std::ofstream out(path);
+        if (out)
+        {
+            out << toJson().dump(2);
+        }
+        return path;
+    }
+
+    std::filesystem::path benchOutputDir()
+    {
+        return envOrReport("GLADIUS_AGENT_BENCH_OUTPUT", "agent_bench");
+    }
+
+    BenchSession & BenchSession::instance()
+    {
+        static BenchSession session;
+        return session;
+    }
+
+    BenchSession::BenchSession()
+        : m_config(BenchRunConfig::fromEnvironment())
+        , m_outputDir(benchOutputDir())
+        , m_report(std::make_unique<AgentBenchReport>(m_config, m_outputDir))
+    {
+    }
+
+    BenchAvailability BenchSession::ensureHost()
+    {
+        if (m_host)
+        {
+            return m_availability;
+        }
+        m_librarySandbox.emplace(m_outputDir / "user-library");
+        m_host = std::make_unique<HeadlessAgentHost>(m_config);
+        m_availability = m_host->initialize();
+        if (!m_availability.available)
+        {
+            m_host.reset();
+            m_librarySandbox.reset();
+        }
+        return m_availability;
+    }
+
+    BenchRunRecord BenchSession::runTask(AgentBenchTask const & task)
+    {
+        return m_report->runTask(*m_host, task, m_host->makeDefaultProvider(), nullptr);
+    }
+} // namespace gladius::agent::bench
