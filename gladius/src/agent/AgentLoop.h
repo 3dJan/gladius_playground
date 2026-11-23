@@ -34,6 +34,12 @@ namespace gladius::agent
         bool cancelled = false;
         std::size_t modelTurns = 0;
         std::size_t toolCalls = 0;
+        /// @brief Tokens reported by the provider, summed over all model turns of the run
+        TokenUsage usage;
+        /// @brief Provider that answered the last model turn
+        std::string providerName;
+        /// @brief Model turns the provider cut off at its completion limit
+        std::size_t truncatedTurns = 0;
         std::string finalMessage;
         std::string error;
     };

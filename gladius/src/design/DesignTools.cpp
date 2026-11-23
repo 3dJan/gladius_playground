@@ -21,6 +21,80 @@ namespace gladius::design
 {
     namespace
     {
+        /**
+         * @brief Reads a string array argument, tolerating a single string.
+         * @details Models frequently emit "tags": "gyroid" where an array is declared, which makes
+         *          nlohmann throw a type error and the tool call fail. A lone string is a valid
+         *          one-element list, so accept it instead.
+         */
+        [[nodiscard]] std::vector<std::string> readStringArray(nlohmann::json const & value)
+        {
+            if (value.is_null())
+            {
+                return {};
+            }
+            if (value.is_string())
+            {
+                return {value.get<std::string>()};
+            }
+            if (!value.is_array())
+            {
+                return {};
+            }
+            std::vector<std::string> out;
+            out.reserve(value.size());
+            for (auto const & entry : value)
+            {
+                if (entry.is_string())
+                {
+                    out.push_back(entry.get<std::string>());
+                }
+                else if (entry.is_number() || entry.is_boolean())
+                {
+                    out.push_back(entry.dump());
+                }
+            }
+            return out;
+        }
+
+        /// @brief Overload that reads the array stored under `key`
+        [[nodiscard]] std::vector<std::string> readStringArray(nlohmann::json const & args,
+                                                               char const * key)
+        {
+            auto const it = args.find(key);
+            return readStringArray(it == args.end() ? nlohmann::json{} : *it);
+        }
+
+        /**
+         * @brief Reads a numeric argument, tolerating a numeric string.
+         * @details A model that writes "qualityScore": "0.8" instead of 0.8 makes nlohmann throw a
+         *          type error, so the whole tool call fails. The value is unambiguous either way.
+         */
+        [[nodiscard]] double readNumber(nlohmann::json const & args, char const * key, double fallback)
+        {
+            auto const it = args.find(key);
+            if (it == args.end())
+            {
+                return fallback;
+            }
+            if (it->is_number())
+            {
+                return it->get<double>();
+            }
+            if (it->is_string())
+            {
+                try
+                {
+                    return std::stod(it->get<std::string>());
+                }
+                catch (std::exception const &)
+                {
+                    return fallback;
+                }
+            }
+            return fallback;
+        }
+
         Evaluation defaultEvaluateConfiguration(DesignGraph const & graph,
                                                 DesignCatalogue const & catalogue,
                                                 Configuration const & cfg)
@@ -45,7 +119,23 @@ namespace gladius::design
             }
             else if (!graph.nodes().empty())
             {
-                eval.deterministicWarnings.push_back("Some design nodes lack a selected variant");
+                std::string missing;
+                for (auto const & [nodeId, node] : graph.nodes())
+                {
+                    if (cfg.selectedVariants.contains(nodeId))
+                    {
+                        continue;
+                    }
+                    if (!missing.empty())
+                    {
+                        missing += ", ";
+                    }
+                    missing += nodeId + " (" + node.name + ")";
+                }
+                eval.deterministicWarnings.push_back(
+                  "Some design nodes lack a selected variant: " + missing
+                  + ". Pass a selectedVariants entry for each of them to create_configuration and "
+                    "activate the result before calling finish_design again.");
             }
 
             eval.pruningScore = static_cast<double>(eval.deterministicPassed.size()) * 10.0
@@ -421,7 +511,11 @@ namespace gladius::design
               auto const active = ctx.graph.activeConfiguration();
               if (!active.has_value())
               {
-                  return {{"success", false}, {"error", "No active configuration to validate"}};
+                  return {{"success", false},
+                          {"error",
+                           "No active configuration to validate. Create one with "
+                           "create_configuration (a selectedVariants entry for every design node), "
+                           "then call activate_configuration, then finish_design."}};
               }
               Evaluation const eval = ctx.validateModel
                                         ? ctx.validateModel(ctx.graph, *active)
@@ -909,7 +1003,7 @@ namespace gladius::design
               std::string const newName = args.value("newName", "");
               std::string const baseId = args.value("baseConfigId", "");
               std::string const overId = args.value("overrideConfigId", "");
-              auto const nodeIds = args.value("overrideNodeIds", std::vector<std::string>{});
+              auto const nodeIds = readStringArray(args, "overrideNodeIds");
               if (newName.empty() || baseId.empty() || overId.empty())
               {
                   return {{"success", false},
@@ -965,8 +1059,8 @@ namespace gladius::design
               {"suggestedCategory", {{"type", "string"}}}}}},
            tools::ToolPolicy::ReadOnly},
           [](nlohmann::json const & args) -> nlohmann::json {
-              double const quality = std::clamp(args.value("qualityScore", 0.0), 0.0, 1.0);
-              double const reusability = std::clamp(args.value("reusabilityScore", 0.0), 0.0, 1.0);
+              double const quality = std::clamp(readNumber(args, "qualityScore", 0.0), 0.0, 1.0);
+              double const reusability = std::clamp(readNumber(args, "reusabilityScore", 0.0), 0.0, 1.0);
               bool const recommendExport = (quality >= 0.75 && reusability >= 0.75);
               return {{"success", true},
                       {"componentName", args.value("componentName", "")},
@@ -1046,7 +1140,7 @@ namespace gladius::design
                   meta.libraryFunctions =
                     io::serializeResourceIds({static_cast<Lib3MF_uint32>(functionId)});
                   meta.libraryDescription = description;
-                  auto const tagsVec = args.value("tags", std::vector<std::string>{});
+                  auto const tagsVec = readStringArray(args, "tags");
                   for (std::size_t i = 0; i < tagsVec.size(); ++i)
                   {
                       if (i > 0)
@@ -1122,7 +1216,7 @@ namespace gladius::design
                   for (auto const & item : args["items"])
                   {
                       std::vector<ChecklistEntry> checks;
-                      for (auto const & c : item.value("checklist", std::vector<std::string>{}))
+                      for (auto const & c : readStringArray(item, "checklist"))
                       {
                           checks.push_back(ChecklistEntry{c, false});
                       }
@@ -1150,7 +1244,7 @@ namespace gladius::design
                   return {{"success", false}, {"error", "TodoStore unavailable"}};
               }
               std::vector<ChecklistEntry> checks;
-              for (auto const & c : args.value("checklist", std::vector<std::string>{}))
+              for (auto const & c : readStringArray(args, "checklist"))
               {
                   checks.push_back(ChecklistEntry{c, false});
               }
@@ -1221,7 +1315,7 @@ namespace gladius::design
               std::string const id = ctx.knowledge->store(
                 args.value("title", ""),
                 args.value("category", "general"),
-                args.value("tags", std::vector<std::string>{}),
+                readStringArray(args, "tags"),
                 args.value("summary", ""));
               return {{"success", true}, {"knowledgeId", id}};
           });
@@ -1278,7 +1372,7 @@ namespace gladius::design
                 args.value("id", ""),
                 args.value("title", ""),
                 args.value("category", ""),
-                args.value("tags", std::vector<std::string>{}),
+                readStringArray(args, "tags"),
                 args.value("summary", ""));
               return {{"success", ok}};
           });

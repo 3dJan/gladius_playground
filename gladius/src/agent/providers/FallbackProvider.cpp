@@ -51,6 +51,10 @@ namespace gladius::agent
             };
 
             CompletionResponse resp = co_await cand.provider->complete(request, guardedDelta, cancellation);
+            if (resp.providerName.empty())
+            {
+                resp.providerName = cand.label;
+            }
             if (resp.success || cancellation.isCancelled())
             {
                 co_return resp;

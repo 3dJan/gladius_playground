@@ -57,6 +57,11 @@ namespace gladius::agent
               req,
               [&](std::string const & delta) { eventQueue.push(TextDeltaEvent{delta}); },
               cancellation);
+            result.usage.accumulate(response.usage);
+            if (!response.providerName.empty())
+            {
+                result.providerName = response.providerName;
+            }
 
             if (cancellation.isCancelled())
             {
@@ -64,6 +69,13 @@ namespace gladius::agent
                 result.error = "Agent run cancelled";
                 eventQueue.push(AgentFailedEvent{result.error});
                 co_return result;
+            }
+
+            bool const truncated =
+              response.stopReason == "max_tokens" || response.stopReason == "length";
+            if (truncated)
+            {
+                ++result.truncatedTurns;
             }
 
             if (!response.success)
@@ -173,6 +185,17 @@ namespace gladius::agent
                     eventQueue.push(AgentCompletedEvent{result.finalMessage});
                     co_return result;
                 }
+            }
+
+            if (truncated)
+            {
+                // A cut-off answer drops the tail of the last tool call's arguments, which surfaces
+                // as a confusing "argument is required" failure. Tell the model to split its work up.
+                conversation.appendUserText(
+                  "Your previous answer hit the model output limit, so the last tool call may have "
+                  "arrived incomplete. Keep single tool calls short: emit a program snippet one "
+                  "helper function at a time (root function last) instead of the whole program, and "
+                  "avoid repeating large snippets you already sent.");
             }
         }
 

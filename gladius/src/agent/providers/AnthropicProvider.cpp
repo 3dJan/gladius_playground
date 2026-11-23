@@ -14,6 +14,29 @@ namespace gladius::agent
             std::string inputJson;
         };
 
+        /// @brief Merge the Anthropic `usage` object of a payload into `usage`.
+        /// Present keys overwrite; absent keys keep their previous value, so the `message_start`
+        /// prompt totals survive a `message_delta` that only reports cumulative output tokens.
+        void mergeAnthropicUsage(nlohmann::json const & payload, TokenUsage & usage)
+        {
+            if (!payload.contains("usage") || !payload["usage"].is_object())
+            {
+                return;
+            }
+            auto const & u = payload["usage"];
+            auto const readInto = [&u](char const * key, std::int64_t & target)
+            {
+                if (u.contains(key) && u[key].is_number())
+                {
+                    target = u[key].get<std::int64_t>();
+                }
+            };
+            readInto("input_tokens", usage.inputTokens);
+            readInto("output_tokens", usage.outputTokens);
+            readInto("cache_read_input_tokens", usage.cacheReadTokens);
+            readInto("cache_creation_input_tokens", usage.cacheWriteTokens);
+        }
+
         std::string resolveAnthropicUrl(std::string endpoint)
         {
             if (endpoint.empty())
@@ -156,6 +179,7 @@ namespace gladius::agent
                 }
             }
         }
+        mergeAnthropicUsage(body, resp.usage);
         return resp;
     }
 
@@ -166,6 +190,7 @@ namespace gladius::agent
     {
         HttpRequest httpReq;
         httpReq.url = resolveAnthropicUrl(m_config.endpoint);
+        httpReq.timeoutSeconds = m_config.timeoutSeconds;
         httpReq.headers.emplace_back("Content-Type: application/json");
         httpReq.headers.emplace_back("anthropic-version: 2023-06-01");
         if (!m_config.apiKey.empty())
@@ -219,6 +244,11 @@ namespace gladius::agent
                   resp.error = payload["error"].value("message", payload["error"].dump());
                   return;
               }
+              // Prompt-side totals arrive in `message_start`; cumulative completion totals in `message_delta`.
+              mergeAnthropicUsage(type == "message_start" && payload.contains("message")
+                                    ? payload["message"]
+                                    : payload,
+                                  resp.usage);
               if (type == "content_block_start" && payload.contains("content_block"))
               {
                   int const idx = payload.value("index", 0);

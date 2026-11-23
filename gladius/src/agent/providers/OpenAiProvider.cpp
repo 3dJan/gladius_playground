@@ -29,6 +29,31 @@ namespace gladius::agent
             }
             return endpoint + "/chat/completions";
         }
+
+        /// @brief Merge an OpenAI-style `usage` object into `usage`, ignoring absent fields.
+        void mergeOpenAiUsage(nlohmann::json const & body, TokenUsage & usage)
+        {
+            if (!body.contains("usage") || !body["usage"].is_object())
+            {
+                return;
+            }
+            auto const & u = body["usage"];
+            auto const readInto = [](nlohmann::json const & src,
+                                     char const * key,
+                                     std::int64_t & target)
+            {
+                if (src.contains(key) && src[key].is_number())
+                {
+                    target = src[key].get<std::int64_t>();
+                }
+            };
+            readInto(u, "prompt_tokens", usage.inputTokens);
+            readInto(u, "completion_tokens", usage.outputTokens);
+            if (u.contains("prompt_tokens_details") && u["prompt_tokens_details"].is_object())
+            {
+                readInto(u["prompt_tokens_details"], "cached_tokens", usage.cacheReadTokens);
+            }
+        }
     } // namespace
 
     OpenAiProvider::OpenAiProvider(ProviderConfig config,
@@ -147,6 +172,12 @@ namespace gladius::agent
             {"stream", m_config.stream}
         };
 
+        if (m_config.stream)
+        {
+            // Without this most OpenAI-compatible servers omit `usage` from streamed responses.
+            payload["stream_options"] = {{"include_usage", true}};
+        }
+
         if (!request.tools.empty())
         {
             nlohmann::json toolsArr = nlohmann::json::array();
@@ -209,6 +240,7 @@ namespace gladius::agent
                 }
             }
         }
+        mergeOpenAiUsage(body, resp.usage);
         return resp;
     }
 
@@ -219,6 +251,7 @@ namespace gladius::agent
     {
         HttpRequest httpReq;
         httpReq.url = resolveOpenAiUrl(m_config.endpoint);
+        httpReq.timeoutSeconds = m_config.timeoutSeconds;
         httpReq.headers.emplace_back("Content-Type: application/json");
         if (!m_config.apiKey.empty())
         {
@@ -286,6 +319,8 @@ namespace gladius::agent
                   resp.error = chunk["error"].value("message", chunk["error"].dump());
                   return;
               }
+              // The final usage chunk carries an empty `choices` array, so read it before the early return.
+              mergeOpenAiUsage(chunk, resp.usage);
               if (!chunk.contains("choices") || !chunk["choices"].is_array() || chunk["choices"].empty())
               {
                   return;

@@ -31,7 +31,22 @@ namespace gladius::agent
                "`vec3(...)` is an expression/parameter type).\n"
                "- Reference local variables by their plain name (`name`, NEVER `in_name`). `in_` is only for function parameters.\n"
                "- No `for`/`while` loops or recursion; use `mod`, `clamp`, `round`, `min`, `max`, `abs`, `sin`, `cos`, `length`, `dot`.\n"
-               "- Keep `main` modular by calling helper functions.\n";
+               "- Keep `main` modular by calling helper functions.\n\n"
+               "ROOT FUNCTION AND RESOURCE IDS (the model only renders when these are respected):\n"
+               "- The rendered solid is whatever the root function writes to its `shape` output (negative inside, zero surface).\n"
+               "- The root is always `main (ID: 3)` and keeps its signature `(vec3 color, float shape) main_3(vec3 pos)`. "
+               "Write both outputs: `color = vec3(0.1, 0.2, 1.0);` and your geometry into `shape`.\n"
+               "- Never declare a function with ID 0 and never rename or drop the `shape` output, otherwise nothing is rendered.\n"
+               "- Call helpers by their qualified name (`sphere_5(pos, 5.0)`). Reuse the helper IDs the document already provides "
+               "(see get_program_snippet) instead of re-declaring them, and pick unused IDs for genuinely new helpers.\n"
+               "\nTOOL ARGUMENTS:\n"
+               "- Match the declared argument type exactly. A field declared as an array must be a JSON array even for a single "
+               "element (`\"tags\": [\"gyroid\"]`, never `\"tags\": \"gyroid\"`), an object must be an object, and an integer must be "
+               "an integer. Omit optional fields instead of passing a value of the wrong type.\n"
+               "\nFINISH CEREMONY (required before finish_design succeeds):\n"
+               "- add_function for each part, then create_variant for every design node, then create_configuration whose "
+               "`selectedVariants` has an entry for every design node, then activate_configuration, and only then finish_design. "
+               "finish_design without an active configuration always fails.\n";
     }
 
     CompletionRequest ContextBuilder::build(Conversation const & conversation,

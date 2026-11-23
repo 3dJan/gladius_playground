@@ -1,0 +1,168 @@
+#include "agent/KnowledgeStore.h"
+#include "design/DesignCatalogue.h"
+#include "design/DesignGraph.h"
+#include "design/DesignTools.h"
+#include "design/TodoStore.h"
+#include "tools/CheckpointManager.h"
+#include "tools/ToolExecutor.h"
+#include "tools/TransactionManager.h"
+#include "io/CancellationToken.h"
+
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+
+#include <filesystem>
+#include <string>
+
+namespace gladius::design::tests
+{
+    namespace
+    {
+        /// @brief Registers the design tools over an isolated context and returns the executor
+        struct ToolHarness
+        {
+            DesignGraph graph;
+            DesignCatalogue catalogue;
+            tools::TransactionManager transactions;
+            tools::CheckpointManager checkpoints;
+            TodoStore todos;
+            agent::KnowledgeStore knowledge;
+            /// @brief Must outlive the registered tool lambdas, therefore a member
+            DesignToolContext ctx;
+            tools::ToolRegistry registry;
+            tools::ToolExecutor executor;
+            io::CancellationToken cancellation;
+
+            ToolHarness()
+                : knowledge(std::filesystem::temp_directory_path()
+                            / "gladius_design_tools_args.json")
+                , ctx{graph,
+                      catalogue,
+                      transactions,
+                      checkpoints,
+                      nullptr, // document: no geometry tools exercised here
+                      nullptr, // captureViewport
+                      nullptr, // validateModel
+                      nullptr, // onDocumentModified
+                      nullptr, // skills
+                      &todos,
+                      &knowledge}
+                , executor(registry)
+            {
+                registerDesignTools(registry, ctx);
+            }
+        };
+    } // namespace
+
+    TEST(StoreKnowledge_SingleStringTags, ToolCall_SucceedsWithOneTag)
+    {
+        ToolHarness harness;
+
+        auto const result = harness.executor.executeSync("store_knowledge",
+                                                        {{"title", "Gyroid walls"},
+                                                         {"summary", "Wall thickness halves the SDF offset."},
+                                                         {"tags", "gyroid"}},
+                                                        harness.cancellation);
+
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+        EXPECT_FALSE(result.value("knowledgeId", "").empty());
+    }
+
+    TEST(StoreKnowledge_ArrayTags, ToolCall_SucceedsWithSeveralTags)
+    {
+        ToolHarness harness;
+
+        auto const result = harness.executor.executeSync("store_knowledge",
+                                                        {{"title", "Lego grid"},
+                                                         {"summary", "Pitch is 8 mm."},
+                                                         {"tags", {"lego", "grid"}}},
+                                                        harness.cancellation);
+
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+    }
+
+    TEST(StoreKnowledge_AbsentTags, ToolCall_SucceedsWithoutTags)
+    {
+        ToolHarness harness;
+
+        auto const result = harness.executor.executeSync("store_knowledge",
+                                                        {{"title", "No tags"},
+                                                         {"summary", "Tags are optional."}},
+                                                        harness.cancellation);
+
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+    }
+
+    TEST(UpdateKnowledge_SingleStringTags, ToolCall_StoresTagAsArray)
+    {
+        ToolHarness harness;
+
+        auto const stored = harness.executor.executeSync("store_knowledge",
+                                                         {{"title", "Initial"},
+                                                          {"summary", "Initial summary"}},
+                                                         harness.cancellation);
+        ASSERT_TRUE(stored.value("success", false)) << stored.dump();
+
+        auto const updated = harness.executor.executeSync("update_knowledge",
+                                                          {{"id", stored.at("knowledgeId")},
+                                                           {"title", "Updated"},
+                                                           {"summary", "Updated summary"},
+                                                           {"tags", "updated"}},
+                                                          harness.cancellation);
+        ASSERT_TRUE(updated.value("success", false)) << updated.dump();
+
+        auto const found = harness.executor.executeSync("search_knowledge",
+                                                        {{"query", "Updated"}},
+                                                        harness.cancellation);
+        ASSERT_TRUE(found.value("success", false)) << found.dump();
+        ASSERT_EQ(found.at("entries").size(), 1u);
+        EXPECT_EQ(found.at("entries")[0]["tags"], nlohmann::json::array({"updated"}));
+    }
+
+    TEST(CreateTodoList_SingleStringChecklist, ToolCall_AcceptsLoneChecklistItem)
+    {
+        ToolHarness harness;
+
+        auto const result = harness.executor.executeSync("create_todo_list",
+                                                        {{"title", "Sphere"},
+                                                         {"items",
+                                                          nlohmann::json::array({{{"title", "Model"},
+                                                                                  {"checklist", "set snippet"}}})}},
+                                                        harness.cancellation);
+
+        EXPECT_TRUE(result.value("success", false)) << result.dump();
+    }
+
+    TEST(ScoreComponentReusability_NumericScoresAsStrings, ToolCall_ClampsParsedScores)
+    {
+        // Arrange: a model that quotes the declared numbers ("0.9" instead of 0.9)
+        ToolHarness harness;
+
+        // Act
+        auto const result = harness.executor.executeSync("score_component_reusability",
+                                                        {{"componentName", "gyroidBall"},
+                                                         {"qualityScore", "0.9"},
+                                                         {"reusabilityScore", "0.8"}},
+                                                        harness.cancellation);
+
+        // Assert
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+        EXPECT_DOUBLE_EQ(result.at("qualityScore").get<double>(), 0.9);
+        EXPECT_TRUE(result.at("recommendLibraryExport").get<bool>());
+    }
+
+    TEST(ScoreComponentReusability_UnparsableScore, ToolCall_FallsBackToZero)
+    {
+        ToolHarness harness;
+
+        auto const result = harness.executor.executeSync("score_component_reusability",
+                                                        {{"componentName", "gyroidBall"},
+                                                         {"qualityScore", "high"},
+                                                         {"reusabilityScore", 0.9}},
+                                                        harness.cancellation);
+
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+        EXPECT_DOUBLE_EQ(result.at("qualityScore").get<double>(), 0.0);
+        EXPECT_FALSE(result.at("recommendLibraryExport").get<bool>());
+    }
+} // namespace gladius::design::tests
