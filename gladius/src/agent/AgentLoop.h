@@ -5,6 +5,7 @@
 #include "Conversation.h"
 #include "PermissionPolicy.h"
 #include "providers/IAiProvider.h"
+#include "trace/AgentTrace.h"
 #include "../io/CancellationToken.h"
 #include "../tools/ToolExecutor.h"
 
@@ -65,6 +66,7 @@ namespace gladius::agent
           io::CancellationToken const & cancellation,
           CompletionPredicate isDesignComplete = nullptr,
           ConfirmationCallback confirmCallback = nullptr,
-          SnapshotProvider snapshotProvider = nullptr);
+          SnapshotProvider snapshotProvider = nullptr,
+          trace::AgentTraceRecorder * traceRecorder = nullptr);
     };
 } // namespace gladius::agent

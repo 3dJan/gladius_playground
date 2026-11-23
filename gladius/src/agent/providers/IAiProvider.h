@@ -66,6 +66,30 @@ namespace gladius::agent
         }
     };
 
+    /**
+     * @brief Wall-clock and output-shape timing of one completion, measured by the provider.
+     * @details Token counts alone cannot tell a slow endpoint from an oversized prompt: `ttftMs`
+     *          covers queueing and prefill while the remainder of `totalMs` is generation, and the
+     *          character counters say what that generation actually was.
+     */
+    struct CompletionTiming
+    {
+        /// @brief Milliseconds from request start to the first streamed event (0 when unmeasured)
+        std::int64_t ttftMs = 0;
+        /// @brief Milliseconds from request start to the first visible content (text or tool args)
+        std::int64_t firstContentMs = 0;
+        /// @brief Milliseconds from request start to the final event
+        std::int64_t totalMs = 0;
+        /// @brief Streamed SSE events seen; a low count with a long total means the server stalled
+        std::size_t streamEvents = 0;
+        /// @brief Characters the model spent on reasoning it will not reuse
+        std::size_t thinkingChars = 0;
+        /// @brief Characters of assistant text
+        std::size_t textChars = 0;
+        /// @brief Characters of tool-call argument JSON
+        std::size_t toolJsonChars = 0;
+    };
+
     /// @brief Provider-neutral completion response
     struct CompletionResponse
     {
@@ -78,6 +102,8 @@ namespace gladius::agent
         TokenUsage usage;
         /// @brief Provider that produced the response; set by FallbackProvider routing
         std::string providerName;
+        /// @brief Measured by the provider; zero when the endpoint path does not instrument it
+        CompletionTiming timing;
     };
 
     /// @brief Streaming text delta callback

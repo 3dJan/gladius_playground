@@ -1,5 +1,7 @@
 #include "AnthropicProvider.h"
 
+#include "CompletionStopwatch.h"
+
 #include <map>
 
 namespace gladius::agent
@@ -165,6 +167,11 @@ namespace gladius::agent
                 if (type == "text")
                 {
                     resp.text += block.value("text", "");
+                    resp.timing.textChars += block.value("text", std::string{}).size();
+                }
+                else if (type == "thinking")
+                {
+                    resp.timing.thinkingChars += block.value("thinking", std::string{}).size();
                 }
                 else if (type == "tool_use")
                 {
@@ -175,6 +182,7 @@ namespace gladius::agent
                     {
                         call.arguments = block["input"];
                     }
+                    resp.timing.toolJsonChars += call.arguments.dump().size();
                     resp.toolCalls.push_back(std::move(call));
                 }
             }
@@ -198,9 +206,11 @@ namespace gladius::agent
             httpReq.headers.emplace_back("x-api-key: " + m_config.apiKey);
         }
         httpReq.body = buildPayload(request).dump();
+        CompletionStopwatch watch;
 
         if (!m_config.stream)
         {
+            watch.restart();
             HttpResponse const httpRes = co_await m_transport->postJsonAsync(httpReq, cancellation);
             if (httpRes.cancelled || !httpRes.error.empty())
             {
@@ -218,6 +228,10 @@ namespace gladius::agent
                 co_return CompletionResponse{{}, {}, "", false, "Invalid JSON from Anthropic endpoint"};
             }
             CompletionResponse resp = parseResponseJson(parsed);
+            // A non-streaming reply has no per-event phases: everything arrived at once.
+            watch.onFinish(resp.timing);
+            resp.timing.ttftMs = resp.timing.totalMs;
+            resp.timing.firstContentMs = resp.timing.totalMs;
             if (resp.success && onDelta && !resp.text.empty())
             {
                 onDelta(resp.text);
@@ -228,10 +242,12 @@ namespace gladius::agent
         CompletionResponse resp;
         std::map<int, PendingAnthropicBlock> blocks;
 
+        watch.restart();
         HttpResponse const httpRes = co_await m_transport->postSseAsync(
           httpReq,
           [&](std::string const & eventName, std::string const & data)
           {
+              watch.onEvent(resp.timing);
               auto payload = nlohmann::json::parse(data, nullptr, false);
               if (payload.is_discarded())
               {
@@ -257,6 +273,10 @@ namespace gladius::agent
                   block.type = cb.value("type", "");
                   block.id = cb.value("id", "");
                   block.name = cb.value("name", "");
+                  if (block.type == "text" || block.type == "tool_use")
+                  {
+                      watch.onContent(resp.timing);
+                  }
                   blocks[idx] = std::move(block);
               }
               else if (type == "content_block_delta" && payload.contains("delta"))
@@ -268,14 +288,23 @@ namespace gladius::agent
                   {
                       std::string const piece = delta.value("text", "");
                       resp.text += piece;
+                      resp.timing.textChars += piece.size();
+                      watch.onContent(resp.timing);
                       if (onDelta && !piece.empty())
                       {
                           onDelta(piece);
                       }
                   }
+                  else if (deltaType == "thinking_delta")
+                  {
+                      resp.timing.thinkingChars += delta.value("thinking", std::string{}).size();
+                  }
                   else if (deltaType == "input_json_delta")
                   {
-                      blocks[idx].inputJson += delta.value("partial_json", "");
+                      std::string const piece = delta.value("partial_json", "");
+                      blocks[idx].inputJson += piece;
+                      resp.timing.toolJsonChars += piece.size();
+                      watch.onContent(resp.timing);
                   }
               }
               else if (type == "message_delta" && payload.contains("delta"))
@@ -284,6 +313,7 @@ namespace gladius::agent
               }
           },
           cancellation);
+        watch.onFinish(resp.timing);
 
         if (httpRes.cancelled || !httpRes.error.empty())
         {

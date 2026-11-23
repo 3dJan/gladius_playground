@@ -9,6 +9,8 @@
 #include "../agent/providers/AnthropicProvider.h"
 #include "../agent/providers/FallbackProvider.h"
 #include "../agent/providers/OpenAiProvider.h"
+#include "../agent/trace/AgentTrace.h"
+#include "../agent/trace/AgentTraceProfile.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "../compute/ComputeCore.h"
 #endif
@@ -27,9 +29,11 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 
 namespace gladius::ui
 {
@@ -247,6 +251,45 @@ namespace gladius::ui
         {
             return std::filesystem::path(docPath.string() + ".gladius_agent.json");
         }
+
+        /**
+         * @brief Creates a run recorder when `GLADIUS_AGENT_TRACE` names an output file.
+         * @details Lets an interactive session produce the same trace the benchmark writes, so a
+         *          harness problem seen live can be profiled without re-running it as a test.
+         */
+#ifndef __EMSCRIPTEN__
+        std::unique_ptr<agent::trace::AgentTraceRecorder> makeSessionTraceRecorder()
+        {
+            char const * const path = std::getenv("GLADIUS_AGENT_TRACE");
+            if (path == nullptr || *path == '\0')
+            {
+                return nullptr;
+            }
+            auto recorder =
+              std::make_unique<agent::trace::AgentTraceRecorder>(std::filesystem::path{path});
+            if (char const * const dump = std::getenv("GLADIUS_AGENT_TRACE_PROMPT");
+                dump != nullptr && *dump == '1')
+            {
+                recorder->setPromptDumpEnabled(true);
+            }
+            recorder->setRunId("interactive");
+            recorder->recordRunMeta({{"source", "interactive"}});
+            return recorder;
+        }
+
+        /// @brief Writes the Perfetto timeline and logs the profile of an interactive session trace
+        void finishSessionTrace(agent::trace::AgentTraceRecorder & recorder)
+        {
+            auto const profile = agent::trace::analyzeTrace(recorder.records());
+            std::string timelineError;
+            recorder.writeTimeline(recorder.timelinePath(), timelineError);
+            std::clog << "[agent-trace] " << agent::trace::formatProfileSummary(profile) << '\n';
+            if (!timelineError.empty())
+            {
+                std::clog << "[agent-trace] " << timelineError << '\n';
+            }
+        }
+#endif
     } // namespace
 
     void AgentPanels::bind(Document * document,
@@ -1142,6 +1185,7 @@ namespace gladius::ui
 
               agent::FallbackProvider provider(std::move(candidates));
               agent::AgentLoop loop;
+              auto trace = makeSessionTraceRecorder();
               (void) coro::sync_wait(loop.run(
                 m_conversation,
                 provider,
@@ -1164,7 +1208,12 @@ namespace gladius::ui
                     m_confirmationResolved = false;
                     co_return ok;
                 },
-                [this, promptForKnowledge]() { return buildContextSnapshot(promptForKnowledge); }));
+                [this, promptForKnowledge]() { return buildContextSnapshot(promptForKnowledge); },
+                trace.get()));
+              if (trace != nullptr)
+              {
+                  finishSessionTrace(*trace);
+              }
               m_running.store(false);
           });
 #endif

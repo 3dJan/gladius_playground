@@ -1,5 +1,7 @@
 #include "OpenAiProvider.h"
 
+#include "CompletionStopwatch.h"
+
 #include <map>
 
 namespace gladius::agent
@@ -222,6 +224,7 @@ namespace gladius::agent
             if (msg.contains("content") && msg["content"].is_string())
             {
                 resp.text = msg["content"].get<std::string>();
+                resp.timing.textChars += resp.text.size();
             }
             if (msg.contains("tool_calls") && msg["tool_calls"].is_array())
             {
@@ -233,6 +236,7 @@ namespace gladius::agent
                     {
                         call.name = tc["function"].value("name", "");
                         std::string const argsStr = tc["function"].value("arguments", "{}");
+                        resp.timing.toolJsonChars += argsStr.size();
                         auto parsed = nlohmann::json::parse(argsStr, nullptr, false);
                         call.arguments = parsed.is_discarded() ? nlohmann::json::object() : parsed;
                     }
@@ -270,9 +274,11 @@ namespace gladius::agent
             }
         }
         httpReq.body = buildPayload(request).dump();
+        CompletionStopwatch watch;
 
         if (!m_config.stream)
         {
+            watch.restart();
             HttpResponse const httpRes = co_await m_transport->postJsonAsync(httpReq, cancellation);
             if (httpRes.cancelled || !httpRes.error.empty())
             {
@@ -290,6 +296,10 @@ namespace gladius::agent
                 co_return CompletionResponse{{}, {}, "", false, "Invalid JSON from OpenAI endpoint"};
             }
             CompletionResponse resp = parseResponseJson(parsed);
+            // A non-streaming reply has no per-event phases: everything arrived at once.
+            watch.onFinish(resp.timing);
+            resp.timing.ttftMs = resp.timing.totalMs;
+            resp.timing.firstContentMs = resp.timing.totalMs;
             if (resp.success && onDelta && !resp.text.empty())
             {
                 onDelta(resp.text);
@@ -300,6 +310,7 @@ namespace gladius::agent
         CompletionResponse resp;
         std::map<int, PendingToolCall> pendingCalls;
 
+        watch.restart();
         HttpResponse const httpRes = co_await m_transport->postSseAsync(
           httpReq,
           [&](std::string const & /*eventName*/, std::string const & data)
@@ -308,6 +319,7 @@ namespace gladius::agent
               {
                   return;
               }
+              watch.onEvent(resp.timing);
               auto chunk = nlohmann::json::parse(data, nullptr, false);
               if (chunk.is_discarded())
               {
@@ -335,10 +347,17 @@ namespace gladius::agent
                   return;
               }
               auto const & delta = choice["delta"];
+              if (delta.contains("reasoning_content") && delta["reasoning_content"].is_string())
+              {
+                  // Local reasoning servers expose the chain of thought on this field.
+                  resp.timing.thinkingChars += delta["reasoning_content"].get<std::string>().size();
+              }
               if (delta.contains("content") && delta["content"].is_string())
               {
                   std::string const piece = delta["content"].get<std::string>();
                   resp.text += piece;
+                  resp.timing.textChars += piece.size();
+                  watch.onContent(resp.timing);
                   if (onDelta && !piece.empty())
                   {
                       onDelta(piece);
@@ -363,13 +382,17 @@ namespace gladius::agent
                           }
                           if (fn.contains("arguments") && fn["arguments"].is_string())
                           {
-                              entry.argumentsJson += fn["arguments"].get<std::string>();
+                              std::string const piece = fn["arguments"].get<std::string>();
+                              entry.argumentsJson += piece;
+                              resp.timing.toolJsonChars += piece.size();
+                              watch.onContent(resp.timing);
                           }
                       }
                   }
               }
           },
           cancellation);
+        watch.onFinish(resp.timing);
 
         if (httpRes.cancelled || !httpRes.error.empty())
         {
