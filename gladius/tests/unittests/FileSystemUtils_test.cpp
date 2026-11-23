@@ -254,6 +254,30 @@ namespace gladius::tests
         EXPECT_EQ(result, m_tempDir / "sphere_2.3mf");
     }
 
+    TEST(UserLibraryDir, EnvOverride_ReturnsSandboxDirectory)
+    {
+        // Arrange
+        auto const sandbox = std::filesystem::temp_directory_path() / "gladius_user_lib_override";
+        char const * const previous = std::getenv("GLADIUS_USER_LIBRARY_DIR");
+        std::string const previousValue = previous != nullptr ? previous : "";
+        setenv("GLADIUS_USER_LIBRARY_DIR", sandbox.string().c_str(), 1);
+
+        auto const dir = getUserLibraryDir();
+        auto const binDir = getBinDir();
+
+        unsetenv("GLADIUS_USER_LIBRARY_DIR");
+        if (!previousValue.empty())
+        {
+            setenv("GLADIUS_USER_LIBRARY_DIR", previousValue.c_str(), 1);
+        }
+        std::error_code ec;
+        std::filesystem::remove_all(sandbox, ec);
+
+        // Assert
+        EXPECT_EQ(dir, sandbox);
+        EXPECT_EQ(binDir, sandbox / ".bin") << "The bin dir must follow the sandbox";
+    }
+
     TEST_F(DisambiguateFilename_Test,
            GapInNumbers_UsesFirstAvailable)
     {

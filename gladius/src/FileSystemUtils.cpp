@@ -149,8 +149,11 @@ namespace gladius
         std::filesystem::create_directories(dir, ec);
         return dir;
 #else
-        auto const dir =
-          std::filesystem::path{sago::getDataHome()} / "gladius" / "library";
+        // Benchmarks and tests use a hermetic sandbox instead of the developer's library.
+        char const * const override = std::getenv("GLADIUS_USER_LIBRARY_DIR");
+        auto const dir = override != nullptr && *override != '\0'
+          ? std::filesystem::path{override}
+          : std::filesystem::path{sago::getDataHome()} / "gladius" / "library";
 
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
