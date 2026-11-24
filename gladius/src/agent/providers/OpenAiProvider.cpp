@@ -299,6 +299,7 @@ namespace gladius::agent
             // A non-streaming reply has no per-event phases: everything arrived at once.
             watch.onFinish(resp.timing);
             resp.timing.ttftMs = resp.timing.totalMs;
+            resp.timing.firstTokenMs = resp.timing.totalMs;
             resp.timing.firstContentMs = resp.timing.totalMs;
             if (resp.success && onDelta && !resp.text.empty())
             {
@@ -351,6 +352,7 @@ namespace gladius::agent
               {
                   // Local reasoning servers expose the chain of thought on this field.
                   resp.timing.thinkingChars += delta["reasoning_content"].get<std::string>().size();
+                  watch.onToken(resp.timing);
               }
               if (delta.contains("content") && delta["content"].is_string())
               {

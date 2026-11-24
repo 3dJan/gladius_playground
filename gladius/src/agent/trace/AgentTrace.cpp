@@ -252,11 +252,20 @@ namespace gladius::agent::trace
                                                         durationMs);
                 std::int64_t const completionMs = durationMs - buildMs;
                 // The first SSE event can arrive before the server has prefilled anything, so the
-                // prefill slice runs until the first visible output.
-                std::int64_t const ttftMs = std::clamp(std::max(readInt(record, "ttftMs"),
-                                                                readInt(record, "firstContentMs")),
-                                                       std::int64_t{0},
-                                                       completionMs);
+                // prefill slice runs until the first output token; hidden reasoning gets its own slice.
+                std::int64_t const firstTokenMs = readInt(record, "firstTokenMs");
+                // Traces written before the reasoning split existed have no `firstTokenMs`; for those
+                // the visible output is the only prefill boundary available.
+                std::int64_t const prefillBoundary = firstTokenMs > 0 ? firstTokenMs
+                                                                     : readInt(record, "firstContentMs");
+                std::int64_t const prefillMs =
+                  std::clamp(std::max(readInt(record, "ttftMs"), prefillBoundary),
+                             std::int64_t{0},
+                             completionMs);
+                std::int64_t const visibleMs =
+                  std::clamp(std::max(prefillMs, readInt(record, "firstContentMs")),
+                             std::int64_t{0},
+                             completionMs);
                 char const * turnThread = timelineThread(type.c_str());
                 if (buildMs > 0)
                 {
@@ -267,22 +276,32 @@ namespace gladius::agent::trace
                                       {"pid", 1},
                                       {"tid", turnThread}});
                 }
-                if (ttftMs > 0)
+                if (prefillMs > 0)
                 {
                     events.push_back({{"name", "queue+prefill"},
                                       {"ph", "X"},
                                       {"ts", (turnStart + buildMs) * kMicrosecondsPerMillisecond},
-                                      {"dur", ttftMs * kMicrosecondsPerMillisecond},
+                                      {"dur", prefillMs * kMicrosecondsPerMillisecond},
                                       {"pid", 1},
                                       {"tid", turnThread},
                                       {"args", {{"turnIndex", readInt(record, "turnIndex")}}}});
                 }
-                if (completionMs - ttftMs > 0)
+                if (visibleMs - prefillMs > 0)
+                {
+                    events.push_back({{"name", "thinking"},
+                                      {"ph", "X"},
+                                      {"ts", (turnStart + buildMs + prefillMs) * kMicrosecondsPerMillisecond},
+                                      {"dur", (visibleMs - prefillMs) * kMicrosecondsPerMillisecond},
+                                      {"pid", 1},
+                                      {"tid", turnThread},
+                                      {"args", {{"turnIndex", readInt(record, "turnIndex")}}}});
+                }
+                if (completionMs - visibleMs > 0)
                 {
                     events.push_back({{"name", "generate"},
                                       {"ph", "X"},
-                                      {"ts", (turnStart + buildMs + ttftMs) * kMicrosecondsPerMillisecond},
-                                      {"dur", (completionMs - ttftMs) * kMicrosecondsPerMillisecond},
+                                      {"ts", (turnStart + buildMs + visibleMs) * kMicrosecondsPerMillisecond},
+                                      {"dur", (completionMs - visibleMs) * kMicrosecondsPerMillisecond},
                                       {"pid", 1},
                                       {"tid", turnThread},
                                       {"args", {{"turnIndex", readInt(record, "turnIndex")}}}});

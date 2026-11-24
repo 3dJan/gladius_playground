@@ -39,7 +39,9 @@ namespace gladius::agent::trace
         std::int64_t modelMs = 0;
         /// @brief Part of `modelMs` spent prefilling the prompt, i.e. before the first output token
         std::int64_t modelPrefillMs = 0;
-        /// @brief Part of `modelMs` spent generating output tokens
+        /// @brief Part of `modelMs` spent on reasoning the caller never sees
+        std::int64_t modelThinkingMs = 0;
+        /// @brief Part of `modelMs` spent generating visible output
         std::int64_t modelGenerateMs = 0;
         std::int64_t toolMs = 0;
         std::int64_t harnessMs = 0;

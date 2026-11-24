@@ -40,6 +40,7 @@ namespace gladius::agent
               {"buildMs", buildMs},
               {"completionMs", timing.totalMs},
               {"ttftMs", timing.ttftMs},
+              {"firstTokenMs", timing.firstTokenMs},
               {"firstContentMs", timing.firstContentMs},
               {"streamEvents", timing.streamEvents},
               {"thinkingChars", timing.thinkingChars},

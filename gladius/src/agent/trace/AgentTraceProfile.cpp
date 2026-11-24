@@ -100,12 +100,14 @@ namespace gladius::agent::trace
                  {{"contextBuildMs", contextBuildMs},
                   {"modelMs", modelMs},
                   {"modelPrefillMs", modelPrefillMs},
+                  {"modelThinkingMs", modelThinkingMs},
                   {"modelGenerateMs", modelGenerateMs},
                   {"toolMs", toolMs},
                   {"harnessMs", harnessMs},
                   {"unaccountedMs", unaccountedMs},
                   {"modelPercent", std::round(pct(modelMs) * 10.0) / 10.0},
                   {"prefillPercent", std::round(pct(modelPrefillMs) * 10.0) / 10.0},
+                  {"thinkingPercent", std::round(pct(modelThinkingMs) * 10.0) / 10.0},
                   {"generatePercent", std::round(pct(modelGenerateMs) * 10.0) / 10.0},
                   {"toolPercent", std::round(pct(toolMs) * 10.0) / 10.0},
                   {"harnessPercent", std::round(pct(harnessMs) * 10.0) / 10.0},
@@ -202,10 +204,14 @@ namespace gladius::agent::trace
                 std::int64_t const buildMs = readInt(record, "buildMs");
                 std::int64_t const completionMs = readInt(record, "completionMs");
                 std::int64_t const ttftMs = readInt(record, "ttftMs");
+                std::int64_t const firstTokenMs = readInt(record, "firstTokenMs");
                 std::int64_t const firstContentMs = readInt(record, "firstContentMs");
                 // A server may send its opening SSE event before it has prefilled the prompt, so the
-                // prefill phase only really ends when the first visible output arrives.
-                std::int64_t const prefillMs = std::max(ttftMs, firstContentMs);
+                // prefill phase only really ends when the first output token arrives. Reasoning counts
+                // as generation: on a reasoning model the first *visible* output can be minutes later.
+                std::int64_t const prefillMs = std::max(ttftMs, firstTokenMs > 0 ? firstTokenMs
+                                                                                : firstContentMs);
+                std::int64_t const visibleOutputMs = std::max(prefillMs, firstContentMs);
                 std::int64_t const turnIndex = readInt(record, "turnIndex");
 
                 turnDurations.push_back(durationMs);
@@ -218,7 +224,12 @@ namespace gladius::agent::trace
                 // Splitting model time this way is what tells you whether to shrink the prompt or
                 // speed up generation; the two need completely different fixes.
                 profile.modelPrefillMs += std::min(prefillMs, completionMs);
-                profile.modelGenerateMs += completionMs > prefillMs ? completionMs - prefillMs : 0;
+                // Time spent reasoning before anything a caller can see: cutting it needs a thinking
+                // budget, cutting prefill needs a smaller prompt.
+                profile.modelThinkingMs +=
+                  std::min(visibleOutputMs, completionMs) - std::min(prefillMs, completionMs);
+                profile.modelGenerateMs += completionMs > visibleOutputMs ? completionMs - visibleOutputMs
+                                                                        : 0;
 
                 std::int64_t const promptTokens = readNestedInt(record, "usage", "totalPromptTokens");
                 std::int64_t const cacheReadForTurn = readNestedInt(record, "usage", "cacheReadTokens");
@@ -250,6 +261,7 @@ namespace gladius::agent::trace
                 profile.peakTurnPromptTokens = std::max(profile.peakTurnPromptTokens, promptTokens);
 
                 double const prefill = tokensPerSecond(promptTokens, prefillMs);
+                // Output tokens include reasoning, so decode rate is measured over all of generation.
                 double const generationMs = completionMs > prefillMs ? completionMs - prefillMs : 0;
                 double const decode = tokensPerSecond(outputTokens, static_cast<std::int64_t>(generationMs));
                 if (prefill > 0.0)
@@ -434,7 +446,8 @@ namespace gladius::agent::trace
         out << "profile: wall=" << profile.wallMs << "ms turns=" << profile.turns
             << " toolCalls=" << profile.toolCalls << "\n";
         out << "  time split: model=" << profile.modelMs << "ms (" << share(profile.modelMs)
-            << "%, prefill " << profile.modelPrefillMs << "ms / generate "
+            << "%, prefill " << profile.modelPrefillMs << "ms / thinking "
+            << profile.modelThinkingMs << "ms / generate "
             << profile.modelGenerateMs << "ms) tools=" << profile.toolMs << "ms ("
             << share(profile.toolMs) << "%) harness=" << profile.harnessMs << "ms ("
             << share(profile.harnessMs) << "%, judge " << profile.judgeMs

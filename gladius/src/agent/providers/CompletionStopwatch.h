@@ -38,9 +38,19 @@ namespace gladius::agent
             }
         }
 
+        /// @brief Call on the first event that carries generated output, reasoning included
+        void onToken(CompletionTiming & timing) noexcept
+        {
+            if (timing.firstTokenMs == 0)
+            {
+                timing.firstTokenMs = elapsedMs();
+            }
+        }
+
         /// @brief Call on the first event that carries visible output (text, thinking or tool args)
         void onContent(CompletionTiming & timing) noexcept
         {
+            onToken(timing);
             if (timing.firstContentMs == 0)
             {
                 timing.firstContentMs = elapsedMs();

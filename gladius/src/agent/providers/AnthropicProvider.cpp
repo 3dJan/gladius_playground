@@ -234,6 +234,7 @@ namespace gladius::agent
             // A non-streaming reply has no per-event phases: everything arrived at once.
             watch.onFinish(resp.timing);
             resp.timing.ttftMs = resp.timing.totalMs;
+            resp.timing.firstTokenMs = resp.timing.totalMs;
             resp.timing.firstContentMs = resp.timing.totalMs;
             if (resp.success && onDelta && !resp.text.empty())
             {
@@ -280,6 +281,8 @@ namespace gladius::agent
                   {
                       watch.onContent(resp.timing);
                   }
+                  // Any block, reasoning included, means the server is done prefilling and generating.
+                  watch.onToken(resp.timing);
                   blocks[idx] = std::move(block);
               }
               else if (type == "content_block_delta" && payload.contains("delta"))
@@ -301,6 +304,7 @@ namespace gladius::agent
                   else if (deltaType == "thinking_delta")
                   {
                       resp.timing.thinkingChars += delta.value("thinking", std::string{}).size();
+                      watch.onToken(resp.timing);
                   }
                   else if (deltaType == "input_json_delta")
                   {

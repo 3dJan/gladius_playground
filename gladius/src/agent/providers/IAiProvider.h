@@ -76,6 +76,10 @@ namespace gladius::agent
     {
         /// @brief Milliseconds from request start to the first streamed event (0 when unmeasured)
         std::int64_t ttftMs = 0;
+        /// @brief Milliseconds from request start to the first generated token, reasoning included
+        /// @details Prefill really ends here: a reasoning model starts producing output long before
+        ///          any of it becomes visible, so `firstContentMs` alone measures reasoning time too.
+        std::int64_t firstTokenMs = 0;
         /// @brief Milliseconds from request start to the first visible content (text or tool args)
         std::int64_t firstContentMs = 0;
         /// @brief Milliseconds from request start to the final event

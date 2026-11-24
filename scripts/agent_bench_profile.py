@@ -72,6 +72,7 @@ def analyze(records, wall_ms=0):
         "contextBuildMs": 0,
         "modelMs": 0,
         "modelPrefillMs": 0,
+        "modelThinkingMs": 0,
         "modelGenerateMs": 0,
         "toolMs": 0,
         "harnessMs": 0,
@@ -143,22 +144,32 @@ def analyze(records, wall_ms=0):
             duration = rec.get("durationMs", 0)
             build = rec.get("buildMs", 0)
             completion = rec.get("completionMs", 0)
-            # An SSE stream can open before the server has prefilled, so prefill ends at the first
-            # visible output rather than at the first event.
-            ttft = max(rec.get("ttftMs", 0), rec.get("firstContentMs", 0))
+            # Prefill ends at the first output token; hidden reasoning then runs until the first
+            # visible output. Traces without `firstTokenMs` fall back to the visible boundary.
+            first_token = rec.get("firstTokenMs", 0) or rec.get("firstContentMs", 0)
+            ttft = max(rec.get("ttftMs", 0), first_token)
+            visible = max(ttft, rec.get("firstContentMs", 0))
             turn_index = rec.get("turnIndex", 0)
 
             turn_durations.append(duration)
             out["contextBuildMs"] += build
             out["modelMs"] += completion if completion > 0 else duration - build
             out["modelPrefillMs"] += min(ttft, completion)
-            out["modelGenerateMs"] += max(0, completion - ttft)
+            out["modelThinkingMs"] += min(visible, completion) - min(ttft, completion)
+            out["modelGenerateMs"] += max(0, completion - visible)
             if ttft > 0:
                 ttft_samples.append(ttft)
 
             usage = rec.get("usage", {})
-            if usage.get("cacheReadTokens", 0) <= 0:
+            cache_read = usage.get("cacheReadTokens", 0)
+            if cache_read <= 0:
                 out["cacheMissTurns"] += 1
+            # The cached prefix can only shrink if bytes sent before were rewritten. On a growing
+            # conversation that is the signature of history being reshaped in place, and each such
+            # turn costs a full re-prefill.
+            if "prevCacheRead" in seen_hash_state and cache_read < seen_hash_state["prevCacheRead"]:
+                out["cacheRewindTurns"] += 1
+            seen_hash_state["prevCacheRead"] = cache_read
             # A changed system prompt invalidates the whole cached prefix: every such turn is a
             # full re-prefill, which is the most expensive mistake a harness can make.
             if "promptHashSeen" not in seen_hash_state:
