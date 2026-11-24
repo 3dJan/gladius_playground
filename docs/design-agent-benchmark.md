@@ -87,6 +87,13 @@ GLADIUS_RUN_AGENT_BENCH=1 ./gladius_test --gtest_filter='DesignAgentBench*'
 Run the binary directly rather than through CTest — the per-task cases are long-running and the
 aggregate report test must see the other runs in the same process.
 
+> **The working directory must be the build's `tests/unittests` directory.** On macOS the executable
+> cannot resolve its own location (`getAppDir()` reads `/proc/self/exe`, which does not exist), so
+> `examples/template.3mf` and `library/` are resolved relative to the *current directory*. Started
+> from anywhere else the benchmark silently seeds a **blank document**: `get_program_snippet` returns
+> `""`, nothing renders, every `set_program_snippet` call fails, and the whole run measures nothing.
+> The same applies to the shipped `library/` used by `list_library_items`.
+
 ### Environment
 
 | variable | default | meaning |
@@ -102,9 +109,12 @@ aggregate report test must see the other runs in the same process.
 | `GLADIUS_AGENT_BENCH_WALL_MINUTES` | `30` | wall-clock budget per task (safety net; the turn budget is what shapes the metrics) |
 | `GLADIUS_AGENT_BENCH_TIMEOUT_SECONDS` | `600` | per-request HTTP timeout (a local model can spend minutes on one turn) |
 | `GLADIUS_AGENT_BENCH_MAX_TOKENS` | `8192` | completion budget per model turn (a whole program snippet must fit) |
+| `GLADIUS_AGENT_BENCH_THINKING_TOKENS` | `1024` | hidden-reasoning budget per turn; `0` leaves it to the provider. Uncapped reasoning dominated wall time and once consumed the whole judge budget without producing a verdict |
+| `GLADIUS_AGENT_BENCH_CACHE_BREAKPOINTS` | `tools` | explicit `cache_control` placement: `none`, `tools` (after the tool schemas) or `all` (also after the newest message). `none` measurably degrades outcomes, so `tools` is the default |
 | `GLADIUS_AGENT_BENCH_RENDER_SIZE` | `512` | square render resolution |
 | `GLADIUS_AGENT_BENCH_OUTPUT` | `agent_bench` | output directory for report + artifacts |
 | `GLADIUS_USER_LIBRARY_DIR` | unset | hermetic user-library sandbox (also used by the benchmark) |
+| `GLADIUS_AGENT_PROVIDER_DUMP` | unset | write each provider request as `request-NNN.json` in this directory (images redacted to their byte count). This is how a prompt-cache regression is found: diff consecutive requests and check that every byte sent before is still sent unchanged |
 
 Benchmark runs are always traced (`<output>/<taskId>/trace.jsonl`). For the interactive app the
 trace is opt-in — see [Profiling and bottleneck analysis](#profiling-and-bottleneck-analysis):
@@ -158,7 +168,7 @@ Every run writes `<output>/<taskId>/trace.jsonl`, one JSON object per line. All 
 | `type` | emitted by | interesting fields |
 | --- | --- | --- |
 | `run_meta` | host | model, endpoint, limits — describes the run, never a timeline span |
-| `turn` | `AgentLoop` | `durationMs`, `buildMs` (context assembly), `completionMs`, `ttftMs`, `streamEvents`, `thinkingChars`, `textChars`, `toolJsonChars`, `promptBytes` (per component), `usage`, `stopReason` |
+| `turn` | `AgentLoop` | `durationMs`, `buildMs` (context assembly), `completionMs`, `ttftMs`, `firstTokenMs` (first generated token, reasoning included), `firstContentMs` (first *visible* output), `streamEvents`, `thinkingChars`, `textChars`, `toolJsonChars`, `promptBytes` (per component), `context` (`imagesKept`, `messagesSent`, `messagesPruned`), `usage`, `stopReason` |
 | `tool_call` | `AgentLoop` | `name`, `policy`, `durationMs`, `success`, `denied`, `argsBytes`, `resultBytes`, trimmed `error` |
 | `phase` | harness | `name` (`seed_document`, `export_stl`, `measure_mesh`, `save_document`, `render:isometric`, `judge`), `durationMs` |
 | `note` | `AgentLoop` | `kind`: `retry_after_failure`, `autonomous_nudge`, `truncation_nudge` — this is how wasted turns get attributed |
@@ -170,7 +180,7 @@ was actually sent when the aggregate says the prompt is too big.
 Alongside it, `<output>/<taskId>/timeline.json` is Chrome Trace Event JSON: open it in
 [Perfetto](https://ui.perfetto.dev) or `chrome://tracing`. Two lanes keep agent work and measurement
 work from overlapping, and each turn is split into nested `context build` / `queue+prefill` /
-`generate` slices, which is exactly the three-way split an optimization can attack.
+`thinking` / `generate` slices, which is exactly the split an optimization can attack.
 
 ### Aggregates
 
@@ -187,7 +197,8 @@ python3 scripts/agent_bench_profile.py /tmp/agent_bench_v4 /tmp/agent_bench_v6  
 | question | aggregate |
 | --- | --- |
 | Is the harness or the model the bottleneck? | time split: `modelMs` / `toolMs` / `harnessMs` / `contextBuildMs` / `unaccountedMs` (`unaccountedMs` is reported instead of being hidden) |
-| Is a turn slow because of prefill or because of decoding? | `modelPrefillMs` vs `modelGenerateMs`, `ttftP50Ms`/`ttftP95Ms` and `prefillTokPerSec`/`decodeTokPerSec` — prefill is measured until the **first visible output**, because a local server opens the stream long before it has prefilled |
+| Is a turn slow because of prefill, hidden reasoning, or decoding? | `modelPrefillMs` / `modelThinkingMs` / `modelGenerateMs`, `ttftP50Ms`/`ttftP95Ms` and `prefillTokPerSec`/`decodeTokPerSec` — prefill ends at the **first generated token**, because a reasoning model starts generating long before any of it is visible; thinking is the gap to the first visible output |
+| Is the prompt cache working at all? | `cacheMissTurns`, `cacheRewindTurns` (turns whose cached prefix got *shorter* — the signature of history being rewritten in place), `systemPromptMutations`, `historyPrunes` / `prunedMessages` |
 | Is the prompt the problem, and which part of it? | `contextTax` (Σ per-turn prompt tokens ÷ final-turn prompt tokens — how much history is re-sent), `promptBytesByComponent` |
 | Did one tool result poison the context? | `largestToolResultBytes` + turn |
 | Which tool should be made cheaper first? | tool ranking by total time, with failures and output bytes |
@@ -198,16 +209,53 @@ python3 scripts/agent_bench_profile.py /tmp/agent_bench_v4 /tmp/agent_bench_v6  
 A run directory works as input too: the script then aggregates every `<taskId>/trace.jsonl` below it.
 Wall time and `contextTax` are combined per task, because each task's clock restarts at zero.
 
-### What the first profiled run showed
+### What profiling the harness found
 
-With the strata `iq3_s` model all three tasks passed and the wall time broke down as roughly 88%
+Baseline run (strata `iq3_s`, all three tasks passing, ~41 minutes of wall time) split roughly 88%
 prompt prefill, 9% output generation, 3% harness measurement (the vision judge alone is about two
-thirds of that) and under 1% tool execution. Tools are therefore not the place to optimize; the prompt
-is. `promptBytesByComponent` says why: images dominate by an order of magnitude (about 60 MB of image
-bytes over a run against 2.9 MB of other tool results), and `capture_viewport` alone returned 6.3 MB.
-`contextTax` of roughly 15x means most prompt tokens are re-sent history. The two obvious next
-experiments are resizing/re-encoding captured images before they enter the conversation and dropping
-superseded screenshots, both of which the same aggregates can then confirm.
+thirds of that) and under 1% tool execution. Tools are therefore not the place to optimize; the
+prompt and the model are. `promptBytesByComponent` says why: images dominate by an order of
+magnitude (about 60 MB of image bytes over a run against 2.9 MB of other tool results), and
+`capture_viewport` alone returned 6.3 MB. A `contextTax` of 10–20x means most prompt tokens are
+re-sent history.
+
+That profile drove four harness changes, each of which the same aggregates then confirmed:
+
+1. **Hidden reasoning was being billed to prefill.** With the reasoning split enabled, the LEGO task
+   spends 137 s prefilling, 112 s *thinking* and 51 s generating. Uncapped thinking had already blown
+   the task budget once, and the vision judge can spend its whole completion budget thinking before
+   it emits a verdict — hence the explicit budgets in the environment table.
+2. **History was being rewritten in place.** Superseded screenshots were replaced by stub text and old
+   tool results were re-serialized, which changed bytes the server had already cached, so the cached
+   prefix could never grow and every turn re-prefilled the conversation. `cacheRewindTurns` reports
+   the failure mode, and a context-policy test asserts the byte-level invariant instead.
+3. **A required snippet format was undocumented.** `set_program_snippet` accepts a snippet only when
+   every function block carries its `// Function: <name> (ID: <n>)` header. One run paid 42 failed
+   tool calls and 9 minutes to learn this, so the requirement now sits in the system prompt and in
+   the error hint.
+4. **Cache breakpoints are a policy, not a constant.** `tools` (cache the system prompt plus schemas)
+   beats `none` and `all` on this endpoint; with `none` the LEGO task failed its geometry gates.
+
+Measured effect on the LEGO task (same endpoint, same model, `tools` breakpoints), against the
+committed baseline in `tests/baselines/agent_bench/baseline.json`:
+
+| | baseline | current |
+| --- | --- | --- |
+| model turns | 20 | 22 |
+| tool calls / failures | 48 / 1 | 45 / 1 |
+| wall time | 868 s | 303 s |
+| prompt tokens (with judge) | 359 948 | 255 279 |
+| completion tokens | 59 258 | 15 385 |
+
+Turn count barely moved while everything that costs money did: the harness stopped wasting turns on
+avoidable tool errors, stopped re-prefilling rewritten history, and stopped paying for unbounded
+reasoning. `contextTax` for this task is 14.1x. `wallMs` still varies with machine load, which is why
+the comparer reports it but never gates on it.
+
+Still open: on this endpoint the *read-back* amount stays pinned at the system-prompt-plus-tools
+prefix even though the conversation prefix is provably append-only, so `promptCacheHitRate` stays
+well below what the same requests reach when replayed on their own. `GLADIUS_AGENT_PROVIDER_DUMP`
+plus replaying the dumps is how that gets bisected further.
 
 ### Interactive sessions
 
