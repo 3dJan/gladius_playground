@@ -46,11 +46,13 @@ taskPassed = judgeAvailable AND judgePasses AND allGeometryGatesPassed
 
 ## How the harness works
 
-* **Seeded document** — every run starts from `tests/unittests/examples/template.3mf`, not from
-  `Document::newModel()`. A `newModel()` root is a managed void whose resource id is `0`, and
-  `set_program_snippet` can never declare or replace id `0`, so nothing a scripted or real agent
-  writes would ever be rendered. The template's root is `main (ID: 3)` with
-  `(vec3 color, float shape) main_3(vec3 pos)`, which is what the system prompt in
+* **Seeded document** — every run starts from the same seed the interactive app uses
+  (`design::seedVolumetricTemplate()` loads `examples/template.3mf`), unless
+  `GLADIUS_AGENT_BENCH_DOCUMENT_SEED=blank` asks for the empty `Document::newModel()` document so
+  the run can prove the renderability gate fires. A missing template is a hard initialisation error,
+  never a silent fall back to a blank document. The template's root is `main (ID: 3)` with
+  `(vec3 color, float shape) main_3(vec3 pos)` plus a level set, a bounding-box domain mesh and a
+  build item, which is what the system prompt in
   `agent::ContextBuilder::defaultSystemPrompt()` tells the model to preserve.
 * **Rounds** — the harness re-seeds the document, graph, todos, checkpoints, knowledge and
   conversation before each task, and sandboxes the user library in `<output>/user-library`
@@ -111,7 +113,8 @@ aggregate report test must see the other runs in the same process.
 | `GLADIUS_AGENT_BENCH_MAX_TOKENS` | `8192` | completion budget per model turn (a whole program snippet must fit) |
 | `GLADIUS_AGENT_BENCH_THINKING_TOKENS` | `1024` | hidden-reasoning budget per turn; `0` leaves it to the provider. Uncapped reasoning dominated wall time and once consumed the whole judge budget without producing a verdict |
 | `GLADIUS_AGENT_BENCH_CACHE_BREAKPOINTS` | `tools` | explicit `cache_control` placement: `none`, `tools` (after the tool schemas) or `all` (also after the newest message). `none` measurably degrades outcomes, so `tools` is the default |
-| `GLADIUS_AGENT_BENCH_TOOL_SURFACE` | `geometry` | `geometry` registers only the ten geometry tools (see [Lean tool surface](#lean-tool-surface)); `full` registers all of them, as the interactive app does |
+| `GLADIUS_AGENT_BENCH_TOOL_SURFACE` | `geometry` | `geometry` registers only the eleven geometry tools (see [Lean tool surface](#lean-tool-surface)); `full` registers all of them, as the interactive app does |
+| `GLADIUS_AGENT_BENCH_DOCUMENT_SEED` | `template` | `template` seeds `examples/template.3mf` (the same seed a UI "new model" run gets); `blank` starts from `Document::newModel()`, which has no level set or build item, so the renderability gate and `ensure_output_chain` repair path are what decide the outcome |
 | `GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH` | `1` | `finish_design` derives the design-graph node, variant and active configuration itself instead of expecting four hand-written tool calls |
 | `GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS` | `2` | screenshots a task may request; further calls fail with an error that points at `finish_design`. `0` is unlimited |
 | `GLADIUS_AGENT_BENCH_RENDER_SIZE` | `512` | square render resolution |
@@ -156,6 +159,64 @@ provider failures, unknown tool calls, truncated turns, prompt/output tokens) ad
 when they worsen by more than *both* `--token-tolerance` (default 50 %) and `--counter-grace`
 (default 5 absolute), so a single extra retry is noise while a systemic regression is not.
 `wallMs` is reported but never gates: the local server's throughput depends on machine load.
+
+## What the agent starts from, and what `finish_design` guarantees
+
+A program is not a model. Until a function is sampled by a level set and that level set is placed by
+a build item, the scene is empty, the viewport is blank, and both the judge and the mesh gates have
+nothing to measure. Two facts used to hide that from the agent:
+
+* `Document::newModel()` succeeds — it builds a valid-void root that renders nothing.
+* `finish_design` only validated the design *graph*, and `autoCompleteDesignGraphOnFinish` derived
+  the missing bookkeeping itself, so a document that rendered nothing still returned
+  `{"success": true, "valid": true}`.
+
+Three things close that loop, and every caller shares one implementation:
+
+* **`design::collectRenderabilityFacts(document)`** — one probe that answers "would this document
+  render?" and returns typed blockers (`no_build_items`, `no_levelset`, `levelset_without_function`,
+  `root_without_shape_output`, `root_output_unsourced`, …), each with the fix that clears it. It
+  feeds `get_model_summary`, the blank-scene note in `capture_viewport`, the per-turn live context
+  block, and `finish_design`.
+* **`finish_design` gate** — the document is checked *before* the graph. A non-renderable document
+  fails with `renderabilityBlockers` instead of a pass, so "I think I'm done" is no longer
+  self-certifying.
+* **`ensure_output_chain`** — the repair tool the blockers name. It reconciles the scene with the
+  function that should be visible: an existing level set is rebound to that function (`chainAction:
+  rebound`), a chain that already samples it is left alone (`already-wired`), and only when the scene
+  has none at all are the domain mesh, level set and build item created (`created`, through
+  `io::createVolumetricOutputChain`, the same builder the MCP `create_level_set` tool uses). The tool
+  then re-probes and returns the new facts, so the agent can fix a blank scene in one call rather
+  than six. Reconciling instead of appending matters: a second level set on the same function places
+  the geometry twice, which doubles the measured volume and bounding box.
+
+The live context line the agent sees is deliberately blunt:
+
+```
+- THE MODEL DOES NOT RENDER YET: no_levelset -> Call ensure_output_chain ...
+```
+
+`GLADIUS_AGENT_BENCH_DOCUMENT_SEED=blank` runs the whole benchmark against the seed that used to
+produce a confident, empty document. It is the regression test for the gate: the geometry gates and
+`agentCompleted` must reflect the scene, not the agent's opinion.
+
+Measured, on `strata/iq3_s` (one run per seed, `python3 scripts/agent_bench_compare.py` to re-check):
+
+| Seed | Passed | What the gate did |
+| --- | --- | --- |
+| `template` | 2/3 | The scene was already wired, so `ensure_output_chain` reported `chainAction: already-wired` and no run paid for a repair. |
+| `blank` | 2/3 | All 13 turns of all three tasks carried `THE MODEL DOES NOT RENDER YET`, and `ensure_output_chain` failed twice per task with real errors (`Function 3 does not exist`, `... has no scalar 'shape' output`) before the agent recovered. `sphere_r5` and `lego_brick_3x4` still passed; `sphere_gyroid` produced a program whose surface the bounds probe could not find, so it failed `mesh_export` instead of passing on the judge alone — exactly the old silent pass, now caught. |
+
+Before this change a blank-seed run scored 3/3 while exporting three empty meshes.
+
+On the seeded document `sphere_r5` and `sphere_gyroid` pass every run; `lego_brick_3x4` is the noisy
+one, and its failures are task quality rather than a harness regression. Five seeded lego runs after
+the gate landed: one passed (fill 0.40 — a real shell with studs and clutch tubes), one exported a
+solid block (fill 0.96), one exported a nearly solid block (fill 0.81), and two produced a program
+the harness could not measure (`set_program_snippet` output-type mismatch, and imported library
+functions left with unconnected `pos`/`height` inputs). The committed baseline lego run filled 0.66.
+A single lego failure is therefore a prompt to re-run, not a verdict; prompt cost varies over the same
+range (33 k to 148 k tokens for the same task), which is why the comparer gates pass counts first.
 
 ## Profiling and bottleneck analysis
 
@@ -268,7 +329,7 @@ works (`GLADIUS_AGENT_BENCH_TOOL_SURFACE=geometry`, the default):
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `GLADIUS_AGENT_BENCH_TOOL_SURFACE` | `geometry` | Register only the ten tools a geometry session needs (`begin_edit`, `commit_edit`, `get_program_snippet`, `set_program_snippet`, `get_model_summary`, `list_library_items`, `import_library_item`, `export_library_item`, `capture_viewport`, `finish_design`); the planning, knowledge, checkpoint, and variant tools are not registered at all. 2.1 KB of JSON schemas per turn instead of 37 tools / 8.4 KB, and the system prompt drops the ceremony and planning sections only those tools need (4.2 KB -> 3.3 KB). |
+| `GLADIUS_AGENT_BENCH_TOOL_SURFACE` | `geometry` | Register only the eleven tools a geometry session needs (`begin_edit`, `commit_edit`, `get_program_snippet`, `set_program_snippet`, `get_model_summary`, `ensure_output_chain`, `list_library_items`, `import_library_item`, `export_library_item`, `capture_viewport`, `finish_design`); the planning, knowledge, checkpoint, and variant tools are not registered at all. 2.4 KB of JSON schemas per turn instead of 37 tools / 8.4 KB, and the system prompt drops the ceremony and planning sections only those tools need (4.2 KB -> 3.3 KB). |
 | `GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH` | `1` | `finish_design` wires the built root function into design → level set → mesh → build item itself. The chain is six tool calls the model has no opinion about. |
 | `GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS` | `2` | Screenshots a geometry-mode session may request; further calls fail with an error that points at `finish_design` instead of paying for another ~800-token image that stays in every later turn. |
 

@@ -265,6 +265,7 @@ namespace gladius::agent::bench
                 // A run is only comparable to another one that used the same harness configuration.
                 {"harness",
                  {{"toolSurface", m_config.toolSurface},
+                  {"documentSeed", m_config.documentSeed},
                   {"autoCompleteDesignGraph", m_config.autoCompleteDesignGraph},
                   {"maxViewportReviews", m_config.maxViewportReviews},
                   {"cacheBreakpoints", m_config.cacheBreakpoints}}},

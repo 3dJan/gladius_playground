@@ -69,6 +69,11 @@ namespace gladius::agent::bench
         /// @details "geometry" registers only the model/snippet/library/viewport/finish tools. Every
         ///          definition is re-sent on every turn, so the ~37-tool list is a fixed per-turn cost.
         std::string toolSurface = "full";
+        /// @brief Starting document: "template" (shipped volumetric scaffold) or "blank"
+        /// @details The scaffold is what a user gets from File > New. "blank" starts from an empty
+        ///          3MF instead, which is how the harness behaves when nothing wires the program into
+        ///          a level set: it measures whether the agent notices and repairs that on its own.
+        std::string documentSeed = "template";
         /// @brief Let finish_design derive the design-graph bookkeeping instead of demanding it
         bool autoCompleteDesignGraph = false;
         /// @brief Viewport images the run may request; 0 is unlimited
@@ -198,8 +203,8 @@ namespace gladius::agent::bench
         /// @brief (Re)creates the per-task recorder when a trace directory is configured
         void beginTaskTrace(AgentBenchTask const & task);
 
-        /// @brief Loads the shipped template so the document has a renderable root function
-        void seedTemplateDocument();
+        /// @brief Loads the shipped template, or leaves the document blank per the seed mode
+        void seedDocument();
 
         /// @brief Frames a named camera preset around `bounds` so the whole model is visible
         [[nodiscard]] static compute::RenderCamera frameCamera(std::string const & view,
