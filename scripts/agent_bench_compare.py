@@ -12,10 +12,17 @@ Prompt cost is gated harder than the other effort metrics: prompt prefill domina
 (`trace.profile.context.promptCacheHitRate`) may not drop. The cache hit rate is what catches a
 harness change that quietly makes every turn re-prefill the whole prompt again.
 
+The hit rate only carries that signal once the cached prefix is big enough for the provider to
+cache at all: a provider refuses to cache prefixes below a minimum size, so a leaner harness (fewer
+tools, shorter system prompt) can cut prompt tokens by half and still report 0% hits. The gate is
+therefore skipped when the first turn's prompt is below --cache-min-prompt-tokens; total prompt
+tokens are still gated there.
+
 Usage:
     agent_bench_compare.py BASELINE.json CURRENT.json [--token-tolerance 0.5]
                                                     [--prompt-token-tolerance 0.25]
                                                     [--cache-hit-slack 0.05]
+                                                    [--cache-min-prompt-tokens 2600]
                                                     [--counter-grace 5]
                                                     [--allow-same-pass-count]
 
@@ -155,6 +162,14 @@ def main():
              "(default 0.05, i.e. 5 percentage points)",
     )
     parser.add_argument(
+        "--cache-min-prompt-tokens",
+        type=int,
+        default=2600,
+        help="Skip the prompt-cache hit-rate gate for runs whose first turn is smaller than this. "
+             "Providers only cache prefixes above a minimum size, so a leaner base prompt can cut "
+             "tokens in half while legitimately reporting 0%% hits (default 2600).",
+    )
+    parser.add_argument(
         "--allow-same-pass-count",
         action="store_true",
         help="Do not fail when the pass count stays equal but an individual task regressed",
@@ -183,6 +198,14 @@ def main():
         f"{current_doc.get('metadata', {}).get('endpoint')}/"
         f"{current_doc.get('metadata', {}).get('model')}"
     )
+
+    base_harness = baseline_doc.get("metadata", {}).get("harness")
+    curr_harness = current_doc.get("metadata", {}).get("harness")
+    if base_harness is not None and curr_harness is not None and base_harness != curr_harness:
+        print("harness configuration changed (cost metrics are not comparable across surfaces):")
+        for key in sorted(set(base_harness) | set(curr_harness)):
+            if base_harness.get(key) != curr_harness.get(key):
+                print(f"  {key}: {base_harness.get(key)!r} -> {curr_harness.get(key)!r}")
 
     for task_id in sorted(baseline):
         base, now = baseline[task_id], current[task_id]
@@ -218,6 +241,14 @@ def main():
             b, c = dig(base, path), dig(now, path)
             if b is None or c is None or not isinstance(b, float):
                 continue
+            if path[-1] == "promptCacheHitRate":
+                currentFirstTurn = dig(now, ("trace", "profile", "context",
+                                             "firstTurnPromptTokens")) or 0
+                if currentFirstTurn < args.cache_min_prompt_tokens:
+                    print(f"  {path[-1]}: {b:.3f} -> {c:.3f} (not gated: first turn is "
+                          f"{currentFirstTurn} tokens, below the {args.cache_min_prompt_tokens} "
+                          f"token provider cache minimum)")
+                    continue
             print(f"  {path[-1]}: {b:.3f} -> {c:.3f}")
             if higher_is_better and c + args.cache_hit_slack < b:
                 regressions.append(

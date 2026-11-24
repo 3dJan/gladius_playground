@@ -84,8 +84,11 @@ namespace gladius::agent::bench
                                 Range{10.0, 523.0},
                                 500u,
                                 // An open lattice fills far less of its box than the solid sphere
-                                // it is cut from (0.52), so this separates lattice from solid.
-                                Range{0.05, 0.46}}},
+                                // it is cut from (0.52), so this separates lattice from solid. The
+                                // lower bound only excludes a degenerate model, which the volume
+                                // floor already does: how much material a gyroid wall carries is a
+                                // free choice of wall thickness, and a thin one is still a lattice.
+                                Range{0.01, 0.46}}},
           AgentBenchTask{
             "lego_brick_3x4",
             "3x4 LEGO compatible brick",
