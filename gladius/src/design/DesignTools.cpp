@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 #include <filesystem>
 #include <set>
 
@@ -24,6 +25,45 @@ namespace gladius::design
     {
         /// @brief Bytes a program listing may occupy; a tool result is re-prefilled every later turn
         constexpr std::size_t kMaxSnippetChars = 12000;
+
+        /**
+         * @brief Error text for an unresolvable graph id, listing the ids that do exist.
+         * @details A bare "Unknown configurationId" costs a whole extra model turn: the model has to
+         *          re-read the design summary before it can retry. The ids are a handful of short
+         *          strings, so returning them makes the retry land on the first try.
+         */
+        template <typename Entry>
+        [[nodiscard]] std::string unknownIdError(char const * field,
+                                                 std::string const & given,
+                                                 std::map<std::string, Entry> const & entries,
+                                                 auto const & nameOf)
+        {
+            std::vector<std::string> options;
+            for (auto const & [id, entry] : entries)
+            {
+                options.push_back(nameOf(entry) + " (" + id + ")");
+            }
+
+            std::ostringstream out;
+            out << "Unknown " << field << ": " << given << ". Existing " << field << "s (pass the id "
+                << "in parentheses, not the name): "
+                << (options.empty() ? std::string("none - create one first")
+                                    : [&]
+                                    {
+                                        std::string joined;
+                                        for (auto const & option : options)
+                                        {
+                                            if (!joined.empty())
+                                            {
+                                                joined += ", ";
+                                            }
+                                            joined += option;
+                                        }
+                                        return joined;
+                                    }())
+                << '.';
+            return out.str();
+        }
 
         /**
          * @brief Reads a string array argument, tolerating a single string.
@@ -249,7 +289,10 @@ namespace gladius::design
                 ctx.graph.createVariant(nodeId, name, args.value("rationale", ""), fid, params);
               if (id.empty())
               {
-                  return {{"success", false}, {"error", "Unknown nodeId: " + nodeId}};
+                  return {{"success", false},
+                          {"error",
+                           unknownIdError("nodeId", nodeId, ctx.graph.nodes(),
+                                          [](DesignNode const & n) { return n.name; })}};
               }
               return {{"success", true}, {"variantId", id}};
           });
@@ -264,8 +307,13 @@ namespace gladius::design
           [&ctx](nlohmann::json const & args) -> nlohmann::json {
               std::string const vid = args.value("variantId", "");
               bool const ok = ctx.graph.rejectVariant(vid, args.value("reason", ""));
-              return ok ? nlohmann::json{{"success", true}}
-                        : nlohmann::json{{"success", false}, {"error", "Unknown variantId: " + vid}};
+              if (ok)
+              {
+                  return nlohmann::json{{"success", true}};
+              }
+              return {{"success", false},
+                      {"error", unknownIdError("variantId", vid, ctx.graph.variants(),
+                                               [](DesignVariant const & v) { return v.name; })}};
           });
 
         registry.registerSyncTool(
@@ -279,8 +327,13 @@ namespace gladius::design
               std::string const nid = args.value("nodeId", "");
               bool const freeze = args.value("frozen", true);
               bool const ok = freeze ? ctx.graph.freezeNode(nid) : ctx.graph.unfreezeNode(nid);
-              return ok ? nlohmann::json{{"success", true}}
-                        : nlohmann::json{{"success", false}, {"error", "Unknown nodeId: " + nid}};
+              if (ok)
+              {
+                  return nlohmann::json{{"success", true}};
+              }
+              return {{"success", false},
+                      {"error", unknownIdError("nodeId", nid, ctx.graph.nodes(),
+                                               [](DesignNode const & n) { return n.name; })}};
           });
 
         registry.registerSyncTool(
@@ -353,8 +406,13 @@ namespace gladius::design
                       ctx.graph.setConfigurationPreview(cid, std::move(png));
                   }
               }
-              return ok ? nlohmann::json{{"success", true}, {"configurationId", cid}}
-                        : nlohmann::json{{"success", false}, {"error", "Unknown configurationId: " + cid}};
+              if (ok)
+              {
+                  return nlohmann::json{{"success", true}, {"configurationId", cid}};
+              }
+              return {{"success", false},
+                      {"error", unknownIdError("configurationId", cid, ctx.graph.configurations(),
+                                               [](Configuration const & c) { return c.name; })}};
           });
 
         registry.registerSyncTool(

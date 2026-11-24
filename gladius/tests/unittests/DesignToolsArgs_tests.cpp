@@ -151,6 +151,62 @@ namespace gladius::design::tests
         EXPECT_TRUE(result.at("recommendLibraryExport").get<bool>());
     }
 
+    TEST(ActivateConfiguration_UnknownId, ToolCall_ListsExistingIdsForOneShotRetry)
+    {
+        // Arrange
+        ToolHarness harness;
+        (void)harness.executor.executeSync("add_requirement",
+                                          {{"description", "stiff wall"}},
+                                          harness.cancellation);
+        auto const node = harness.executor.executeSync("add_function",
+                                                       {{"name", "Wall"}},
+                                                       harness.cancellation);
+        auto const variant = harness.executor.executeSync("create_variant",
+                                                          {{"nodeId", node.value("nodeId", "")},
+                                                           {"name", "gyroid"}},
+                                                          harness.cancellation);
+        auto const config = harness.executor.executeSync("create_configuration",
+                                                         {{"name", "Wall config"},
+                                                          {"selectedVariants",
+                                                           {variant.value("variantId", "")}}},
+                                                         harness.cancellation);
+        ASSERT_TRUE(config.value("success", false)) << config.dump();
+
+        // Act: the model guesses the id instead of using the one it was handed
+        auto const result = harness.executor.executeSync("activate_configuration",
+                                                        {{"configurationId", "config_1"}},
+                                                        harness.cancellation);
+
+        // Assert: a bare "unknown id" costs a whole extra turn to re-read the graph, so the error
+        // has to carry what is actually available.
+        ASSERT_FALSE(result.value("success", true));
+        EXPECT_NE(result.value("error", "").find("Wall config ("), std::string::npos)
+          << result.value("error", "");
+        auto const retry = harness.executor.executeSync(
+          "activate_configuration",
+          {{"configurationId", config.value("configurationId", "")}},
+          harness.cancellation);
+        ASSERT_TRUE(retry.value("success", false)) << retry.dump();
+    }
+
+    TEST(CreateVariant_UnknownNodeId, ToolCall_ListsExistingNodes)
+    {
+        // Arrange
+        ToolHarness harness;
+        (void)harness.executor.executeSync("add_function", {{"name", "Wall"}},
+                                          harness.cancellation);
+
+        // Act
+        auto const result = harness.executor.executeSync("create_variant",
+                                                        {{"nodeId", "nope"}, {"name", "gyroid"}},
+                                                        harness.cancellation);
+
+        // Assert
+        ASSERT_FALSE(result.value("success", true));
+        EXPECT_NE(result.value("error", "").find("Wall ("), std::string::npos)
+          << result.value("error", "");
+    }
+
     TEST(GetDesignSummary_ToolCall, ReturnedWithoutInternalCountersOrPreviews)
     {
         // Arrange
