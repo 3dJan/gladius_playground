@@ -274,7 +274,10 @@ to the trace.
 ## Known limitations
 
 * Local-model runs are nondeterministic: a single run per task is noisy, which is why the comparer
-  gates on pass counts and tolerant cost deltas rather than exact numbers.
+  gates on pass counts and tolerant cost deltas rather than exact numbers. On `iq3_s` the spread
+  between two consecutive all-passing runs was large — the gyroid task measured 13 turns / 93 k
+  prompt tokens in one run and 19 turns / 190 k in the next — so treat a single cost regression on
+  one task as a prompt to re-run, not as a verdict. Pass counts are the trustworthy signal.
 * A fresh WebGPU document can report `BuildVolumeFallback` bounds; the geometry gates therefore
   measure the **exported mesh** rather than trusting the bounds probe, and bounds are recorded only
   as context.
