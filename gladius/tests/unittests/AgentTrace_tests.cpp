@@ -497,7 +497,8 @@ namespace gladius::agent::trace::tests
 
     TEST(AgentTraceProfile, AnalyzeTrace_FlagsPromptCacheLossAndContextShaping)
     {
-        // Arrange: turn 2 sends a different system prompt and gets nothing back from the cache
+        // Arrange: turn 2 sends a different system prompt, its cached prefix shrinks and whole
+        // exchanges were pruned from the front of history
         std::vector<nlohmann::json> records;
         records.push_back({{"type", "turn"},
                            {"turnIndex", 1},
@@ -507,11 +508,7 @@ namespace gladius::agent::trace::tests
                            {"ttftMs", 900},
                            {"firstContentMs", 900},
                            {"systemPromptHash", 1},
-                           {"context",
-                            {{"imagesKept", 1},
-                             {"imagesDropped", 2},
-                             {"toolResultsKept", 6},
-                             {"toolResultsCompacted", 3}}},
+                           {"context", {{"imagesKept", 1}, {"messagesSent", 4}, {"messagesPruned", 0}}},
                            {"promptBytes", {{"imageBytes", 120}, {"images", 1}}},
                            {"usage", {{"totalPromptTokens", 5000}, {"cacheReadTokens", 4000}}}});
         records.push_back({{"type", "turn"},
@@ -522,20 +519,55 @@ namespace gladius::agent::trace::tests
                            {"ttftMs", 990},
                            {"firstContentMs", 990},
                            {"systemPromptHash", 2},
-                           {"context", {{"imagesKept", 1}, {"imagesDropped", 0}}},
+                           {"context", {{"imagesKept", 1}, {"messagesSent", 6}, {"messagesPruned", 3}}},
                            {"promptBytes", {{"imageBytes", 0}, {"images", 0}}},
-                           {"usage", {{"totalPromptTokens", 6000}, {"cacheReadTokens", 0}}}});
+                           {"usage", {{"totalPromptTokens", 6000}, {"cacheReadTokens", 1000}}}});
 
         // Act
         auto const profile = analyzeTrace(records, 2000);
 
         // Assert
         EXPECT_EQ(profile.systemPromptMutations, 1u);
-        EXPECT_EQ(profile.cacheMissTurns, 1u);
+        EXPECT_EQ(profile.cacheMissTurns, 0u);
+        EXPECT_EQ(profile.cacheRewindTurns, 1u);
         EXPECT_EQ(profile.imagesKept, 2u);
-        EXPECT_EQ(profile.imagesDropped, 2u);
-        EXPECT_EQ(profile.compactedToolResults, 3u);
         EXPECT_EQ(profile.imagesInHistoryLastTurn, 0u);
+        EXPECT_EQ(profile.prunedMessages, 3u);
+        EXPECT_EQ(profile.historyPrunes, 1u);
+    }
+
+    TEST(AgentTraceProfile, AnalyzeTrace_AppendOnlyHistoryHasNoCacheRewinds)
+    {
+        // Arrange: the cached prefix grows every turn, which is what append-only history yields
+        std::vector<nlohmann::json> records;
+        for (std::int64_t turn = 1; turn <= 4; ++turn)
+        {
+            records.push_back({{"type", "turn"},
+                               {"turnIndex", turn},
+                               {"tMs", turn * 1000},
+                               {"durationMs", 1000},
+                               {"completionMs", 500},
+                               {"ttftMs", 400},
+                               {"firstContentMs", 400},
+                               {"systemPromptHash", 1},
+                               {"context",
+                                {{"imagesKept", 1},
+                                 {"messagesSent", 2 * turn},
+                                 {"messagesPruned", 0}}},
+                               {"promptBytes", {{"imageBytes", 120}, {"images", 1}}},
+                               {"usage",
+                                {{"totalPromptTokens", 2000 * turn},
+                                 {"cacheReadTokens", 1900 * (turn - 1)}}}});
+        }
+
+        // Act
+        auto const profile = analyzeTrace(records, 4000);
+
+        // Assert
+        EXPECT_EQ(profile.cacheRewindTurns, 0u);
+        EXPECT_EQ(profile.systemPromptMutations, 0u);
+        EXPECT_EQ(profile.historyPrunes, 0u);
+        EXPECT_EQ(profile.prunedMessages, 0u);
     }
 
     TEST(AgentTrace, WriteTimeline_EmitsValidChromeEvents)

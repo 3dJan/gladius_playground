@@ -2,6 +2,8 @@
 
 #include <sstream>
 
+#include <algorithm>
+
 namespace gladius::agent
 {
     std::string ContextBuilder::defaultSystemPrompt()
@@ -52,20 +54,6 @@ namespace gladius::agent
 
     namespace
     {
-        /// @brief Marker text left where a superseded viewport image used to be
-        constexpr char const * const kDroppedImageStub = "[capture dropped: an older viewport image "
-                                                         "was removed from history to save prompt "
-                                                         "tokens; call capture_viewport for a fresh view]";
-
-        /// @brief Marks where a compacted tool result used to be
-        [[nodiscard]] nlohmann::json compactedToolResult(std::string const & callId)
-        {
-            return {{"compacted", true},
-                    {"note", "result removed from history to save prompt tokens; call the tool again "
-                             "if you need it"},
-                    {"toolUseId", callId}};
-        }
-
         void appendSection(std::ostringstream & out, char const * header, std::string const & body)
         {
             if (body.empty())
@@ -194,99 +182,105 @@ namespace gladius::agent
         return live.str();
     }
 
+    namespace
+    {
+        /// @brief True when a message carries blocks of the given kind
+        template<typename Block>
+        [[nodiscard]] bool hasBlock(Message const & msg)
+        {
+            return std::any_of(msg.parts.begin(), msg.parts.end(),
+                               [](Content const & part)
+                               {
+                                   return std::holds_alternative<Block>(part);
+                               });
+        }
+
+        /// @brief True when history may start at `index` without breaking a tool exchange
+        /// @details A `tool_result` may never be sent without the `tool_use` it answers, so a prune
+        ///          boundary cannot directly follow a message that issued calls.
+        [[nodiscard]] bool isPruneBoundary(std::vector<Message> const & messages, std::size_t index)
+        {
+            if (index == 0 || index >= messages.size())
+            {
+                return false;
+            }
+            return !hasBlock<ToolResult>(messages[index]) && !hasBlock<ToolCall>(messages[index - 1]);
+        }
+
+        /// @brief Snaps a prune boundary to the nearest whole exchange, preferring the next one
+        /// @details Pruning in chunks keeps the sent prefix byte-identical between prunes; snapping to
+        ///          an exchange keeps the prompt valid for the provider.
+        [[nodiscard]] std::size_t alignToPruneBoundary(std::vector<Message> const & messages,
+                                                       std::size_t index)
+        {
+            auto const last = messages.size() - 1;
+            index = std::clamp<std::size_t>(index, 1, last);
+            while (index < last && !isPruneBoundary(messages, index))
+            {
+                ++index;
+            }
+            while (index > 1 && !isPruneBoundary(messages, index))
+            {
+                --index;
+            }
+            return index;
+        }
+    } // namespace
+
     std::vector<Message> ContextBuilder::filterHistory(Conversation const & conversation,
                                                        PrivacySettings const & privacy,
                                                        ContextBuildStats * stats) const
     {
         auto const & messages = conversation.messages();
 
-        // Only the newest captures are worth their tokens: an image costs a fixed block of prompt
-        // tokens no matter how large the encoded file is, so keeping ten views costs ten times one.
-        std::size_t const totalImages = std::count_if(
-          messages.begin(), messages.end(),
-          [](Message const & msg)
-          {
-              return std::any_of(msg.parts.begin(), msg.parts.end(),
-                                 [](Content const & part)
-                                 {
-                                     return std::holds_alternative<ImageContent>(part);
-                                 });
-          });
-        std::size_t const imagesToKeep = std::min(m_policy.keptImages, totalImages);
-        std::size_t const firstKeptImage = totalImages - imagesToKeep;
-
-        // Successful results go stale quickly; the model has usually acted on them already.
-        std::size_t const totalResults = std::count_if(
-          messages.begin(), messages.end(),
-          [](Message const & msg)
-          {
-              return std::any_of(msg.parts.begin(), msg.parts.end(),
-                                 [](Content const & part)
-                                 {
-                                     return std::holds_alternative<ToolResult>(part);
-                                 });
-          });
-        std::size_t const firstKeptResult
-          = totalResults > m_policy.keptToolResults ? totalResults - m_policy.keptToolResults : 0;
+        // History is append-only: a message that has been sent once is sent again unchanged. Sliding
+        // windows (keep the newest N images, compact everything older) rewrite the oldest messages
+        // every turn, which breaks the endpoint's prompt cache right after the tool block and makes it
+        // re-prefill the whole conversation. Old content is dropped in whole messages instead, and in
+        // chunks, so the sent prefix stays byte-identical between prunes.
+        //
+        // Pruning must not split a tool_use from its tool_result, so the cut moves back to the start
+        // of the exchange the boundary falls inside.
+        std::size_t firstSent = 0;
+        if (m_policy.maxHistoryMessages > 0 && messages.size() > m_policy.maxHistoryMessages
+            && messages.size() > 1)
+        {
+            std::size_t const excess = messages.size() - m_policy.maxHistoryMessages;
+            std::size_t const chunks
+              = (excess + m_policy.pruneChunkMessages - 1) / m_policy.pruneChunkMessages;
+            std::size_t const requested = chunks * m_policy.pruneChunkMessages;
+            // The opening message is the design request itself: it is cheap, and losing it makes the
+            // model forget the task, so it survives every prune.
+            firstSent = alignToPruneBoundary(messages, requested);
+        }
 
         std::vector<Message> filtered;
-        filtered.reserve(messages.size());
-        std::size_t imageIndex = 0;
-        std::size_t resultIndex = 0;
-
-        for (auto const & msg : messages)
+        filtered.reserve(messages.size() - firstSent);
+        for (std::size_t i = firstSent; i < messages.size(); ++i)
         {
+            Message const & msg = messages[i];
             Message out;
             out.role = msg.role;
             for (auto const & part : msg.parts)
             {
-                if (auto const * image = std::get_if<ImageContent>(&part))
+                if (std::holds_alternative<ImageContent>(part))
                 {
                     bool const allowed = privacy.allowViewportImages || privacy.allowReferenceImages;
-                    bool const keep = allowed && imageIndex >= firstKeptImage;
-                    if (keep)
+                    if (!allowed)
                     {
-                        out.parts.push_back(part);
-                        if (stats != nullptr)
-                        {
-                            ++stats->imagesKept;
-                        }
+                        continue;
                     }
-                    else if (allowed)
+                    out.parts.push_back(part);
+                    if (stats != nullptr)
                     {
-                        out.parts.push_back(TextContent{kDroppedImageStub});
-                        if (stats != nullptr)
-                        {
-                            ++stats->imagesDropped;
-                        }
+                        ++stats->imagesKept;
                     }
-                    ++imageIndex;
                     continue;
                 }
 
-                if (auto const * result = std::get_if<ToolResult>(&part))
+                if (std::holds_alternative<ToolResult>(part))
                 {
-                    bool const failed = result->value.is_object()
-                                     && result->value.value("success", true) == false;
-                    bool const keep = failed || resultIndex >= firstKeptResult;
-                    if (keep)
-                    {
-                        out.parts.push_back(part);
-                        if (stats != nullptr)
-                        {
-                            ++stats->toolResultsKept;
-                        }
-                    }
-                    else
-                    {
-                        out.parts.push_back(ToolResult{result->callId,
-                                                       compactedToolResult(result->callId)});
-                        if (stats != nullptr)
-                        {
-                            ++stats->toolResultsCompacted;
-                        }
-                    }
-                    ++resultIndex;
+                    out.parts.push_back(part);
                     continue;
                 }
 
@@ -301,6 +295,13 @@ namespace gladius::agent
                 filtered.push_back(std::move(out));
             }
         }
+
+        if (stats != nullptr)
+        {
+            stats->messagesSent = filtered.size();
+            stats->messagesPruned = firstSent;
+        }
         return filtered;
     }
+
 } // namespace gladius::agent

@@ -95,10 +95,11 @@ def analyze(records, wall_ms=0):
         "contextTax": 0.0,
         "cacheHitRate": 0.0,
         "cacheMissTurns": 0,
+        "cacheRewindTurns": 0,
         "systemPromptMutations": 0,
         "imagesKept": 0,
-        "imagesDropped": 0,
-        "compactedToolResults": 0,
+        "prunedMessages": 0,
+        "historyPrunes": 0,
         "imagesInHistoryLastTurn": 0,
         "promptBytes": {},
         "largestToolResult": (0, 0),
@@ -179,8 +180,9 @@ def analyze(records, wall_ms=0):
             seen_hash_state["hash"] = rec.get("systemPromptHash", 0)
             ctx = rec.get("context") or {}
             out["imagesKept"] += ctx.get("imagesKept", 0)
-            out["imagesDropped"] += ctx.get("imagesDropped", 0)
-            out["compactedToolResults"] += ctx.get("toolResultsCompacted", 0)
+            out["prunedMessages"] += ctx.get("messagesPruned", 0)
+            if ctx.get("messagesPruned", 0) > 0:
+                out["historyPrunes"] += 1
 
             prompt = usage.get("totalPromptTokens", 0)
             output = usage.get("outputTokens", 0)
@@ -315,6 +317,7 @@ def print_profile(profile, label):
     print("\nWhere the wall time went (ranked):")
     rows = [
         ("model prefill", profile["modelPrefillMs"]),
+        ("model thinking", profile["modelThinkingMs"]),
         ("model generate", profile["modelGenerateMs"]),
         ("harness phases", profile["harnessMs"]),
         ("tool execution", profile["toolMs"]),
@@ -339,12 +342,12 @@ def print_profile(profile, label):
                                     profile["totalPromptTokens"],
                                     profile["contextTax"],
                                     profile["cacheHitRate"] * 100.0))
-    print("  prompt cache: misses={}/{} systemPromptMutations={} | images kept={} dropped={} "
-          "inLastTurn={} | toolResultsCompacted={}".format(
-              profile["cacheMissTurns"], profile["turns"],
+    print("  prompt cache: misses={}/{} rewrites={} systemPromptMutations={} | images kept={} "
+          "inLastTurn={} | historyPrunes={} prunedMessages={}".format(
+              profile["cacheMissTurns"], profile["turns"], profile["cacheRewindTurns"],
               profile["systemPromptMutations"], profile["imagesKept"],
-              profile["imagesDropped"], profile["imagesInHistoryLastTurn"],
-              profile["compactedToolResults"]))
+              profile["imagesInHistoryLastTurn"], profile["historyPrunes"],
+              profile["prunedMessages"]))
     if profile["promptBytes"]:
         print("  prompt bytes by component:")
         for key, value in sorted(profile["promptBytes"].items(), key=lambda kv: -kv[1]):
@@ -380,13 +383,14 @@ def print_profile(profile, label):
 
 
 SCALAR_KEYS = (
-    "wallMs", "turns", "toolCalls", "modelMs", "modelPrefillMs", "modelGenerateMs",
+    "wallMs", "turns", "toolCalls", "modelMs", "modelPrefillMs", "modelThinkingMs",
+    "modelGenerateMs",
     "toolMs", "harnessMs", "contextBuildMs",
     "unaccountedMs", "turnP50Ms", "turnP95Ms", "turnMaxMs", "ttftP50Ms", "ttftP95Ms",
     "prefillTokPerSec", "decodeTokPerSec", "thinkingChars", "textChars", "toolJsonChars",
     "firstPromptTokens", "lastPromptTokens", "peakPromptTokens", "totalPromptTokens",
-    "contextTax", "cacheHitRate", "cacheMissTurns", "systemPromptMutations",
-    "imagesKept", "imagesDropped", "compactedToolResults", "imagesInHistoryLastTurn",
+    "contextTax", "cacheHitRate", "cacheMissTurns", "cacheRewindTurns", "systemPromptMutations",
+    "imagesKept", "imagesInHistoryLastTurn", "historyPrunes", "prunedMessages",
     "failedToolCalls", "turnsAfterFailure",
     "turnsAfterFailureMs", "turnsAfterFailurePromptTokens", "truncatedTurns",
     "turnsWithoutToolCalls", "readOnlyTurnsMs", "judgeMs", "mutatingToolCalls",

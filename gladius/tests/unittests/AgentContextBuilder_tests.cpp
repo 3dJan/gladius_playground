@@ -31,6 +31,40 @@ namespace agent::tests
             return snap;
         }
 
+        /// @brief Byte-level signature of one message's content parts
+        [[nodiscard]] std::string partsSignature(gladius::agent::Message const & msg)
+        {
+            nlohmann::json arr = nlohmann::json::array();
+            for (auto const & part : msg.parts)
+            {
+                if (auto const * text = std::get_if<gladius::agent::TextContent>(&part))
+                {
+                    arr.push_back({{"t", "text"}, {"v", text->text}});
+                }
+                else if (auto const * image = std::get_if<gladius::agent::ImageContent>(&part))
+                {
+                    std::string hex;
+                    for (auto const byte : image->data)
+                    {
+                        auto const value = static_cast<unsigned int>(byte);
+                        hex += "0123456789abcdef"[value >> 4];
+                        hex += "0123456789abcdef"[value & 0xFu];
+                    }
+                    arr.push_back({{"t", "image"}, {"v", hex}, {"m", image->mimeType}});
+                }
+                else if (auto const * call = std::get_if<gladius::agent::ToolCall>(&part))
+                {
+                    arr.push_back({{"t", "call"}, {"id", call->id}, {"n", call->name},
+                                   {"a", call->arguments}});
+                }
+                else if (auto const * result = std::get_if<gladius::agent::ToolResult>(&part))
+                {
+                    arr.push_back({{"t", "result"}, {"id", result->callId}, {"v", result->value}});
+                }
+            }
+            return arr.dump();
+        }
+
         [[nodiscard]] std::string liveContextText(
           gladius::agent::CompletionRequest const & request, std::size_t index)
         {
@@ -146,18 +180,63 @@ TEST(ContextBuilder, Build_VolatileSnapshotChanges_SystemPromptIsByteIdentical)
         }
     }
 
-    TEST(ContextBuilder, ImagePolicy_OlderCapturesBecomeTextStubs)
+    TEST(ContextBuilder, HistoryPolicy_SentMessagesAreNeverRewritten)
     {
-        // Arrange: three viewport captures, the only cost driver being how many are kept
+        // Arrange: a growing conversation with tool results and captures, the situation in which a
+        // sliding window used to compact the oldest parts in place
         ContextBuilder builder;
         Conversation conversation;
-        conversation.appendUserText("Make a sphere.");
-        std::vector<std::byte> const tiny{std::byte{1}, std::byte{2}};
-        conversation.appendUserImage(std::vector<std::byte>(tiny), "image/png");
-        conversation.appendUserText("first view");
-        conversation.appendUserImage(std::vector<std::byte>(tiny), "image/png");
-        conversation.appendUserText("second view");
-        conversation.appendUserImage(std::vector<std::byte>(tiny), "image/png");
+        ToolRegistry registry;
+        PrivacySettings privacy;
+        std::vector<std::byte> const image{std::byte{0xAA}, std::byte{0xBB}};
+
+        std::vector<std::string> previousSent;
+        std::size_t const turns = 20;
+        for (std::size_t turn = 0; turn < turns; ++turn)
+        {
+            conversation.appendAssistant("call", {makeCall("id" + std::to_string(turn))});
+            conversation.appendToolResult("id" + std::to_string(turn),
+                                          {{"success", true}, {"payload", std::string(300, 'x')}});
+            if (turn % 4 == 0)
+            {
+                conversation.appendUserImage(std::vector<std::byte>(image), "image/png");
+            }
+
+            // Act
+            auto const request = builder.build(conversation, registry, privacy, {});
+            std::vector<std::string> sent;
+            sent.reserve(request.messages.size());
+            for (auto const & msg : request.messages)
+            {
+                sent.push_back(partsSignature(msg));
+            }
+
+            // Assert: everything the previous turn already sent must still be there, byte for byte,
+            // in the same order. Anything else and the endpoint re-prefills the whole conversation.
+            ASSERT_GE(sent.size(), previousSent.size()) << "turn " << turn;
+            for (std::size_t i = 0; i < previousSent.size(); ++i)
+            {
+                EXPECT_EQ(sent[i], previousSent[i]) << "message " << i << " of turn " << turn
+                                                    << " was rewritten";
+            }
+            // The live-state message is the varying block and must be last.
+            sent.pop_back();
+            previousSent = std::move(sent);
+        }
+    }
+
+    TEST(ContextBuilder, HistoryPolicy_CapturesAndResultsStayVerbatim)
+    {
+        // Arrange: more captures and results than any keep window would allow
+        ContextBuilder builder;
+        Conversation conversation;
+        std::vector<std::byte> const image{std::byte{1}, std::byte{2}};
+        for (int i = 0; i < 4; ++i)
+        {
+            conversation.appendUserImage(std::vector<std::byte>(image), "image/png");
+            conversation.appendAssistant("call", {makeCall("id" + std::to_string(i))});
+            conversation.appendToolResult("id" + std::to_string(i), {{"success", true}, {"v", i}});
+        }
         ToolRegistry registry;
         PrivacySettings privacy;
 
@@ -165,74 +244,50 @@ TEST(ContextBuilder, Build_VolatileSnapshotChanges_SystemPromptIsByteIdentical)
         gladius::agent::ContextBuildStats stats;
         auto const request = builder.build(conversation, registry, privacy, {}, &stats);
 
-        // Assert: only the newest capture survives; older ones leave a marker so the model still
-        // knows it looked at a view that is no longer attached
-        EXPECT_EQ(stats.imagesKept, 1u);
-        EXPECT_EQ(stats.imagesDropped, 2u);
-        std::size_t imageParts = 0;
-        std::size_t stubParts = 0;
+        // Assert: nothing is compacted or stubbed, because rewriting sent bytes costs the prompt cache
+        std::size_t images = 0;
+        std::size_t stubs = 0;
         for (auto const & msg : request.messages)
         {
             for (auto const & part : msg.parts)
             {
                 if (std::holds_alternative<gladius::agent::ImageContent>(part))
                 {
-                    ++imageParts;
+                    ++images;
+                }
+                if (auto const * result = std::get_if<gladius::agent::ToolResult>(&part))
+                {
+                    EXPECT_FALSE(result->value.contains("compacted"));
                 }
                 if (auto const * text = std::get_if<gladius::agent::TextContent>(&part))
                 {
-                    stubParts += text->text.find("capture dropped") != std::string::npos ? 1u : 0u;
+                    stubs += text->text.find("dropped") != std::string::npos ? 1u : 0u;
                 }
             }
         }
-        EXPECT_EQ(imageParts, 1u);
-        EXPECT_EQ(stubParts, 2u);
+        EXPECT_EQ(images, 4u);
+        EXPECT_EQ(stats.imagesKept, 4u);
+        EXPECT_EQ(stubs, 0u);
     }
 
-    TEST(ContextBuilder, ImagePolicy_NewestCaptureIsTheOneKept)
+    TEST(ContextBuilder, HistoryPolicy_BudgetPrunesWholeExchangesFromTheFront)
     {
-        // Arrange
+        // Arrange: a history well past the budget
         ContextBuilder builder;
+        gladius::agent::ContextPolicy policy;
+        policy.maxHistoryMessages = 12;
+        policy.pruneChunkMessages = 8;
+        builder.setContextPolicy(policy);
+
         Conversation conversation;
-        std::vector<std::byte> const oldImage{std::byte{0xAA}, std::byte{0xAA}};
-        std::vector<std::byte> const newImage{std::byte{0xBB}};
-        conversation.appendUserImage(std::vector<std::byte>(oldImage), "image/png");
-        conversation.appendUserImage(std::vector<std::byte>(newImage), "image/png");
-        ToolRegistry registry;
-        PrivacySettings privacy;
-
-        // Act
-        auto const request = builder.build(conversation, registry, privacy, {});
-
-        // Assert
-        std::vector<std::byte> kept;
-        for (auto const & msg : request.messages)
+        std::vector<std::string> allIds;
+        for (int i = 0; i < 10; ++i)
         {
-            for (auto const & part : msg.parts)
-            {
-                if (auto const * image = std::get_if<gladius::agent::ImageContent>(&part))
-                {
-                    kept = image->data;
-                }
-            }
+            std::string const id = "id" + std::to_string(i);
+            allIds.push_back(id);
+            conversation.appendAssistant("call", {makeCall(id)});
+            conversation.appendToolResult(id, {{"success", true}, {"v", i}});
         }
-        ASSERT_EQ(kept.size(), 1u);
-        EXPECT_EQ(kept[0], std::byte{0xBB});
-    }
-
-    TEST(ContextBuilder, ToolResultPolicy_OlderResultsCompactedFailuresKept)
-    {
-        // Arrange: more successful results than the keep window, plus one failure
-        ContextBuilder builder;
-        Conversation conversation;
-        for (int i = 0; i < 9; ++i)
-        {
-            conversation.appendAssistant("call", {makeCall("id" + std::to_string(i))});
-            conversation.appendToolResult("id" + std::to_string(i),
-                                          {{"success", true}, {"payload", std::string(400, 'x')}});
-        }
-        conversation.appendAssistant("call", {makeCall("bad")});
-        conversation.appendToolResult("bad", {{"success", false}, {"error", "bad argument"}});
         ToolRegistry registry;
         PrivacySettings privacy;
 
@@ -240,56 +295,58 @@ TEST(ContextBuilder, Build_VolatileSnapshotChanges_SystemPromptIsByteIdentical)
         gladius::agent::ContextBuildStats stats;
         auto const request = builder.build(conversation, registry, privacy, {}, &stats);
 
-        // Assert: an error stays verbatim because it is the only thing that tells the model what to fix
-        std::size_t compacted = 0;
-        bool failureKept = false;
+        // Assert: old exchanges are dropped whole, never half, and never rewritten
+        EXPECT_GT(stats.messagesPruned, 0u);
+        EXPECT_LT(stats.messagesSent, conversation.size());
+
+        std::vector<std::string> keptResults;
+        std::size_t toolCalls = 0;
         for (auto const & msg : request.messages)
         {
             for (auto const & part : msg.parts)
             {
-                auto const * result = std::get_if<gladius::agent::ToolResult>(&part);
-                if (result == nullptr)
+                if (auto const * call = std::get_if<gladius::agent::ToolCall>(&part))
                 {
-                    continue;
+                    ++toolCalls;
+                    keptResults.push_back(call->id);
                 }
-                compacted += result->value.contains("compacted") ? 1u : 0u;
-                failureKept = failureKept || result->callId == "bad";
+                if (auto const * result = std::get_if<gladius::agent::ToolResult>(&part))
+                {
+                    EXPECT_FALSE(result->value.contains("compacted"));
+                    EXPECT_FALSE(keptResults.empty()) << "tool result sent without its call";
+                    EXPECT_EQ(keptResults.back(), result->callId)
+                      << "tool result separated from its call";
+                }
             }
         }
-        EXPECT_GT(stats.toolResultsCompacted, 0u);
-        EXPECT_EQ(stats.toolResultsCompacted, compacted);
-        EXPECT_TRUE(failureKept);
 
-        auto const failureIt = std::find_if(
-          request.messages.begin(), request.messages.end(), [](auto const & msg)
+        // The newest exchange survives, otherwise the model loses what it just did
+        ASSERT_FALSE(request.messages.empty());
+        EXPECT_TRUE(std::any_of(
+          request.messages.begin(), request.messages.end(),
+          [&](gladius::agent::Message const & msg)
           {
               return std::any_of(msg.parts.begin(), msg.parts.end(),
-                                 [](auto const & part)
+                                 [&](gladius::agent::Content const & part)
                                  {
                                      auto const * r = std::get_if<gladius::agent::ToolResult>(&part);
-                                     return r != nullptr && r->callId == "bad";
+                                     return r != nullptr && r->callId == allIds.back();
                                  });
-          });
-        ASSERT_NE(failureIt, request.messages.end());
-        for (auto const & part : failureIt->parts)
-        {
-            if (auto const * r = std::get_if<gladius::agent::ToolResult>(&part);
-                r != nullptr && r->callId == "bad")
-            {
-                EXPECT_EQ(r->value.value("error", std::string{}), "bad argument");
-            }
-        }
+          }));
     }
 
-    TEST(ContextBuilder, ToolResultPolicy_RecentResultsAreUntouched)
+    TEST(ContextBuilder, HistoryPolicy_UnlimitedBudgetKeepsEverything)
     {
-        // Arrange: fewer results than the keep window
+        // Arrange
         ContextBuilder builder;
+        gladius::agent::ContextPolicy policy;
+        policy.maxHistoryMessages = 0;
+        builder.setContextPolicy(policy);
         Conversation conversation;
-        for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < 40; ++i)
         {
             conversation.appendAssistant("call", {makeCall("id" + std::to_string(i))});
-            conversation.appendToolResult("id" + std::to_string(i), {{"success", true}, {"v", i}});
+            conversation.appendToolResult("id" + std::to_string(i), {{"success", true}});
         }
         ToolRegistry registry;
         PrivacySettings privacy;
@@ -299,8 +356,8 @@ TEST(ContextBuilder, Build_VolatileSnapshotChanges_SystemPromptIsByteIdentical)
         (void)builder.build(conversation, registry, privacy, {}, &stats);
 
         // Assert
-        EXPECT_EQ(stats.toolResultsCompacted, 0u);
-        EXPECT_EQ(stats.toolResultsKept, 2u);
+        EXPECT_EQ(stats.messagesPruned, 0u);
+        EXPECT_EQ(stats.messagesSent, conversation.size());
     }
 
     TEST(ContextBuilder, PrivacyStillApplies_ImagesFilteredOut)

@@ -31,23 +31,28 @@ namespace gladius::agent
     };
 
     /// @brief How much conversation history is worth resending to the model
+    /// @details History is append-only: a message that has been sent once is sent again unchanged.
+    ///          Sliding-window retention (keep the newest N images, compact everything older) rewrites
+    ///          the oldest messages on every turn, which breaks the endpoint's prompt cache right after
+    ///          the tool block and makes it re-prefill the whole conversation. Old content is dropped
+    ///          in whole messages instead, in chunks, so the sent prefix stays byte-identical between
+    ///          prunes and the cache only breaks at a chunk boundary.
     struct ContextPolicy
     {
-        /// @brief Viewport images kept in the request; older ones become text stubs. One is enough:
-        ///        an image costs a fixed block of prompt tokens whatever its encoded size.
-        std::size_t keptImages = 1;
-        /// @brief Successful tool results kept verbatim, counting back from the newest one. Failures
-        ///        are always kept, because they are what the model has to react to.
-        std::size_t keptToolResults = 6;
+        /// @brief Conversation messages sent before the oldest part starts being dropped; 0 is unlimited
+        std::size_t maxHistoryMessages = 96;
+        /// @brief Messages dropped at once once the budget is exceeded
+        std::size_t pruneChunkMessages = 32;
     };
 
     /// @brief What a build() kept or dropped, so the caller can put it in the trace
     struct ContextBuildStats
     {
         std::size_t imagesKept = 0;
-        std::size_t imagesDropped = 0;
-        std::size_t toolResultsKept = 0;
-        std::size_t toolResultsCompacted = 0;
+        /// @brief Conversation messages actually sent
+        std::size_t messagesSent = 0;
+        /// @brief Oldest messages dropped because the history budget was exceeded
+        std::size_t messagesPruned = 0;
     };
 
     /// @brief Builds provider-neutral CompletionRequests while respecting privacy settings

@@ -56,9 +56,11 @@ RATE_METRICS = (
 DIAGNOSTIC_METRICS = (
     ("trace", "profile", "context", "contextTax"),
     ("trace", "profile", "context", "cacheMissTurns"),
+    ("trace", "profile", "context", "cacheRewindTurns"),
     ("trace", "profile", "context", "systemPromptMutations"),
     ("trace", "profile", "context", "imagesInHistoryLastTurn"),
-    ("trace", "profile", "context", "compactedToolResults"),
+    ("trace", "profile", "context", "historyPrunes"),
+    ("trace", "profile", "context", "prunedMessages"),
     ("trace", "profile", "timeSplit", "modelPrefillMs"),
 )
 

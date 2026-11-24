@@ -73,11 +73,17 @@ namespace gladius::agent::trace
         std::size_t systemPromptMutations = 0;
         /// @brief Turns the provider reported no cached prompt tokens for
         std::size_t cacheMissTurns = 0;
+        /// @brief Turns whose cached prefix is shorter than the previous turn's
+        /// @details The cached prefix can only shrink if bytes that were sent before changed, which
+        ///          is how history rewriting shows up in the numbers: prompt grows, cache read does not.
+        std::size_t cacheRewindTurns = 0;
         /// @brief Viewport images actually sent in the last turn
         std::size_t imagesInHistoryLastTurn = 0;
         std::size_t imagesKept = 0;
-        std::size_t imagesDropped = 0;
-        std::size_t compactedToolResults = 0;
+        /// @brief Oldest conversation messages dropped to stay inside the history budget
+        std::size_t prunedMessages = 0;
+        /// @brief Turns that dropped messages, i.e. turns that invalidated the cached prefix
+        std::size_t historyPrunes = 0;
         nlohmann::json promptBytesByComponent = nlohmann::json::object();
         std::int64_t largestToolResultBytes = 0;
         std::size_t largestToolResultTurn = 0;
