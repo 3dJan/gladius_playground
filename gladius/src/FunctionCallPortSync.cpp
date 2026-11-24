@@ -86,6 +86,66 @@ namespace gladius
             }
         }
 
+        /**
+         * @brief Drop the unconnected inputs of a call node which the referenced model no longer
+         *        declares.
+         *
+         * A changed signature does not remove the ports of the call node that referenced it, so a
+         * root call node keeps an input that can never be sourced. Flattening refuses exactly that
+         * input, which makes the whole document unrenderable until the file is re-seeded. Only
+         * unconnected inputs are dropped: a port that still has a source is a connection the user
+         * made deliberately and pruning it would destroy the source node's output.
+         */
+        template <class CallType>
+        void pruneObsoleteUnconnectedInputs(
+            Model& owningModel,
+            CallType& callNode,
+            std::set<PortName> const& validNames)
+        {
+            auto& inputs = callNode.parameter();
+
+            std::vector<PortName> obsolete;
+            for (auto const& [name, input] : inputs)
+            {
+                if (name == FieldNames::FunctionId)
+                {
+                    continue;
+                }
+                if (validNames.find(name) == validNames.end() && !input.getConstSource().has_value())
+                {
+                    obsolete.push_back(name);
+                }
+            }
+
+            auto& inputRegistry = owningModel.getParameterRegistry();
+            for (auto const& name : obsolete)
+            {
+                auto it = inputs.find(name);
+                if (it == inputs.end())
+                {
+                    continue;
+                }
+                auto const parameterId = it->second.getId();
+                auto const registeredIt = inputRegistry.find(parameterId);
+                if (registeredIt != inputRegistry.end() && registeredIt->second == &it->second)
+                {
+                    inputRegistry.erase(registeredIt);
+                }
+                inputs.erase(it);
+            }
+        }
+
+        /// @brief The input names a model declares.
+        std::set<PortName> collectModelInputs(Model& model)
+        {
+            std::set<PortName> result;
+            for (auto const& [name, _] : model.getInputs())
+            {
+                result.insert(name);
+            }
+            return result;
+        }
+
         /// @brief The output names a model exposes.
         std::set<PortName> collectModelOutputs(Model& model)
         {
@@ -112,6 +172,8 @@ namespace gladius
 
                 callNode->updateInputsAndOutputs(*referencedModel);
                 pruneObsoleteOutputs(owningModel, *callNode, collectModelOutputs(*referencedModel));
+                pruneObsoleteUnconnectedInputs(
+                  owningModel, *callNode, collectModelInputs(*referencedModel));
 
                 owningModel.registerInputs(*callNode);
                 owningModel.registerOutputs(*callNode);

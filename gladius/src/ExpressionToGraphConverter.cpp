@@ -269,13 +269,42 @@ namespace gladius
             processedSnippet = match.prefix().str() + replacement + match.suffix().str();
         }
 
+        // Names that the body declares or assigns to are locals, never implicit arguments.
+        // Without this check a snippet that (mis)uses "in_gy" for a local value would gain a
+        // "gy" parameter, which changes the root signature and leaves the assembly's call node
+        // with an input that can never be sourced - a document that then fails to flatten on
+        // every later edit.
+        std::set<std::string> localNames;
+        {
+            static std::regex const declaredRegex(
+              R"(\b(?:float|vec2|vec3|vec4|int|bool)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b)");
+            static std::regex const assignedRegex(R"(\b([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=))");
+            for (auto const * pattern : {&declaredRegex, &assignedRegex})
+            {
+                for (auto it = std::sregex_iterator(processedSnippet.begin(),
+                                                    processedSnippet.end(),
+                                                    *pattern);
+                     it != std::sregex_iterator();
+                     ++it)
+                {
+                    std::string const name = (*it)[1].str();
+                    localNames.insert(name);
+                    // An assignment to the in_ prefixed form names the same local.
+                    if (name.rfind("in_", 0) == 0)
+                    {
+                        localNames.insert(name.substr(3));
+                    }
+                }
+            }
+        }
+
         // Only inject implicit "pos" if the snippet references it and it wasn't already declared.
         // Match both bare "pos" and the in_-prefixed form "in_pos" (note: \bpos\b alone
         // doesn't match "in_pos" because '_' is a word character).
         std::vector<FunctionArgument> effectiveArguments = arguments;
         bool const hasPosArg = std::any_of(arguments.begin(), arguments.end(),
           [](auto const & arg) { return arg.name == "pos"; });
-        if (!hasPosArg)
+        if (!hasPosArg && localNames.count("pos") == 0)
         {
             static std::regex const posWordRegex(R"(\b(?:in_)?pos\b)");
             if (std::regex_search(processedSnippet, posWordRegex))
@@ -309,7 +338,7 @@ namespace gladius
                 std::string argName = (*it)[1].str();
                 std::string fullName = "in_" + argName;
                 if (declaredArgs.count(argName) == 0 && declaredArgs.count(fullName) == 0
-                    && discovered.count(argName) == 0)
+                    && discovered.count(argName) == 0 && localNames.count(argName) == 0)
                 {
                     discovered.insert(argName);
                     // Infer type: vec3 if component access is used, float otherwise
@@ -1010,6 +1039,14 @@ namespace gladius
         // because in_x / in_y / in_z are valid variable names that would otherwise be
         // falsely matched by the preprocessed-component regex (e.g. "in_x" → "in.x").
         auto varIt = variableNodes.find(cleanExpr);
+        if (varIt == variableNodes.end() && cleanExpr.rfind("in_", 0) == 0)
+        {
+            // Snippets address arguments as "in_<name>". Authors sometimes use the same prefix
+            // for a value the body assigned itself. Resolving it to that local keeps the root
+            // signature intact - auto declaring it as a parameter instead would leave the
+            // assembly's call node with an input that can never be sourced.
+            varIt = variableNodes.find(cleanExpr.substr(3));
+        }
         if (varIt != variableNodes.end())
         {
             // Set the current variable context for Begin node port resolution
@@ -2039,6 +2076,11 @@ namespace gladius
 
         // Find the argument node
         auto it = argumentNodes.find(argName);
+        if (it == argumentNodes.end() && argName.rfind("in_", 0) == 0)
+        {
+            // Same fallback as in parseAndBuildGraph: "in_<name>" may address a local of the body.
+            it = argumentNodes.find(argName.substr(3));
+        }
         if (it == argumentNodes.end())
         {
             return 0; // Argument not found

@@ -1633,6 +1633,92 @@ namespace gladius::tests
         });
     }
 
+    TEST_F(MCPSnippetToolTest, SetProgramSnippet_InPrefixedLocals_DoNotBecomeParameters)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        // A body that (mis)uses the in_ prefix for values it assigned itself. Those names are
+        // locals, not arguments: auto declaring them would change the root signature and leave
+        // the assembly's call node with inputs that can never be sourced.
+        std::string const program =
+          "// Function: sphere (ID: 10)\n"
+          "float sphere_10(vec3 pos, float r) {\n"
+          "  return length(in_pos) - in_r;\n"
+          "}\n"
+          "\n"
+          "// Function: main (ID: 3)\n"
+          "(float shape) main_3(vec3 pos) {\n"
+          "  float sph = sphere_10(in_pos, 5.0);\n"
+          "  float gy = sin(in_pos.x) - 0.5;\n"
+          "  shape = max(in_sph, in_gy);\n"
+          "}\n";
+
+        auto const report = ProgramSnippetApplier::apply(program, assembly, parser);
+        ASSERT_TRUE(report.isComplete()) << report.failed.front().message;
+
+        auto main = assembly.findModel(3);
+        ASSERT_NE(main, nullptr);
+        auto const & inputs = main->getInputs();
+        EXPECT_EQ(inputs.count("sph"), 0u) << "assigned local must not become a parameter";
+        EXPECT_EQ(inputs.count("gy"), 0u) << "assigned local must not become a parameter";
+        EXPECT_NE(inputs.count("pos"), 0u);
+
+        nodes::GraphFlattener flattener(assembly);
+        EXPECT_NO_THROW({ flattener.flatten(); });
+    }
+
+    TEST_F(MCPSnippetToolTest, ProgramSnippetApplier_CalleeDropsInput_PrunesCallerPortAndFlattens)
+    {
+        nodes::Assembly assembly;
+        ExpressionParser parser;
+
+        std::string const withRadius =
+          "// Function: main (ID: 3)\n"
+          "(float shape) main_3(vec3 pos, float radius) {\n"
+          "  shape = length(in_pos) - in_radius;\n"
+          "}\n";
+        ASSERT_TRUE(ProgramSnippetApplier::apply(withRadius, assembly, parser).isComplete());
+
+        // Root model calls main_3 and supplies only 'pos'; 'radius' stays unconnected.
+        auto rootModel = assembly.assemblyModel();
+        ASSERT_NE(rootModel, nullptr);
+        rootModel->createBeginEndWithDefaultInAndOuts();
+        auto * resourceNode = rootModel->create<nodes::Resource>();
+        ASSERT_NE(resourceNode, nullptr);
+        resourceNode->parameter().at(nodes::FieldNames::ResourceId).setValue(ResourceId{3u});
+        auto * callNode = rootModel->create<nodes::FunctionCall>();
+        ASSERT_NE(callNode, nullptr);
+        auto mainModel = assembly.findModel(3);
+        ASSERT_NE(mainModel, nullptr);
+        ASSERT_TRUE(rootModel->addLink(
+          resourceNode->getOutputs().at(nodes::FieldNames::Value).getId(),
+          callNode->parameter().at(nodes::FieldNames::FunctionId).getId()));
+        callNode->resolveFunctionId();
+        callNode->updateInputsAndOutputs(*mainModel);
+        rootModel->registerInputs(*callNode);
+        rootModel->registerOutputs(*callNode);
+        auto * endNode = rootModel->getEndNode();
+        ASSERT_NE(endNode, nullptr);
+        ASSERT_TRUE(rootModel->addLink(callNode->getOutputs().at("shape").getId(),
+                                       endNode->parameter().at(nodes::FieldNames::Shape).getId()));
+        rootModel->updateGraphAndOrderIfNeeded();
+
+        // Re-applying without 'radius' must drop the now obsolete, unconnected call input,
+        // otherwise the document stays unflattenable no matter how often it is rewritten.
+        std::string const withoutRadius =
+          "// Function: main (ID: 3)\n"
+          "(float shape) main_3(vec3 pos) {\n"
+          "  shape = length(in_pos) - 5.0;\n"
+          "}\n";
+        ASSERT_TRUE(ProgramSnippetApplier::apply(withoutRadius, assembly, parser).isComplete());
+
+        EXPECT_EQ(callNode->parameter().count("radius"), 0u);
+
+        nodes::GraphFlattener flattener(assembly);
+        EXPECT_NO_THROW({ flattener.flatten(); });
+    }
+
     TEST_F(MCPSnippetToolTest, SetProgramSnippet_NamedMultiOutputPorts_ParsesAndRoundTrips)
     {
         nodes::Assembly assembly;
