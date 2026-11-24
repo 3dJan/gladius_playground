@@ -2,6 +2,7 @@
 
 #include "HttpClient.h"
 #include "IAiProvider.h"
+#include "ProviderRequestDump.h"
 
 #include <memory>
 
@@ -33,5 +34,6 @@ namespace gladius::agent
       private:
         ProviderConfig m_config;
         std::shared_ptr<IHttpTransport> m_transport;
+        ProviderRequestDump m_requestDump;
     };
 } // namespace gladius::agent

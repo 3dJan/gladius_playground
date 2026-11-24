@@ -232,7 +232,9 @@ namespace gladius::agent
         {
             httpReq.headers.emplace_back("x-api-key: " + m_config.apiKey);
         }
-        httpReq.body = buildPayload(request).dump();
+        nlohmann::json const payload = buildPayload(request);
+        m_requestDump.write(payload);
+        httpReq.body = payload.dump();
         CompletionStopwatch watch;
 
         if (!m_config.stream)
