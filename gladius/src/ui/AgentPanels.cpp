@@ -11,6 +11,8 @@
 #include "../agent/providers/OpenAiProvider.h"
 #include "../agent/trace/AgentTrace.h"
 #include "../agent/trace/AgentTraceProfile.h"
+#include "../design/Renderability.h"
+#include "../design/TemplateSeed.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "../compute/ComputeCore.h"
 #endif
@@ -360,7 +362,7 @@ namespace gladius::ui
         }
     }
 
-    void AgentPanels::onNewDocument()
+    void AgentPanels::onNewDocument(bool documentSeeded)
     {
         m_graph.clear();
         m_conversation.clear();
@@ -370,6 +372,7 @@ namespace gladius::ui
         m_lastError.clear();
         m_streamingBuffer.clear();
         m_startFresh = true;
+        m_documentSeededByCaller = documentSeeded;
     }
 
     void AgentPanels::loadSessionState()
@@ -1042,11 +1045,33 @@ namespace gladius::ui
             snap.requirementChangesSummary += "- " + ch + "\n";
         }
         snap.designPhase = design::toString(m_graph.phase());
+        if (m_document != nullptr)
+        {
+            // Cheaper for the model than discovering it at finish_design or in a blank viewport
+            // screenshot: the reason is stated before the next snippet is written.
+            auto const facts = design::collectRenderabilityFacts(m_document);
+            if (!facts.isRenderable())
+            {
+                snap.renderabilitySummary = facts.blockersAsText();
+            }
+        }
         snap.designGraphSummary = m_graph.summarize();
         snap.availableSkillsSummary = m_skills.summarizeForPrompt();
         snap.todoSummary = m_todos.summarize();
         snap.knowledgeSummary = m_knowledge.summarizeForPrompt(knowledgeQuery, 5);
         return snap;
+    }
+
+    void AgentPanels::seedVolumetricTemplate()
+    {
+        auto const seed = design::seedVolumetricTemplate(m_document);
+        if (seed.success)
+        {
+            return;
+        }
+
+        m_lastError = "Could not seed the volumetric template: " + seed.error;
+        m_document->newModel();
     }
 
     void AgentPanels::startRun(std::string const & userPrompt)
@@ -1065,6 +1090,8 @@ namespace gladius::ui
         m_webRunTask.reset();
 #endif
 
+        m_lastError.clear();
+
         if (m_startFresh)
         {
             m_graph.clear();
@@ -1072,18 +1099,18 @@ namespace gladius::ui
             m_checkpoints.clear();
             m_todos.clear();
             m_activityLog.clear();
-            if (m_document != nullptr)
+            if (m_document != nullptr && !m_documentSeededByCaller)
             {
-                m_document->newModel();
+                seedVolumetricTemplate();
                 if (m_onDocumentModified)
                 {
                     m_onDocumentModified();
                 }
             }
             m_startFresh = false;
+            m_documentSeededByCaller = false;
         }
 
-        m_lastError.clear();
         m_streamingBuffer.clear();
         m_activeToolName.clear();
         m_runStartTime = std::chrono::steady_clock::now();

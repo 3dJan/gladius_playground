@@ -17,6 +17,8 @@ namespace gladius::agent
         bool isIncremental = false;
         bool isFollowUpRequest = false;
         std::string designPhase = "ClarifyRequirements";
+        /// @brief One line on whether the document actually renders, empty when it does
+        std::string renderabilitySummary;
         std::string requirementsSummary;
         std::string requirementChangesSummary;
         std::string existingModelSummary;

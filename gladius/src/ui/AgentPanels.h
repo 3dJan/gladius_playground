@@ -83,7 +83,9 @@ namespace gladius::ui
         /// @brief Save/load agent state associated with the given .3mf document (sidecar/session)
         void saveSessionState();
         void loadSessionState();
-        void onNewDocument();
+        /// @param documentSeeded True when the caller already replaced the document with a fresh
+        ///        volumetric template, so the run must not seed it a second time.
+        void onNewDocument(bool documentSeeded = false);
         void onDocumentSaved(std::filesystem::path const & docPath);
         void onDocumentOpened(std::filesystem::path const & docPath);
 
@@ -118,6 +120,8 @@ namespace gladius::ui
         void drainEvents();
         void startRun(std::string const & userPrompt);
         void stopRun();
+        /// @brief Replaces the session document with the volumetric project template
+        void seedVolumetricTemplate();
         [[nodiscard]] agent::DesignContextSnapshot buildContextSnapshot(
           std::string const & knowledgeQuery);
         void loadSettings();
@@ -176,6 +180,7 @@ namespace gladius::ui
         io::CancellationToken m_cancellation;
 
         bool m_startFresh = true;
+        bool m_documentSeededByCaller = false;
         bool m_followUpRequest = false;
         bool m_promptFocused = false;
         int m_inspectedImageIndex = -1;
