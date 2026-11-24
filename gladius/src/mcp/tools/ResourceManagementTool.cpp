@@ -7,6 +7,7 @@
 #include "../../Application.h"
 #include "../../Document.h"
 #include "../../io/3mf/ResourceIdUtil.h"
+#include "../../io/3mf/VolumetricScaffold.h"
 #include <array>
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -52,21 +53,8 @@ namespace gladius
                     return {false, 0};
                 }
 
-                // Get the function resource by ID
-                // Note: Gladius uses lib3mf ModelResourceID as its ResourceId.
-                // lib3mf::GetResourceByID expects the UniqueResourceID. Convert before lookup to
-                // avoid mixing IDs.
-                Lib3MF_uint32 uniqueFunctionId = io::resourceIdToUniqueResourceId(
-                  model3mf, static_cast<gladius::ResourceId>(functionId));
-                if (uniqueFunctionId == 0)
-                {
-                    setErrorMessage("Could not resolve unique resource id for function id " +
-                                    std::to_string(functionId));
-                    return {false, 0};
-                }
-
-                auto resource = model3mf->GetResourceByID(uniqueFunctionId);
-                auto functionResource = dynamic_cast<Lib3MF::CFunction *>(resource.get());
+                auto functionResource = io::findFunctionResource(model3mf,
+                                                                 static_cast<gladius::ResourceId>(functionId));
                 if (!functionResource)
                 {
                     setErrorMessage("Function with ID " + std::to_string(functionId) +
@@ -74,80 +62,24 @@ namespace gladius
                     return {false, 0};
                 }
 
-                // Create a bounding box mesh for the levelset
-                auto mesh = model3mf->AddMeshObject();
-                auto v0 = mesh->AddVertex({minPoint[0], minPoint[1], minPoint[2]});
-                auto v1 = mesh->AddVertex({maxPoint[0], minPoint[1], minPoint[2]});
-                auto v2 = mesh->AddVertex({maxPoint[0], maxPoint[1], minPoint[2]});
-                auto v3 = mesh->AddVertex({minPoint[0], maxPoint[1], minPoint[2]});
-                auto v4 = mesh->AddVertex({minPoint[0], minPoint[1], maxPoint[2]});
-                auto v5 = mesh->AddVertex({maxPoint[0], minPoint[1], maxPoint[2]});
-                auto v6 = mesh->AddVertex({maxPoint[0], maxPoint[1], maxPoint[2]});
-                auto v7 = mesh->AddVertex({minPoint[0], maxPoint[1], maxPoint[2]});
-
-                mesh->AddTriangle({v0, v1, v2});
-                mesh->AddTriangle({v0, v2, v3});
-                mesh->AddTriangle({v4, v5, v6});
-                mesh->AddTriangle({v4, v6, v7});
-                mesh->AddTriangle({v0, v4, v7});
-                mesh->AddTriangle({v0, v7, v3});
-                mesh->AddTriangle({v1, v5, v6});
-                mesh->AddTriangle({v1, v6, v2});
-                mesh->AddTriangle({v0, v1, v5});
-                mesh->AddTriangle({v0, v5, v4});
-                mesh->AddTriangle({v3, v7, v6});
-                mesh->AddTriangle({v3, v6, v2});
-                mesh->SetName("Bounding Box");
-
-                // Get the mesh ModelResourceID before creating the levelset (consistent with
-                // Gladius IDs)
-                uint32_t meshId = mesh->GetModelResourceID();
-
-                // Create the levelset
-                auto levelSet = model3mf->AddLevelSet();
-                levelSet->SetFunction(functionResource);
-                levelSet->SetMesh(mesh.get());
-                levelSet->SetMeshBBoxOnly(true);
-                levelSet->SetMinFeatureSize(0.1f);
-                levelSet->SetFallBackValue(0.0f);
-
-                // Try to determine the correct channel name
-                // First try "shape", then fall back to "result" if that fails
-                std::string channelName = "shape";
-                try
+                auto const scaffold = io::createVolumetricOutputChain(model3mf,
+                                                                     functionResource,
+                                                                     minPoint,
+                                                                     maxPoint,
+                                                                     document->getSharedLogger());
+                if (!scaffold.success)
                 {
-                    levelSet->SetChannelName(channelName);
+                    setErrorMessage("Exception during level set creation: " + scaffold.error);
+                    return {false, 0};
                 }
-                catch (...)
-                {
-                    // If "shape" fails, try "result"
-                    channelName = "result";
-                    levelSet->SetChannelName(channelName);
-                }
-
-                // Get the ModelResourceID of the created levelset for returning to callers
-                uint32_t levelSetId = levelSet->GetModelResourceID();
-
-                // Create an identity transform for the build item
-                Lib3MF::sTransform identityTransform;
-                for (int i = 0; i < 4; i++)
-                {
-                    for (int j = 0; j < 3; j++)
-                    {
-                        identityTransform.m_Fields[i][j] = (i == j) ? 1.0f : 0.0f;
-                    }
-                }
-
-                // Add a build item that references the levelset
-                auto buildItem = model3mf->AddBuildItem(levelSet.get(), identityTransform);
 
                 // Update the document from the 3MF model
                 document->updateDocumentFrom3mfModel();
 
-                setErrorMessage(
-                  "Level set created successfully from function ID: " + std::to_string(functionId) +
-                  " using mesh ID: " + std::to_string(meshId));
-                return {true, levelSetId};
+                setErrorMessage("Level set created successfully from function ID: " +
+                                std::to_string(functionId) + " using mesh ID: " +
+                                std::to_string(scaffold.domainMeshId));
+                return {true, scaffold.levelSetId};
             }
             catch (const std::exception & e)
             {
