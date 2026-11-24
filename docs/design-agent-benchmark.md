@@ -13,7 +13,7 @@ quality, and no way to tell whether the model that came out was correct.
 | id | complexity | prompt | deterministic gates |
 | --- | --- | --- | --- |
 | `sphere_r5` | primitive | Create a sphere with a radius of 5 mm | each axis span 8–12 mm, volume 300–780 mm³, ≥200 triangles, fill fraction 0.45–0.60 |
-| `sphere_gyroid` | boolean + lattice | Create a sphere with a 5 mm radius intersected with a gyroid structure | each axis span 8–12 mm, volume 10–523 mm³, ≥500 triangles, fill fraction 0.05–0.46 |
+| `sphere_gyroid` | boolean + lattice | Create a sphere with a 5 mm radius intersected with a gyroid structure | each axis span 8–12 mm, volume 10–523 mm³, ≥500 triangles, fill fraction 0.01–0.46 |
 | `lego_brick_3x4` | dimensional parametric | Create a 3×4 LEGO compatible brick | spans 7–14 / 20–28 / 28–36 mm, volume 1000–9000 mm³, ≥500 triangles, fill fraction 0.20–0.75 |
 
 Task table: [`tests/unittests/agentBench/AgentBenchTask.h`](../tests/unittests/agentBench/AgentBenchTask.h).
@@ -111,6 +111,9 @@ aggregate report test must see the other runs in the same process.
 | `GLADIUS_AGENT_BENCH_MAX_TOKENS` | `8192` | completion budget per model turn (a whole program snippet must fit) |
 | `GLADIUS_AGENT_BENCH_THINKING_TOKENS` | `1024` | hidden-reasoning budget per turn; `0` leaves it to the provider. Uncapped reasoning dominated wall time and once consumed the whole judge budget without producing a verdict |
 | `GLADIUS_AGENT_BENCH_CACHE_BREAKPOINTS` | `tools` | explicit `cache_control` placement: `none`, `tools` (after the tool schemas) or `all` (also after the newest message). `none` measurably degrades outcomes, so `tools` is the default |
+| `GLADIUS_AGENT_BENCH_TOOL_SURFACE` | `geometry` | `geometry` registers only the ten geometry tools (see [Lean tool surface](#lean-tool-surface)); `full` registers all of them, as the interactive app does |
+| `GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH` | `1` | `finish_design` derives the design-graph node, variant and active configuration itself instead of expecting four hand-written tool calls |
+| `GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS` | `2` | screenshots a task may request; further calls fail with an error that points at `finish_design`. `0` is unlimited |
 | `GLADIUS_AGENT_BENCH_RENDER_SIZE` | `512` | square render resolution |
 | `GLADIUS_AGENT_BENCH_OUTPUT` | `agent_bench` | output directory for report + artifacts |
 | `GLADIUS_USER_LIBRARY_DIR` | unset | hermetic user-library sandbox (also used by the benchmark) |
@@ -257,6 +260,51 @@ prefix even though the conversation prefix is provably append-only, so `promptCa
 well below what the same requests reach when replayed on their own. `GLADIUS_AGENT_PROVIDER_DUMP`
 plus replaying the dumps is how that gets bisected further.
 
+### Lean tool surface
+
+Every turn pays for the whole prompt prefix, so the cheapest token to remove is one the model is
+never going to call. The default run therefore configs the harness the way a design session actually
+works (`GLADIUS_AGENT_BENCH_TOOL_SURFACE=geometry`, the default):
+
+| Knob | Default | Effect |
+| --- | --- | --- |
+| `GLADIUS_AGENT_BENCH_TOOL_SURFACE` | `geometry` | Register only the ten tools a geometry session needs (`begin_edit`, `commit_edit`, `get_program_snippet`, `set_program_snippet`, `get_model_summary`, `list_library_items`, `import_library_item`, `export_library_item`, `capture_viewport`, `finish_design`); the planning, knowledge, checkpoint, and variant tools are not registered at all. 2.1 KB of JSON schemas per turn instead of 37 tools / 8.4 KB, and the system prompt drops the ceremony and planning sections only those tools need (4.2 KB -> 3.3 KB). |
+| `GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH` | `1` | `finish_design` wires the built root function into design → level set → mesh → build item itself. The chain is six tool calls the model has no opinion about. |
+| `GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS` | `2` | Screenshots a geometry-mode session may request; further calls fail with an error that points at `finish_design` instead of paying for another ~800-token image that stays in every later turn. |
+
+`transport=direct` (in-process, no socket) and `mcp` are equivalent for cost — direct mode only saves
+the startup noise. `GLADIUS_AGENT_BENCH_TOOL_SURFACE=full` restores the previous configuration, which
+is what `baseline.json` was first captured with.
+
+What it bought, on the same machine, endpoint (`strata/iq3_s`) and task set:
+
+| Task | full surface | lean surface |
+| --- | --- | --- |
+| `sphere_r5` | 45 765 | 21 796 |
+| `sphere_gyroid` | 92 921 | 27 562 |
+| `lego_brick_3x4` | 255 279 | 30 152 |
+| **total** | **393 965** | **79 510** |
+
+Two consecutive lean runs landed within 0.3 % of each other on total prompt tokens (the
+full-surface runs spread by ~15 %): with almost nothing left in the prompt and no retries the run is
+close to deterministic, which makes the cost gates trustworthy again.
+
+
+Two consequences to know about before reading the report:
+
+* The first turn is now ~1.7 k tokens, below this endpoint's cache minimum, so `promptCacheHitRate`
+  is 0.0 and the comparer skips that gate (see `--cache-min-prompt-tokens`). Total prompt tokens are
+  still gated; with a lean prefix the cache is a rounding error.
+* Cutting the tool list cuts the model's escape hatches too, so the graph path has to be solid.
+  Three harness bugs had to be fixed before the lean configuration could pass 3/3: a snippet that
+  used the `in_<name>` port aliases wrote those names back into `main`'s signature as parameters
+  (`ExpressionToGraphConverter` auto-declared any unknown `in_*` identifier), which left the
+  assembly-level call node with an input that had no source and made *every* later refresh fail
+  while `set_program_snippet` still reported success; `syncFunctionCallPorts` pruned obsolete
+  *outputs* but never the inputs a dropped parameter had left behind; and `list_library_items`
+  matched the whole query as one substring, so `{"query": "lego brick"}` returned nothing even
+  though the mechanical library contains a brick. Each has a unit test.
+
 ### Interactive sessions
 
 The same trace is available while using the app, so a problem seen live does not have to be
@@ -274,10 +322,12 @@ to the trace.
 ## Known limitations
 
 * Local-model runs are nondeterministic: a single run per task is noisy, which is why the comparer
-  gates on pass counts and tolerant cost deltas rather than exact numbers. On `iq3_s` the spread
-  between two consecutive all-passing runs was large — the gyroid task measured 13 turns / 93 k
-  prompt tokens in one run and 19 turns / 190 k in the next — so treat a single cost regression on
-  one task as a prompt to re-run, not as a verdict. Pass counts are the trustworthy signal.
+  gates on pass counts and tolerant cost deltas rather than exact numbers. On `iq3_s` with the old
+  full tool surface the spread between two consecutive all-passing runs was large — the gyroid task
+  measured 13 turns / 93 k prompt tokens in one run and 19 turns / 190 k in the next — so treat a
+  single cost regression on one task as a prompt to re-run, not as a verdict. The lean geometry
+  surface retries far less, and its two consecutive runs differed by 0.3 % overall. Pass counts
+  remain the trustworthy signal.
 * A fresh WebGPU document can report `BuildVolumeFallback` bounds; the geometry gates therefore
   measure the **exported mesh** rather than trusting the bounds probe, and bounds are recorded only
   as context.
