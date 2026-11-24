@@ -11,7 +11,10 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace gladius::design::tests
@@ -243,5 +246,170 @@ namespace gladius::design::tests
         ASSERT_TRUE(result.value("success", false)) << result.dump();
         EXPECT_DOUBLE_EQ(result.at("qualityScore").get<double>(), 0.0);
         EXPECT_FALSE(result.at("recommendLibraryExport").get<bool>());
+    }
+
+    namespace
+    {
+        /// @brief Harness with the geometry-only tool surface and an optional finish/graph policy
+        struct SurfaceHarness
+        {
+            DesignGraph graph;
+            DesignCatalogue catalogue;
+            tools::TransactionManager transactions;
+            tools::CheckpointManager checkpoints;
+            /// @brief Must outlive the registered tool lambdas, therefore a member
+            DesignToolContext ctx;
+            tools::ToolRegistry registry;
+            tools::ToolExecutor executor;
+            io::CancellationToken cancellation;
+            std::size_t captures = 0;
+
+            explicit SurfaceHarness(DesignToolSurface surface,
+                                    bool autoCompleteOnFinish = false,
+                                    std::size_t maxViewportReviews = 0)
+                : ctx{graph,
+                      catalogue,
+                      transactions,
+                      checkpoints,
+                      nullptr,
+                      [this](int, int, std::string const &)
+                      {
+                          ++captures;
+                          return std::vector<std::byte>{std::byte{0x89}, std::byte{0x50},
+                                                        std::byte{0x4e}, std::byte{0x47}};
+                      },
+                      nullptr,
+                      nullptr,
+                      nullptr,
+                      nullptr,
+                      nullptr,
+                      autoCompleteOnFinish,
+                      maxViewportReviews}
+                , executor(registry)
+            {
+                registerDesignTools(registry, ctx, surface);
+            }
+        };
+    } // namespace
+
+    TEST(RegisterDesignTools_GeometryOnlySurface, Registry_KeepsOnlyAllowlistedTools)
+    {
+        // Arrange / Act
+        SurfaceHarness full{DesignToolSurface::Full};
+        SurfaceHarness geometry{DesignToolSurface::GeometryOnly};
+
+        // Assert: the tool list is re-sent every turn, so the reduced surface must really be smaller
+        EXPECT_GT(full.registry.definitions().size(), geometry.registry.definitions().size());
+        auto const has = [&geometry](char const * const name)
+        {
+            auto const defs = geometry.registry.definitions();
+            return std::any_of(defs.begin(), defs.end(),
+                               [name](tools::ToolDefinition const & def) { return def.name == name; });
+        };
+        for (auto const * const kept : {"set_program_snippet", "get_program_snippet", "get_model_summary",
+                                        "capture_viewport", "finish_design", "list_library_items",
+                                        "import_library_item"})
+        {
+            EXPECT_TRUE(has(kept)) << kept << " missing from the geometry surface";
+        }
+        for (auto const * const dropped : {"create_todo_list", "update_todo_item", "store_knowledge",
+                                          "create_variant", "create_configuration",
+                                          "activate_configuration", "add_function", "hybridize_variants",
+                                          "get_design_summary"})
+        {
+            EXPECT_FALSE(has(dropped)) << dropped << " should not be offered on the geometry surface";
+        }
+    }
+
+    TEST(FinishDesign_GeometryOnlyWithoutBookkeeping, ToolCall_FailsAndNamesTheCeremony)
+    {
+        // Arrange: geometry applied, but no node/variant/configuration exists
+        SurfaceHarness harness{DesignToolSurface::GeometryOnly};
+
+        // Act
+        auto const result = harness.executor.executeSync("finish_design", {}, harness.cancellation);
+
+        // Assert
+        EXPECT_FALSE(result.value("success", true));
+        EXPECT_NE(result.value("error", "").find("create_configuration"), std::string::npos)
+          << result.dump();
+        EXPECT_EQ(harness.graph.activeConfiguration(), std::nullopt);
+    }
+
+    TEST(FinishDesign_AutoCompleteEnabled, ToolCall_DerivesConfigurationAndCompletes)
+    {
+        // Arrange
+        SurfaceHarness harness{DesignToolSurface::Full, /*autoCompleteOnFinish=*/true};
+
+        // Act
+        auto const result = harness.executor.executeSync("finish_design", {}, harness.cancellation);
+
+        // Assert: the same validated end state without the four ceremony calls
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+        EXPECT_TRUE(result.value("valid", false));
+        EXPECT_EQ(harness.graph.phase(), DesignPhase::Complete);
+        auto const active = harness.graph.activeConfiguration();
+        ASSERT_TRUE(active.has_value());
+        EXPECT_EQ(active->selectedVariants.size(), harness.graph.nodes().size());
+    }
+
+    TEST(FinishDesign_AutoCompleteEnabledWithExistingSelections, ToolCall_KeepsThem)
+    {
+        // Arrange: a node and variant the model created itself
+        SurfaceHarness harness{DesignToolSurface::Full, /*autoCompleteOnFinish=*/true};
+        auto const nodeId = harness.graph.addNode(DesignNodeType::Component, "Body");
+        auto const variantId = harness.graph.createVariant(nodeId, "Concept", "Manual", FidelityLevel::Envelope);
+
+        // Act
+        auto const result = harness.executor.executeSync("finish_design", {}, harness.cancellation);
+
+        // Assert
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+        auto const active = harness.graph.activeConfiguration();
+        ASSERT_TRUE(active.has_value());
+        EXPECT_EQ(active->selectedVariants.at(nodeId), variantId);
+    }
+
+    TEST(CaptureViewport_ReviewBudgetExhausted, ToolCall_FailsWithActionableError)
+    {
+        // Arrange
+        SurfaceHarness harness{DesignToolSurface::GeometryOnly, false, /*maxViewportReviews=*/1};
+
+        // Act
+        auto const first = harness.executor.executeSync("capture_viewport", nlohmann::json::object(), harness.cancellation);
+        auto const second = harness.executor.executeSync("capture_viewport", nlohmann::json::object(), harness.cancellation);
+
+        // Assert
+        EXPECT_TRUE(first.value("success", false)) << first.dump();
+        EXPECT_FALSE(second.value("success", true));
+        EXPECT_NE(second.value("error", "").find("finish_design"), std::string::npos) << second.dump();
+        EXPECT_EQ(harness.captures, 1u) << "Exhausted budget must not render again";
+    }
+    TEST(ListLibraryItems_MultiWordQuery, ToolCall_MatchesAnyWordAndNotesEmptyResult)
+    {
+        // Arrange: a sandbox library whose item is named for one word of a natural phrase
+        auto const root = std::filesystem::temp_directory_path() / "gladius_lib_query_test";
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root / "widgets");
+        std::ofstream(root / "widgets" / "widget_alpha.3mf");
+        ::setenv("GLADIUS_USER_LIBRARY_DIR", root.string().c_str(), 1);
+
+        ToolHarness harness;
+
+        // Act
+        auto const phrase = harness.executor.executeSync(
+          "list_library_items", {{"query", "alpha widget"}}, harness.cancellation);
+        auto const miss = harness.executor.executeSync(
+          "list_library_items", {{"query", "zzz-no-such-part"}}, harness.cancellation);
+        ::unsetenv("GLADIUS_USER_LIBRARY_DIR");
+        std::filesystem::remove_all(root);
+
+        // Assert: requiring the whole phrase would return nothing and push the agent into
+        // hand writing math for parts the library already provides
+        EXPECT_TRUE(phrase.value("success", false)) << phrase.dump();
+        EXPECT_GE(phrase.value("count", 0u), 1u) << phrase.dump();
+        EXPECT_TRUE(miss.value("success", false)) << miss.dump();
+        EXPECT_EQ(miss.value("count", 999u), 0u);
+        EXPECT_FALSE(miss.value("note", "").empty()) << "Empty result must say how to search";
     }
 } // namespace gladius::design::tests

@@ -188,8 +188,107 @@ namespace gladius::design
         }
     } // namespace
 
-    void registerDesignTools(tools::ToolRegistry & registry, DesignToolContext & ctx)
+    namespace
     {
+        /// @brief Tools a geometry-only host keeps; the rest is not registered at all
+        /// @details Every definition is re-sent on every model turn, so the tool list is a fixed
+        ///          per-turn cost. A host that only models geometry has no use for the planning,
+        ///          knowledge, checkpoint, and variant-selection tools.
+        constexpr char const * const kGeometryOnlySurface[] = {"begin_edit",
+                                                              "capture_viewport",
+                                                              "commit_edit",
+                                                              "export_library_item",
+                                                              "finish_design",
+                                                              "get_model_summary",
+                                                              "get_program_snippet",
+                                                              "import_library_item",
+                                                              "list_library_items",
+                                                              "set_program_snippet"};
+
+        /**
+         * @brief True when any word of the query occurs in the haystack.
+         * @details A multi word query such as "lego brick" is how a caller naturally searches; the
+         *          items are named "brick_stud" or "building_brick_nm", so requiring the whole
+         *          phrase to occur returns nothing and the caller falls back to hand written math.
+         */
+        [[nodiscard]] bool anyTokenMatches(std::string const & haystack, std::string const & query)
+        {
+            std::istringstream stream(query);
+            std::string token;
+            while (stream >> token)
+            {
+                if (!token.empty() && haystack.find(token) != std::string::npos)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * @brief True when finish_design can validate without inventing graph structure.
+         */
+        [[nodiscard]] bool isGraphFinishReady(DesignGraph const & graph)
+        {
+            auto const active = graph.activeConfiguration();
+            if (!active.has_value())
+            {
+                return false;
+            }
+            return std::all_of(graph.nodes().begin(), graph.nodes().end(),
+                               [&active](auto const & node)
+                               { return active->selectedVariants.contains(node.first); });
+        }
+
+        /**
+         * @brief Fills in the design-graph bookkeeping finish_design validates against.
+         * @details finish_design needs an active configuration whose selectedVariants cover every
+         *          design node. Getting there by hand is four tool calls spread over two to four
+         *          model turns, each of which re-prefills the whole conversation. When the host
+         *          asked for it, derive the missing node/variant/configuration from the document so
+         *          the same validated end state costs no turns at all.
+         */
+        void autoCompleteDesignGraph(DesignToolContext & ctx)
+        {
+            if (ctx.graph.nodes().empty())
+            {
+                ctx.graph.addNode(DesignNodeType::Component, "Model");
+            }
+
+            std::unordered_map<std::string, std::string> selectedVariants;
+            for (auto const & [nodeId, node] : ctx.graph.nodes())
+            {
+                std::string variantId;
+                for (auto const & [id, variant] : ctx.graph.variants())
+                {
+                    if (variant.nodeId == nodeId && variant.status != DesignStatus::Rejected)
+                    {
+                        variantId = id;
+                        break;
+                    }
+                }
+                if (variantId.empty())
+                {
+                    variantId = ctx.graph.createVariant(nodeId,
+                                                        node.name,
+                                                        "Derived from the applied program by finish_design.",
+                                                        FidelityLevel::Detailed);
+                }
+                selectedVariants.emplace(nodeId, std::move(variantId));
+            }
+
+            std::string const configurationId
+              = ctx.graph.createConfiguration("Applied program", std::move(selectedVariants));
+            (void)ctx.graph.activateConfiguration(configurationId);
+        }
+    } // namespace
+
+    void registerDesignTools(tools::ToolRegistry & registry,
+                             DesignToolContext & ctx,
+                             DesignToolSurface surface)
+    {
+        bool const full = surface != DesignToolSurface::GeometryOnly;
+
         registry.registerSyncTool(
           {"get_design_summary",
            "Get a summary of the current design phase, requirements, nodes, variants, and active configuration.",
@@ -551,6 +650,12 @@ namespace gladius::design
               {
                   return {{"success", false}, {"error", "Viewport capture is not attached"}};
               }
+              if (ctx.maxViewportReviews != 0 && ctx.viewportReviewsUsed >= ctx.maxViewportReviews)
+              {
+                  return {{"success", false},
+                          {"error", "Viewport review budget exhausted. Continue with set_program_snippet "
+                                    "and call finish_design; the geometry is already what you described."}};
+              }
               int const w = args.value("width", 512);
               int const h = args.value("height", 512);
               std::string const cam = args.value("camera", "isometric");
@@ -559,6 +664,7 @@ namespace gladius::design
               {
                   return {{"success", false}, {"error", "Viewport capture returned empty image"}};
               }
+              ++ctx.viewportReviewsUsed;
               return {{"success", true},
                       {"width", w},
                       {"height", h},
@@ -572,6 +678,10 @@ namespace gladius::design
            {{"type", "object"}, {"properties", nlohmann::json::object()}},
            tools::ToolPolicy::DesignGraphModification},
           [&ctx](nlohmann::json const &) -> nlohmann::json {
+              if (ctx.autoCompleteDesignGraphOnFinish && !isGraphFinishReady(ctx.graph))
+              {
+                  autoCompleteDesignGraph(ctx);
+              }
               auto const active = ctx.graph.activeConfiguration();
               if (!active.has_value())
               {
@@ -951,7 +1061,7 @@ namespace gladius::design
                           {
                               std::string const haystack =
                                 toLower(cat + " " + entryName + " " + desc + " " + tags);
-                              if (haystack.find(query) == std::string::npos)
+                              if (!anyTokenMatches(haystack, query))
                               {
                                   continue;
                               }
@@ -964,7 +1074,27 @@ namespace gladius::design
                       }
                   }
               }
-              return {{"success", true}, {"count", items.size()}, {"items", std::move(items)}};
+
+              nlohmann::json result{{"success", true}, {"count", items.size()}, {"items", std::move(items)}};
+              if (items.empty() && !query.empty())
+              {
+                  // A phrase like "lego brick" never occurs in a name or tag. Say so and offer the
+                  // categories, otherwise the caller has no way to recover except by guessing again.
+                  std::string categoryList;
+                  for (auto const & cat : categories)
+                  {
+                      if (!categoryList.empty())
+                      {
+                          categoryList += ", ";
+                      }
+                      categoryList += cat;
+                  }
+                  result["note"] = "No library item matches every word of the query. Search one keyword "
+                                   "at a time (names, tags and descriptions are matched individually) or "
+                                   "omit the query to list everything. Categories: "
+                                     + categoryList;
+              }
+              return result;
           });
 
         registry.registerSyncTool(
@@ -1495,5 +1625,25 @@ namespace gladius::design
               }
               return {{"success", ctx.knowledge->remove(args.value("id", ""))}};
           });
+
+        if (!full)
+        {
+            std::vector<std::string> dropped;
+            for (auto const & def : registry.definitions())
+            {
+                bool const keep = std::any_of(std::begin(kGeometryOnlySurface),
+                                              std::end(kGeometryOnlySurface),
+                                              [&def](char const * const name)
+                                              { return def.name == name; });
+                if (!keep)
+                {
+                    dropped.push_back(def.name);
+                }
+            }
+            for (auto const & name : dropped)
+            {
+                (void)registry.unregisterTool(name);
+            }
+        }
     }
 } // namespace gladius::design
