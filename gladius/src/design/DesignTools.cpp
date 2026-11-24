@@ -712,10 +712,12 @@ namespace gladius::design
                                   {"error", report.failed.front().message},
                                   {"failed", std::move(errs)},
                                   {"hint", "Nothing was applied: the snippet is only accepted when "
-                                           "every listed function converts. List each function with "
-                                           "its own "// Function: name (ID: n)" header, use the "
-                                           "qualified name name_ID when calling another function, and "
-                                           "give every called parameter a source in the caller."}};
+                                           "every listed function converts. Prefix every function with "
+                                           "the header comment `// Function: <name> (ID: <n>)` on the "
+                                           "line before its signature; IDs must already exist in the "
+                                           "document (see get_program_snippet). Use the qualified name "
+                                           "name_ID when calling another function, and give every "
+                                           "called parameter a source in the caller."}};
                       }
                       for (auto & [fid, funcModel] : assembly->getFunctions())
                       {
