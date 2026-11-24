@@ -15,4 +15,4 @@ You can also apply a config **for a single session** using:
 - `mcp-config.serena.json` enables **all** Serena tools (`"tools": ["*"]`).
 - `mcp-config.serena.readonly.json` enable only read-only / navigation tools.
 
-These configs mirror the Serena launch command already used by VS Code in this repo (`.vscode/mcp.json`).
+These configs mirror the Serena launch command already used in this repo, which lives in the root `.mcp.json`.
