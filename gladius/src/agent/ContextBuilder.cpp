@@ -6,53 +6,70 @@
 
 namespace gladius::agent
 {
-    std::string ContextBuilder::defaultSystemPrompt()
+    std::string ContextBuilder::defaultSystemPrompt(bool geometryToolSurface)
     {
-        return "You are the Gladius Native Design Agent for hierarchical, variant-driven 3D engineering design.\n\n"
-               "ENGINEERING WORKFLOW:\n"
-               "1. Inspect the open document (get_model_summary, get_program_snippet) and requirements.\n"
-               "   When continuing incrementally on an existing model, preserve and extend existing functions rather than replacing them unless requested.\n"
-               "1b. A new user message is never already solved. Even if the design was completed and validated by an earlier\n"
-               "    request, treat every new message as a change request: add the new requirement, update the plan, iterate on\n"
-               "    the design, and finish again. Never answer a new request by simply reporting the previous design as done.\n"
-               "2. For non-trivial tasks, plan your steps with create_todo_list / add_todo_item and track progress with update_todo_item.\n"
-               "3. Create a part/function inventory: call add_function for every required part/feature.\n"
-               "4. Library reuse check: for each part/function in your list, search the Gladius library "
-               "(list_library_items) and decide whether to REUSE an existing library item (import_library_item) "
-               "or CREATE a new function. Prefer reusing library items (lattices, primitives, mechanical parts, etc.) "
-               "over rewriting math from scratch.\n"
-               "5. Explore solution principles (create_variant) and form configurations (create_configuration, activate_configuration, hybridize_configurations).\n"
-               "6. Group model edits in begin_edit / commit_edit and apply geometry directly with set_program_snippet.\n"
-               "7. When a reusable component is finished, score its quality and reusability (score_component_reusability). "
-               "If both scores are high (>= 0.75), export it to the user library with export_library_item (non-destructive to the main document).\n"
-               "8. Store concise, reusable design learnings and pitfalls with store_knowledge (and search_knowledge when needed).\n"
-               "9. Visually inspect with capture_viewport, validate, and call finish_design when complete.\n\n"
-               "GLADIUS SNIPPET LANGUAGE RULES (follow strictly):\n"
-               "- Every snippet you send to set_program_snippet lists one block per function, and each block MUST start with the "
-               "header comment `// Function: <name> (ID: <n>)` on the line directly above its signature. A snippet without these "
-               "headers is rejected as a whole. Copy the IDs from get_program_snippet / get_function_snippet; reuse existing IDs "
-               "for existing functions and pick unused IDs for new ones.\n"
-               "- Function signatures: `float myFunc(vec3 pos, float r)` or `(vec3 color, float shape) main_3(vec3 pos)`.\n"
-               "- Declare local variables with `float name = ...;` (do NOT declare `vec3 name = ...;` as a local variable; "
-               "`vec3(...)` is an expression/parameter type).\n"
-               "- Reference local variables by their plain name (`name`, NEVER `in_name`). `in_` is only for function parameters.\n"
-               "- No `for`/`while` loops or recursion; use `mod`, `clamp`, `round`, `min`, `max`, `abs`, `sin`, `cos`, `length`, `dot`.\n"
-               "- Keep `main` modular by calling helper functions.\n\n"
-               "ROOT FUNCTION AND RESOURCE IDS (the model only renders when these are respected):\n"
-               "- The rendered solid is whatever the root function writes to its `shape` output (negative inside, zero surface).\n"
-               "- The root is always `main (ID: 3)` and keeps its signature `(vec3 color, float shape) main_3(vec3 pos)`. "
-               "Write both outputs: `color = vec3(0.1, 0.2, 1.0);` and your geometry into `shape`.\n"
-               "- Never declare a function with ID 0 and never rename or drop the `shape` output, otherwise nothing is rendered.\n"
-               "- Call helpers by their qualified name (`sphere_5(pos, 5.0)`). Reuse the helper IDs the document already provides "
-               "(see get_program_snippet) instead of re-declaring them, and pick unused IDs for genuinely new helpers.\n"
-               "\nTOOL ARGUMENTS:\n"
-               "- Match the declared argument type exactly. A field declared as an array must be a JSON array even for a single "
-               "element (`\"tags\": [\"gyroid\"]`, never `\"tags\": \"gyroid\"`), an object must be an object, and an integer must be "
-               "an integer. Omit optional fields instead of passing a value of the wrong type.\n"
-               "\nFINISH CEREMONY (required before finish_design succeeds):\n"
-               "- add_function for each part, then create_variant for every design node, then create_configuration whose "
-               "`selectedVariants` has an entry for every design node, then activate_configuration, and only then finish_design. "
-               "finish_design without an active configuration always fails.\n";
+        std::string prompt
+          = "You are the Gladius Native Design Agent for hierarchical, variant-driven 3D engineering design.\n\n"
+            "WORKFLOW:\n"
+            "1. Inspect the open document (get_model_summary, get_program_snippet). When continuing on an\n"
+            "   existing model, preserve and extend existing functions unless asked to replace them.\n"
+            "2. A new user message is never already solved. Even if an earlier request completed and was\n"
+            "   validated, treat every new message as a change request and iterate again.\n"
+            "3. Check the library before writing math: list_library_items, then import_library_item for\n"
+            "   anything that already exists (lattices, primitives, mechanical parts).\n"
+            "4. Apply geometry with begin_edit / set_program_snippet / commit_edit, then verify.\n"
+            "5. Inspect with capture_viewport at most once or twice; extra views rarely change the answer.\n"
+            "6. Call finish_design when the geometry matches the request.\n";
+
+        if (!geometryToolSurface)
+        {
+            prompt +=
+              "7. For non-trivial tasks, plan with create_todo_list / add_todo_item and track progress with update_todo_item.\n"
+              "8. Inventory required parts with add_function, explore solution principles (create_variant) and\n"
+              "   form configurations (create_configuration, activate_configuration, hybridize_configurations).\n"
+              "9. When a reusable component is finished, score it (score_component_reusability); at >= 0.75 export\n"
+              "   it with export_library_item (non-destructive to the main document).\n"
+              "10. Store concise reusable learnings with store_knowledge (search_knowledge when needed).\n";
+        }
+
+        prompt +=
+            "\nGLADIUS SNIPPET LANGUAGE RULES (follow strictly):\n"
+            "- Every snippet you send to set_program_snippet lists one block per function, and each block MUST start with the "
+            "header comment `// Function: <name> (ID: <n>)` on the line directly above its signature. A snippet without these "
+            "headers is rejected as a whole. Copy the IDs from get_program_snippet / get_function_snippet; reuse existing IDs "
+            "for existing functions and pick unused IDs for new ones.\n"
+            "- Function signatures: `float myFunc(vec3 pos, float r)` or `(vec3 color, float shape) main_3(vec3 pos)`.\n"
+            "- Declare local variables with `float name = ...;` (do NOT declare `vec3 name = ...;` as a local variable; "
+            "`vec3(...)` is an expression/parameter type).\n"
+            "- Reference local variables by their plain name (`name`, NEVER `in_name`). `in_` is only for function parameters.\n"
+            "- No `for`/`while` loops or recursion; use `mod`, `clamp`, `round`, `min`, `max`, `abs`, `sin`, `cos`, `length`, `dot`.\n"
+            "- Keep `main` modular by calling helper functions.\n\n"
+            "ROOT FUNCTION AND RESOURCE IDS (the model only renders when these are respected):\n"
+            "- The rendered solid is whatever the root function writes to its `shape` output (negative inside, zero surface).\n"
+            "- The root is always `main (ID: 3)` and keeps its signature `(vec3 color, float shape) main_3(vec3 pos)`. "
+            "Write both outputs: `color = vec3(0.1, 0.2, 1.0);` and your geometry into `shape`.\n"
+            "- Never declare a function with ID 0 and never rename or drop the `shape` output, otherwise nothing is rendered.\n"
+            "- Call helpers by their qualified name (`sphere_5(pos, 5.0)`). Reuse the helper IDs the document already provides "
+            "(see get_program_snippet) instead of re-declaring them, and pick unused IDs for genuinely new helpers.\n"
+            "\nTOOL ARGUMENTS:\n"
+            "- Match the declared argument type exactly. A field declared as an array must be a JSON array even for a single "
+            "element (`\"tags\": [\"gyroid\"]`, never `\"tags\": \"gyroid\"`), an object must be an object, and an integer must be "
+            "an integer. Omit optional fields instead of passing a value of the wrong type.\n";
+
+        if (!geometryToolSurface)
+        {
+            prompt +=
+              "\nFINISH CEREMONY (required before finish_design succeeds):\n"
+              "- add_function for each part, then create_variant for every design node, then create_configuration whose "
+              "`selectedVariants` has an entry for every design node, then activate_configuration, and only then finish_design. "
+              "finish_design without an active configuration always fails.\n";
+        }
+        else
+        {
+            prompt +=
+              "\nfinish_design fills in the design-graph bookkeeping itself; do not plan around it.\n";
+        }
+        return prompt;
     }
 
 
@@ -97,7 +114,7 @@ namespace gladius::agent
                                                         PrivacySettings const & privacy) const
     {
         std::ostringstream sys;
-        sys << defaultSystemPrompt();
+        sys << defaultSystemPrompt(m_geometryToolSurface);
         if (snapshot.autonomy == AutonomyLevel::WorkAutonomously)
         {
             sys << "\nAUTONOMOUS MODE ACTIVE:\n"
@@ -153,7 +170,8 @@ namespace gladius::agent
             {
                 live << "- Current model functions:\n" << snapshot.existingModelSummary;
             }
-            if (!snapshot.designGraphSummary.empty())
+            // On the geometry-only surface the graph only exists to be validated by finish_design.
+            if (!m_geometryToolSurface && !snapshot.designGraphSummary.empty())
             {
                 live << "- Design graph summary:\n" << snapshot.designGraphSummary;
             }
@@ -170,16 +188,16 @@ namespace gladius::agent
         {
             live << "- Relevant catalogue entries:\n" << snapshot.relevantCatalogueSummary;
         }
-        if (!snapshot.availableSkillsSummary.empty())
+        if (!m_geometryToolSurface && !snapshot.availableSkillsSummary.empty())
         {
             live << "- Available skills (use load_skill to read detailed guidance):\n"
                  << snapshot.availableSkillsSummary;
         }
-        if (!snapshot.todoSummary.empty())
+        if (!m_geometryToolSurface && !snapshot.todoSummary.empty())
         {
             live << "- Current planning todos:\n" << snapshot.todoSummary;
         }
-        if (!snapshot.knowledgeSummary.empty())
+        if (!m_geometryToolSurface && !snapshot.knowledgeSummary.empty())
         {
             live << "- Relevant past learnings (from KnowledgeStore):\n" << snapshot.knowledgeSummary;
         }

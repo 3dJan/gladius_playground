@@ -65,6 +65,16 @@ namespace gladius::agent::bench
         int providerThinkingTokens = 1024;
         /// @brief Explicit prompt-cache breakpoints: "none", "tools" or "all"
         std::string cacheBreakpoints = "tools";
+        /// @brief Tool surface handed to the model: "full" or "geometry"
+        /// @details "geometry" registers only the model/snippet/library/viewport/finish tools. Every
+        ///          definition is re-sent on every turn, so the ~37-tool list is a fixed per-turn cost.
+        std::string toolSurface = "full";
+        /// @brief Let finish_design derive the design-graph bookkeeping instead of demanding it
+        bool autoCompleteDesignGraph = false;
+        /// @brief Viewport images the run may request; 0 is unlimited
+        /// @details An image costs a fixed share of every following turn, so the budget matters more
+        ///          than the image size.
+        int maxViewportReviews = 0;
 
         /// @brief Reads `GLADIUS_AGENT_BENCH_*` overrides with strata defaults
         [[nodiscard]] static BenchRunConfig fromEnvironment();
@@ -216,6 +226,7 @@ namespace gladius::agent::bench
         agent::Conversation m_conversation;
         io::CancellationToken m_cancellation;
         std::string m_initializeError;
+        bool m_geometryOnlySurface = false;
         std::filesystem::path m_traceDir;
         std::unique_ptr<agent::trace::AgentTraceRecorder> m_trace;
     };

@@ -129,6 +129,14 @@ namespace gladius::agent::bench
         config.providerThinkingTokens =
           std::max(0, envInt("GLADIUS_AGENT_BENCH_THINKING_TOKENS", config.providerThinkingTokens));
         config.cacheBreakpoints = envOr("GLADIUS_AGENT_BENCH_CACHE_BREAKPOINTS", config.cacheBreakpoints);
+        // The benchmark measures geometry-design capability, so by default it runs the lean tool
+        // surface: fewer definitions per turn, finish_design fills in the design-graph bookkeeping
+        // itself, and the viewport review budget is capped. Each switch can be turned back off with
+        // its own variable to A/B a change; the product host always uses the full surface.
+        config.toolSurface = envOr("GLADIUS_AGENT_BENCH_TOOL_SURFACE", std::string{"geometry"});
+        config.autoCompleteDesignGraph =
+          envOr("GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH", "1") != "0";
+        config.maxViewportReviews = std::max(0, envInt("GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS", 2));
         return config;
     }
 
@@ -164,6 +172,9 @@ namespace gladius::agent::bench
 
         m_knowledge.setStoragePath((userLibrary.parent_path() / "agent-knowledge.json").string());
 
+        m_geometryOnlySurface = m_config.toolSurface == "geometry";
+        m_contextBuilder.setGeometryToolSurface(m_geometryOnlySurface);
+
         m_toolCtx = std::make_unique<design::DesignToolContext>(design::DesignToolContext{
           m_graph,
           m_catalogue,
@@ -175,8 +186,13 @@ namespace gladius::agent::bench
           []() {},
           &m_skills,
           &m_todos,
-          &m_knowledge});
-        design::registerDesignTools(m_registry, *m_toolCtx);
+          &m_knowledge,
+          m_config.autoCompleteDesignGraph,
+          static_cast<std::size_t>(std::max(0, m_config.maxViewportReviews))});
+        design::registerDesignTools(m_registry,
+                                    *m_toolCtx,
+                                    m_geometryOnlySurface ? design::DesignToolSurface::GeometryOnly
+                                                          : design::DesignToolSurface::Full);
         m_policy.setAutonomy(agent::AutonomyLevel::WorkAutonomously);
         return {true, {}};
     }
@@ -268,7 +284,10 @@ namespace gladius::agent::bench
                                 {"streaming", m_config.stream},
                                 {"maxModelTurns", m_config.maxModelTurns},
                                 {"maxToolCalls", m_config.maxToolCalls},
-                                {"renderSize", m_config.renderWidth}});
+                                {"renderSize", m_config.renderWidth},
+                                {"toolSurface", m_config.toolSurface},
+                                {"autoCompleteDesignGraph", m_config.autoCompleteDesignGraph},
+                                {"maxViewportReviews", m_config.maxViewportReviews}});
     }
 
     std::int64_t HeadlessAgentHost::traceMark() const
@@ -322,6 +341,10 @@ namespace gladius::agent::bench
             m_graph.setPhase(design::DesignPhase::ClarifyRequirements);
             m_conversation.clear();
             m_conversation.appendUserText(task.prompt);
+            if (m_toolCtx)
+            {
+                m_toolCtx->viewportReviewsUsed = 0;
+            }
         }
 
         AgentLimits limits;

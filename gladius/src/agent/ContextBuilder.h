@@ -73,7 +73,9 @@ namespace gladius::agent
                                               ContextBuildStats * stats = nullptr) const;
 
         /// @brief Default engineering-design system instructions
-        [[nodiscard]] static std::string defaultSystemPrompt();
+        /// @param geometryToolSurface true when the host only registered the geometry tool surface,
+        ///        in which case the planning, variant, and ceremony instructions are left out
+        [[nodiscard]] static std::string defaultSystemPrompt(bool geometryToolSurface = false);
 
         /// @brief History budget used for image and tool-result retention
         void setContextPolicy(ContextPolicy policy) noexcept
@@ -81,10 +83,21 @@ namespace gladius::agent
             m_policy = policy;
         }
 
+        /**
+         * @brief Tell the builder that only the geometry tool surface is registered.
+         * @details Prompt text that describes unregistered tools is pure cost: it is re-prefilled on
+         *          every turn and invites the model to plan steps it cannot perform.
+         */
+        void setGeometryToolSurface(bool geometryOnly) noexcept
+        {
+            m_geometryToolSurface = geometryOnly;
+        }
+
       private:
         /// @brief Instruction-like prompt text; must stay byte-identical for the whole run
         [[nodiscard]] std::string buildStaticSystemPrompt(DesignContextSnapshot const & snapshot,
                                                           PrivacySettings const & privacy) const;
+
 
         /// @brief State that changes between turns, sent last so it extends the cached prefix
         [[nodiscard]] std::string buildLiveContext(DesignContextSnapshot const & snapshot,
@@ -95,5 +108,6 @@ namespace gladius::agent
                                                          ContextBuildStats * stats) const;
 
         ContextPolicy m_policy;
+        bool m_geometryToolSurface = false;
     };
 } // namespace gladius::agent
