@@ -34,6 +34,9 @@ namespace gladius::agent::bench
             cfg.model = config.model;
             cfg.stream = false;
             cfg.maxTokens = 2000;
+            // A reasoning model left uncapped can spend the whole completion budget on hidden
+            // thinking and return no verdict at all, so the judge gets an explicit share.
+            cfg.thinkingBudgetTokens = 512;
             cfg.temperature = 0.0;
             cfg.timeoutSeconds = config.providerTimeoutSeconds;
             if (config.api == "openai")

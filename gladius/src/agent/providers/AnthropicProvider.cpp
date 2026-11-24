@@ -126,6 +126,14 @@ namespace gladius::agent
             {"messages", std::move(messages)}
         };
 
+        // The endpoint must be allowed to finish the visible reply, so a budget that leaves it no
+        // room is dropped rather than clamped: a silent clamp would change behaviour invisibly.
+        if (m_config.thinkingBudgetTokens > 0 && m_config.thinkingBudgetTokens < m_config.maxTokens)
+        {
+            payload["thinking"] = {{"type", "enabled"},
+                                   {"budget_tokens", m_config.thinkingBudgetTokens}};
+        }
+
         if (!request.systemPrompt.empty())
         {
             payload["system"] = request.systemPrompt;
@@ -142,10 +150,26 @@ namespace gladius::agent
                     {"input_schema", tool.inputSchema.is_object() ? tool.inputSchema : nlohmann::json{{"type", "object"}}}
                 });
             }
-            // One breakpoint at the end of the tool block is enough to cache the stable system prompt
-            // plus the tool schemas, which is the part that must not be re-prefilled every turn.
-            toolsArr.back()["cache_control"] = {{"type", "ephemeral"}};
+            // The tool block is where the run-constant part of the prompt ends, so marking its last
+            // schema caches system prompt plus schemas, the part that must never be re-prefilled.
+            if (m_config.cacheBreakpoints != CacheBreakpointPlacement::None)
+            {
+                toolsArr.back()["cache_control"] = {{"type", "ephemeral"}};
+            }
             payload["tools"] = std::move(toolsArr);
+        }
+
+        // A provider only reads back the prompt up to a breakpoint. With just the tool block marked,
+        // everything the conversation grew by is re-prefilled every turn, so marking the last content
+        // block lets the next turn pay for its new tail only.
+        if (m_config.cacheBreakpoints == CacheBreakpointPlacement::CacheAll
+            && payload["messages"].is_array() && !payload["messages"].empty())
+        {
+            nlohmann::json & lastContent = payload["messages"].back()["content"];
+            if (lastContent.is_array() && !lastContent.empty())
+            {
+                lastContent.back()["cache_control"] = {{"type", "ephemeral"}};
+            }
         }
 
         return payload;

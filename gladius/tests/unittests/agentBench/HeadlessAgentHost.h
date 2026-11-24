@@ -59,6 +59,12 @@ namespace gladius::agent::bench
         int providerTimeoutSeconds = 600;
         /// @brief Completion budget per model turn; a whole program snippet has to fit in here
         int providerMaxTokens = 8192;
+        /// @brief Hidden-reasoning budget per model turn; 0 leaves it to the provider
+        /// @details Reasoning tokens cost the same as visible output and are thrown away, and on this
+        ///          local endpoint they dominated every turn, so the benchmark caps them by default.
+        int providerThinkingTokens = 1024;
+        /// @brief Explicit prompt-cache breakpoints: "none", "tools" or "all"
+        std::string cacheBreakpoints = "tools";
 
         /// @brief Reads `GLADIUS_AGENT_BENCH_*` overrides with strata defaults
         [[nodiscard]] static BenchRunConfig fromEnvironment();

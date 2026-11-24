@@ -12,6 +12,19 @@
 
 namespace gladius::agent
 {
+    /// @brief Where the explicit prompt-cache breakpoints are placed in a request
+    /// @details A provider only reads back the prompt up to a breakpoint, so the placement decides
+    ///          how much of a growing conversation is reused between turns.
+    enum class CacheBreakpointPlacement
+    {
+        /// @brief Send no breakpoint and let the server cache the prefix on its own
+        None,
+        /// @brief Breakpoint after the tool schemas only: caches system prompt and tools
+        Tools,
+        /// @brief Breakpoint after the tool schemas and after the newest message: caches everything
+        CacheAll,
+    };
+
     /// @brief Configuration for an AI reasoning or image provider
     struct ProviderConfig
     {
@@ -19,7 +32,14 @@ namespace gladius::agent
         std::string apiKey;
         std::string model;
         int maxTokens = 4096;
+        /// @brief Token cap for the model's hidden reasoning; `<= 0` leaves it to the provider
+        /// @details Reasoning costs the same per token as visible output but is never reused, so an
+        ///          unbounded budget on a reasoning model dominates the wall time of every turn.
+        int thinkingBudgetTokens = 0;
         double temperature = 0.2;
+        /// @brief Explicit prompt-cache breakpoints; local servers usually cache the prefix on their
+        ///          own and charge an extra cache write per turn for an explicit breakpoint
+        CacheBreakpointPlacement cacheBreakpoints = CacheBreakpointPlacement::Tools;
         bool stream = true;
         std::vector<std::string> extraHeaders;
         /// @brief Per-request HTTP timeout; local models need far more than cloud endpoints

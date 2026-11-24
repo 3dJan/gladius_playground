@@ -126,6 +126,9 @@ namespace gladius::agent::bench
           std::max(30, envInt("GLADIUS_AGENT_BENCH_TIMEOUT_SECONDS", config.providerTimeoutSeconds));
         config.providerMaxTokens =
           std::max(256, envInt("GLADIUS_AGENT_BENCH_MAX_TOKENS", config.providerMaxTokens));
+        config.providerThinkingTokens =
+          std::max(0, envInt("GLADIUS_AGENT_BENCH_THINKING_TOKENS", config.providerThinkingTokens));
+        config.cacheBreakpoints = envOr("GLADIUS_AGENT_BENCH_CACHE_BREAKPOINTS", config.cacheBreakpoints);
         return config;
     }
 
@@ -206,6 +209,22 @@ namespace gladius::agent::bench
         m_document->load(path);
     }
 
+    namespace
+    {
+        CacheBreakpointPlacement parseCacheBreakpoints(std::string const & raw)
+        {
+            if (raw == "none")
+            {
+                return CacheBreakpointPlacement::None;
+            }
+            if (raw == "all")
+            {
+                return CacheBreakpointPlacement::CacheAll;
+            }
+            return CacheBreakpointPlacement::Tools;
+        }
+    }
+
     std::unique_ptr<IAiProvider> HeadlessAgentHost::makeDefaultProvider() const
     {
         ProviderConfig providerCfg;
@@ -215,6 +234,8 @@ namespace gladius::agent::bench
         providerCfg.stream = m_config.stream;
         providerCfg.timeoutSeconds = m_config.providerTimeoutSeconds;
         providerCfg.maxTokens = m_config.providerMaxTokens;
+        providerCfg.thinkingBudgetTokens = m_config.providerThinkingTokens;
+        providerCfg.cacheBreakpoints = parseCacheBreakpoints(m_config.cacheBreakpoints);
 
         if (m_config.api == "openai")
         {

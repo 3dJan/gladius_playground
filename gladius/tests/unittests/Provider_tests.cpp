@@ -169,6 +169,36 @@ namespace gladius::agent::tests
         EXPECT_EQ(payload["tools"][1]["cache_control"]["type"], "ephemeral");
     }
 
+    TEST(AnthropicProvider, BuildPayload_WithThinkingBudget_AnthropicThinkingBlock)
+    {
+        // Arrange
+        AnthropicProvider provider({"", "", "claude-test", 4096, 1024},
+                                   std::make_shared<MockHttpTransport>());
+
+        // Act
+        auto const payload = provider.buildPayload(CompletionRequest{});
+
+        // Assert: reasoning is capped, not left to the model
+        EXPECT_EQ(payload["thinking"]["type"], "enabled");
+        EXPECT_EQ(payload["thinking"]["budget_tokens"], 1024);
+    }
+
+    TEST(AnthropicProvider, BuildPayload_BudgetNotBelowMaxTokens_OmitsThinkingBlock)
+    {
+        // Arrange: a budget that leaves no room for the visible reply is a configuration mistake
+        AnthropicProvider noBudget({"", "", "claude-test"}, std::make_shared<MockHttpTransport>());
+        AnthropicProvider oversized({"", "", "claude-test", 1024, 1024},
+                                    std::make_shared<MockHttpTransport>());
+
+        // Act
+        auto const unset = noBudget.buildPayload(CompletionRequest{});
+        auto const clamped = oversized.buildPayload(CompletionRequest{});
+
+        // Assert: silently clamping the oversized budget would change behaviour invisibly
+        EXPECT_FALSE(unset.contains("thinking"));
+        EXPECT_FALSE(clamped.contains("thinking"));
+    }
+
     TEST(OpenAiProvider, BuildPayload_WithTools_LeavesThemUntouched)
     {
         // Arrange
