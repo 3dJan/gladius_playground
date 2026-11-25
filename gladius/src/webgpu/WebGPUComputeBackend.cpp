@@ -1855,6 +1855,10 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
                 }
                 if (m_precomputedSdf && m_context && m_context->isValid())
                 {
+                    // Cancellation arrives from the UI thread while another thread may be encoding
+                    // on the same queue.  Dawn keeps a single pending command buffer per queue, so
+                    // this write has to be serialised against that encoding.
+                    WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
                     m_precomputedSdf->invalidate(m_context->getQueue());
                 }
             }
@@ -2256,6 +2260,10 @@ fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
     {
         if (m_precomputedSdf && m_context && m_context->isValid())
         {
+            // Scene and parameter changes come from the UI thread while the design agent renders
+            // on its own thread.  Invalidation writes through the queue, which shares one pending
+            // command buffer with that render, so it has to be gated.
+            WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
             m_precomputedSdf->invalidate(m_context->getQueue());
         }
     }

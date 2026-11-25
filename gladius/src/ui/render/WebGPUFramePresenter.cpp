@@ -334,6 +334,10 @@ namespace gladius::ui::async_rendering
     bool WebGPUFramePresenter::allocateTexture(std::uint32_t const width,
                                                std::uint32_t const height)
     {
+        // Device object creation reaches the shared Dawn device.  Guard it here instead of
+        // relying on callers to hold the gate, which keeps presentation safe when a design
+        // agent renders on another thread.
+        webgpu::WebGPUComputeContext::DeviceLock const deviceLock(*m_context);
         wgpu::TextureDescriptor descriptor;
         descriptor.label = "Gladius WebGPU frame texture";
         descriptor.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding;

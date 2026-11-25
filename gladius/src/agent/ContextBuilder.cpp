@@ -159,6 +159,12 @@ namespace gladius::agent
         {
             live << "- Requirements:\n" << snapshot.requirementsSummary;
         }
+        // Never a suggestion: until the scene contains a level set and a build item, every snippet
+        // the model writes is unreachable no matter how correct the math is.
+        if (!snapshot.renderabilitySummary.empty())
+        {
+            live << "- THE MODEL DOES NOT RENDER YET: " << snapshot.renderabilitySummary << "\n";
+        }
         if (!snapshot.requirementChangesSummary.empty())
         {
             live << "- USER REQUIREMENT CHANGES (update your plan accordingly):\n"

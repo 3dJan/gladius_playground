@@ -11,6 +11,8 @@
 #include "../agent/providers/OpenAiProvider.h"
 #include "../agent/trace/AgentTrace.h"
 #include "../agent/trace/AgentTraceProfile.h"
+#include "../design/Renderability.h"
+#include "../design/TemplateSeed.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "../compute/ComputeCore.h"
 #endif
@@ -324,6 +326,18 @@ namespace gladius::ui
         return true;
     }
 
+    bool AgentPanels::attachPromptTextFile(std::filesystem::path const & path)
+    {
+        std::string error;
+        if (!m_prompt.appendTextFile(path, error))
+        {
+            m_lastError = error;
+            return false;
+        }
+        m_lastError.clear();
+        return true;
+    }
+
     void AgentPanels::saveSessionState()
     {
         try
@@ -360,7 +374,7 @@ namespace gladius::ui
         }
     }
 
-    void AgentPanels::onNewDocument()
+    void AgentPanels::onNewDocument(bool documentSeeded)
     {
         m_graph.clear();
         m_conversation.clear();
@@ -370,6 +384,7 @@ namespace gladius::ui
         m_lastError.clear();
         m_streamingBuffer.clear();
         m_startFresh = true;
+        m_documentSeededByCaller = documentSeeded;
     }
 
     void AgentPanels::loadSessionState()
@@ -1042,11 +1057,33 @@ namespace gladius::ui
             snap.requirementChangesSummary += "- " + ch + "\n";
         }
         snap.designPhase = design::toString(m_graph.phase());
+        if (m_document != nullptr)
+        {
+            // Cheaper for the model than discovering it at finish_design or in a blank viewport
+            // screenshot: the reason is stated before the next snippet is written.
+            auto const facts = design::collectRenderabilityFacts(m_document);
+            if (!facts.isRenderable())
+            {
+                snap.renderabilitySummary = facts.blockersAsText();
+            }
+        }
         snap.designGraphSummary = m_graph.summarize();
         snap.availableSkillsSummary = m_skills.summarizeForPrompt();
         snap.todoSummary = m_todos.summarize();
         snap.knowledgeSummary = m_knowledge.summarizeForPrompt(knowledgeQuery, 5);
         return snap;
+    }
+
+    void AgentPanels::seedVolumetricTemplate()
+    {
+        auto const seed = design::seedVolumetricTemplate(m_document);
+        if (seed.success)
+        {
+            return;
+        }
+
+        m_lastError = "Could not seed the volumetric template: " + seed.error;
+        m_document->newModel();
     }
 
     void AgentPanels::startRun(std::string const & userPrompt)
@@ -1065,6 +1102,8 @@ namespace gladius::ui
         m_webRunTask.reset();
 #endif
 
+        m_lastError.clear();
+
         if (m_startFresh)
         {
             m_graph.clear();
@@ -1072,18 +1111,18 @@ namespace gladius::ui
             m_checkpoints.clear();
             m_todos.clear();
             m_activityLog.clear();
-            if (m_document != nullptr)
+            if (m_document != nullptr && !m_documentSeededByCaller)
             {
-                m_document->newModel();
+                seedVolumetricTemplate();
                 if (m_onDocumentModified)
                 {
                     m_onDocumentModified();
                 }
             }
             m_startFresh = false;
+            m_documentSeededByCaller = false;
         }
 
-        m_lastError.clear();
         m_streamingBuffer.clear();
         m_activeToolName.clear();
         m_runStartTime = std::chrono::steady_clock::now();
@@ -1506,7 +1545,16 @@ namespace gladius::ui
             }
         }
 
-        float const footerHeight = m_pendingImages.empty() ? 152.f : 206.f;
+        // Reserve room for the prompt footer, which grows with the draft up to a limit.
+        float const baseFooterHeight = m_pendingImages.empty() ? 152.f : 206.f;
+        constexpr float messagesMinHeight = 120.f;
+        float const promptWidth = m_prompt.inlineFieldWidth();
+        float const availableHeight =
+          std::max(0.f, ImGui::GetContentRegionAvail().y - messagesMinHeight);
+        float const promptHeightLimit =
+          std::max(0.f, availableHeight - (baseFooterHeight - m_prompt.config().minHeight));
+        float const promptHeight = m_prompt.measureInlineHeight(promptWidth, promptHeightLimit);
+        float const footerHeight = baseFooterHeight - m_prompt.config().minHeight + promptHeight;
         ImGui::BeginChild("AgentMessages", ImVec2(0, -footerHeight), true);
         for (auto const & msg : m_conversation.messages())
         {
@@ -1737,9 +1785,9 @@ namespace gladius::ui
             ImGui::EndPopup();
         }
 
-        ImGui::InputTextMultiline("##AgentPrompt", m_promptBuf, sizeof(m_promptBuf), ImVec2(-75.f, 52.f));
-        m_promptFocused = ImGui::IsItemFocused();
-        if (m_promptFocused)
+        PromptInput::RenderResult const promptResult =
+          m_prompt.renderInline("agentPrompt", "Send", promptWidth, promptHeight, !m_running.load());
+        if (m_prompt.isFocused())
         {
             ImGuiIO const & io = ImGui::GetIO();
             bool const pasteChord =
@@ -1760,15 +1808,18 @@ namespace gladius::ui
             }
         }
 
-        ImGui::SameLine();
-        ImGui::BeginDisabled(m_running.load());
-        if (ImGui::Button("Send", ImVec2(65.f, 52.f)))
+        if (promptResult.sendRequested)
         {
-            std::string prompt(m_promptBuf);
-            m_promptBuf[0] = '\0';
-            startRun(prompt);
+            startRun(m_prompt.consumeDraft());
         }
-        ImGui::EndDisabled();
+
+        if (auto const expanded = m_prompt.renderExpandedWindow(!m_running.load()); expanded)
+        {
+            if (expanded->sendRequested)
+            {
+                startRun(m_prompt.consumeDraft());
+            }
+        }
 
         // Primary & Fallback provider/model selection dropdowns below prompt
         std::vector<agent::ModelSelection> allChoices;

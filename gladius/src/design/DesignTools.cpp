@@ -8,12 +8,15 @@
 #include "../ProgramSnippetApplier.h"
 #include "../agent/Conversation.h"
 #include "AgentToolOutput.h"
+#include "Renderability.h"
 #include "../io/3mf/Lib3mfLoader.h"
 #include "../io/3mf/LibraryMetadata.h"
+#include "../io/3mf/VolumetricScaffold.h"
 #include "../nodes/Assembly.h"
 #include "../nodes/GraphOptimizer.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <sstream>
 #include <filesystem>
@@ -197,6 +200,7 @@ namespace gladius::design
         constexpr char const * const kGeometryOnlySurface[] = {"begin_edit",
                                                               "capture_viewport",
                                                               "commit_edit",
+                                                              "ensure_output_chain",
                                                               "export_library_item",
                                                               "finish_design",
                                                               "get_model_summary",
@@ -280,6 +284,105 @@ namespace gladius::design
             std::string const configurationId
               = ctx.graph.createConfiguration("Applied program", std::move(selectedVariants));
             (void)ctx.graph.activateConfiguration(configurationId);
+        }
+        /**
+         * @brief True when the Gladius function exposes a scalar shape output.
+         * @details The builder fails with an opaque message when the sampled function returns only a
+         *          colour, and it fails after the output chain resources have already been written,
+         *          leaving a level set that points at unusable geometry.
+         */
+        [[nodiscard]] bool functionReturnsShape(nodes::Assembly & assembly, int functionId)
+        {
+            auto const model = assembly.findModel(static_cast<ResourceId>(functionId));
+            if (!model)
+            {
+                return false;
+            }
+            auto * endNode = model->getEndNode();
+            if (!endNode)
+            {
+                return false;
+            }
+            // The End node's parameters are the function's outputs.
+            auto const * shape = endNode->getParameter(nodes::FieldNames::Shape);
+            return shape && shape->getTypeIndex() == nodes::ParameterTypeIndex::Float;
+        }
+
+        /**
+         * @brief Picks the function an output chain should evaluate when the caller names none.
+         * @details A function is invisible until a level set samples it, which is exactly the state an
+         *          agent-produced document ends up in. Only named functions count: the flattened
+         *          assembly itself is serialized as an unnamed implicit function, and wiring a level
+         *          set to it would sample the sink instead of the geometry.
+         */
+        [[nodiscard]] int pickOutputChainFunction(Lib3MF::PModel const & model)
+        {
+            if (auto const bound = findRootFunctionId(model); bound != 0)
+            {
+                return static_cast<int>(bound);
+            }
+
+            std::vector<int> candidates;
+            try
+            {
+                auto functions = model->GetFunctions();
+                while (functions->MoveNext())
+                {
+                    auto const function = functions->GetCurrentFunction();
+                    if (!function)
+                    {
+                        continue;
+                    }
+                    auto const displayName = function->GetDisplayName();
+                    if (displayName.empty())
+                    {
+                        continue;
+                    }
+                    auto const id = static_cast<int>(function->GetModelResourceID());
+                    if (displayName == "main")
+                    {
+                        return id;
+                    }
+                    candidates.push_back(id);
+                }
+            }
+            catch (Lib3MF::ELib3MFException const &)
+            {
+                return 0;
+            }
+
+            return candidates.size() == 1 ? candidates.front() : 0;
+        }
+
+        /// @brief Half edge length of the default evaluation domain, in mm
+        constexpr float kDefaultDomainHalfExtent = 50.0f;
+
+        /**
+         * @brief Reads an optional [x,y,z] corner of the evaluation domain.
+         * @return False when the field is present but not an array of three numbers.
+         */
+        [[nodiscard]] bool readDomainPoint(nlohmann::json const & args,
+                                           char const * field,
+                                           std::array<float, 3> & out)
+        {
+            if (!args.contains(field))
+            {
+                return true;
+            }
+            auto const & value = args.at(field);
+            if (!value.is_array() || value.size() != 3)
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < 3; ++i)
+            {
+                if (!value[i].is_number())
+                {
+                    return false;
+                }
+                out[i] = value[i].get<float>();
+            }
+            return true;
         }
     } // namespace
 
@@ -665,11 +768,23 @@ namespace gladius::design
                   return {{"success", false}, {"error", "Viewport capture returned empty image"}};
               }
               ++ctx.viewportReviewsUsed;
-              return {{"success", true},
-                      {"width", w},
-                      {"height", h},
-                      {"mimeType", "image/png"},
-                      {"base64", agent::encodeBase64(png)}};
+              nlohmann::json res = {{"success", true},
+                                    {"width", w},
+                                    {"height", h},
+                                    {"mimeType", "image/png"},
+                                    {"base64", agent::encodeBase64(png)}};
+              // An empty render is otherwise indistinguishable from "the shape looks wrong", and the
+              // model spends its remaining turns polishing geometry that is never sampled.
+              if (ctx.document != nullptr)
+              {
+                  auto const facts = collectRenderabilityFacts(ctx.document);
+                  if (!facts.isRenderable())
+                  {
+                      res["emptySceneNote"]
+                        = "The image shows no geometry: " + facts.blockersAsText();
+                  }
+              }
+              return res;
           });
 
         registry.registerSyncTool(
@@ -678,6 +793,31 @@ namespace gladius::design
            {{"type", "object"}, {"properties", nlohmann::json::object()}},
            tools::ToolPolicy::DesignGraphModification},
           [&ctx](nlohmann::json const &) -> nlohmann::json {
+              // The document is the only thing that can prove something was actually built. Graph
+              // bookkeeping and snippet compilation both succeed on a document that renders
+              // nothing, so the scene itself has to be checked before the design may be complete.
+              if (ctx.document != nullptr)
+              {
+                  auto const facts = collectRenderabilityFacts(ctx.document, true);
+                  if (!facts.isRenderable())
+                  {
+                      nlohmann::json blockers = nlohmann::json::array();
+                      for (auto const & blocker : facts.blockers)
+                      {
+                          blockers.push_back({{"code", blocker.code},
+                                              {"message", blocker.message},
+                                              {"fix", blocker.fix}});
+                      }
+                      return {{"success", false},
+                              {"valid", false},
+                              {"error",
+                               "The design does not render: " + facts.blockersAsText()},
+                              {"renderabilityBlockers", std::move(blockers)},
+                              {"hint", "Apply the named fix (ensure_output_chain wires the root "
+                                       "function into a level set and build item), verify with "
+                                       "get_model_summary, then call finish_design again."}};
+                  }
+              }
               if (ctx.autoCompleteDesignGraphOnFinish && !isGraphFinishReady(ctx.graph))
               {
                   autoCompleteDesignGraph(ctx);
@@ -719,9 +859,10 @@ namespace gladius::design
         registry.registerSyncTool(
           {"get_model_summary",
            "Inspect the currently open 3MF document's functions, node counts, and build items.",
-           {{"type", "object"}, {"properties", nlohmann::json::object()}},
+           {{"type", "object"},
+            {"properties", {{"bounds", {{"type", "boolean"}}}}}},
            tools::ToolPolicy::ReadOnly},
-          [&ctx](nlohmann::json const &) -> nlohmann::json {
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
               if (!ctx.document || !ctx.document->getAssembly())
               {
                   return {{"success", false}, {"error", "No active document"}};
@@ -740,12 +881,167 @@ namespace gladius::design
                       {"nodeCount", model->getSize()}
                   });
               }
-              return {
+              // Function counts alone cannot tell the model whether anything will be visible, which
+              // is why the scene facts ride along. The bounds probe samples the whole model on the
+              // GPU, so it stays behind an explicit flag.
+              auto const facts = collectRenderabilityFacts(ctx.document, args.value("bounds", false));
+              nlohmann::json res = {
                   {"success", true},
                   {"functionCount", funcs.size()},
                   {"functions", std::move(funcs)},
-                  {"assemblyModelId", assembly->getAssemblyModelId()}
+                  {"assemblyModelId", assembly->getAssemblyModelId()},
+                  {"buildItemCount", facts.buildItemCount},
+                  {"levelSetCount", facts.levelSetCount},
+                  {"rootFunctionId", facts.rootFunctionId},
+                  {"rootOutputConsumed", facts.rootShapeConsumed},
+                  {"isRenderable", facts.isRenderable()}
               };
+              if (!facts.modelBounds.empty())
+              {
+                  res["bounds"] = facts.modelBounds;
+                  res["boundsUsable"] = facts.boundsUsable;
+              }
+              if (!facts.isRenderable())
+              {
+                  res["notRenderedBecause"] = facts.blockersAsText();
+              }
+              return res;
+          });
+
+        registry.registerSyncTool(
+          {"ensure_output_chain",
+           "Make the geometry visible by wiring the level set, bounding-box domain and build item "
+           "that sample a shape function; a program alone never renders. Only needed when the model "
+           "is not rendering yet (get_model_summary reports isRenderable false).",
+           {{"type", "object"},
+            {"properties",
+             {{"functionId", {{"type", "integer"},
+                              {"description", "Shape function to render. Omit to use the root or "
+                                              "the only function of the document."}}},
+              {"minPoint", {{"type", "array"}, {"items", {{"type", "number"}}}}},
+              {"maxPoint", {{"type", "array"}, {"items", {{"type", "number"}}}}}}}},
+           tools::ToolPolicy::ModelModification},
+          [&ctx](nlohmann::json const & args) -> nlohmann::json {
+              if (!ctx.document || !ctx.document->getAssembly())
+              {
+                  return {{"success", false}, {"error", "No active document"}};
+              }
+
+              std::array<float, 3> minPoint{-kDefaultDomainHalfExtent,
+                                            -kDefaultDomainHalfExtent,
+                                            -kDefaultDomainHalfExtent};
+              std::array<float, 3> maxPoint{kDefaultDomainHalfExtent,
+                                            kDefaultDomainHalfExtent,
+                                            kDefaultDomainHalfExtent};
+              if (!readDomainPoint(args, "minPoint", minPoint)
+                  || !readDomainPoint(args, "maxPoint", maxPoint))
+              {
+                  return {{"success", false},
+                          {"error", "minPoint and maxPoint must be [x,y,z] number arrays"}};
+              }
+
+              try
+              {
+                  ctx.document->update3mfModel();
+                  ctx.document->getAssembly()->updateInputsAndOutputs();
+                  auto const model = ctx.document->get3mfModel();
+                  if (!model)
+                  {
+                      return {{"success", false}, {"error", "No 3MF model available"}};
+                  }
+
+                  int functionId = args.value("functionId", 0);
+                  if (functionId == 0)
+                  {
+                      functionId = pickOutputChainFunction(model);
+                      if (functionId == 0)
+                      {
+                          return {{"success", false},
+                                  {"error", "Cannot tell which function to render. Pass functionId "
+                                            "with the id of the function that returns the shape."}};
+                      }
+                  }
+
+                  auto function = io::findFunctionResource(model,
+                                                           static_cast<ResourceId>(functionId));
+                  if (!function)
+                  {
+                      // A function the agent added lives in the 3MF model under the next free id, so
+                      // look it up by the display name the caller already knows.
+                      if (auto const gladiusModel =
+                              ctx.document->getAssembly()->findModel(static_cast<ResourceId>(functionId));
+                          gladiusModel)
+                      {
+                          function = io::findFunctionResourceByName(
+                              model, gladiusModel->getDisplayName().value_or(""));
+                      }
+                  }
+                  if (!function)
+                  {
+                      return {{"success", false},
+                              {"error", "Function " + std::to_string(functionId)
+                                        + " does not exist. Read get_model_summary for the ids."}};
+                  }
+
+                  // lib3mf reports a default 'shape' port for every function, so the Gladius
+                  // function is the only place that can say whether the snippet actually returned
+                  // one. Checking it here keeps the failure from arriving half applied, after the
+                  // level set already exists.
+                  if (!functionReturnsShape(*ctx.document->getAssembly(), functionId))
+                  {
+                      return {{"success", false},
+                              {"error", "Function " + std::to_string(functionId)
+                                        + " has no scalar 'shape' output, so nothing can be sampled "
+                                          "from it. Return the signed distance from an output named "
+                                          "shape (a 'color' output alone is not geometry)."}};
+                  }
+
+                  auto const scaffold = io::reconcileVolumetricOutputChain(model,
+                                                                           function,
+                                                                           minPoint,
+                                                                           maxPoint,
+                                                                           ctx.document->getSharedLogger());
+                  if (!scaffold.success)
+                  {
+                      return {{"success", false}, {"error", scaffold.error}};
+                  }
+
+                  ctx.document->updateDocumentFrom3mfModel();
+                  ctx.document->rebuildResourceDependencyGraph();
+                  ctx.document->refreshModelBlocking();
+                  ctx.document->markFileAsChanged();
+                  ctx.document->signalStructuralEdit();
+                  if (ctx.onDocumentModified)
+                  {
+                      ctx.onDocumentModified();
+                  }
+
+                  auto const facts = collectRenderabilityFacts(ctx.document);
+                  nlohmann::json res = {{"success", facts.isRenderable()},
+                                        {"levelSetId", scaffold.levelSetId},
+                                        {"domainMeshId", scaffold.domainMeshId},
+                                        {"channel", scaffold.channel},
+                                        {"functionId", functionId},
+                                        {"isRenderable", facts.isRenderable()}};
+                  // Tells the caller when nothing had to change, so a repeated call is not mistaken
+                  // for a second chain having been added.
+                  res["chainAction"]
+                    = scaffold.action == io::VolumetricOutputChainAction::AlreadyWired
+                        ? "already-wired"
+                        : (scaffold.action == io::VolumetricOutputChainAction::Rebound
+                             ? "rebound"
+                             : "created");
+                  if (!facts.isRenderable())
+                  {
+                      res["error"] = "The output chain was added but the model still does not render: "
+                                     + facts.blockersAsText();
+                  }
+                  return res;
+              }
+              catch (std::exception const & ex)
+              {
+                  return {{"success", false}, {"error", ex.what()}};
+              }
           });
 
         registry.registerSyncTool(

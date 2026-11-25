@@ -7,6 +7,7 @@
 #include "agent/providers/OpenAiProvider.h"
 #include "compute/BoundingBoxContracts.h"
 #include "compute/RenderContracts.h"
+#include "design/Renderability.h"
 #include "io/SurfaceExtractionOptions.h"
 #include "ui/OrbitalCamera.h"
 
@@ -134,6 +135,7 @@ namespace gladius::agent::bench
         // itself, and the viewport review budget is capped. Each switch can be turned back off with
         // its own variable to A/B a change; the product host always uses the full surface.
         config.toolSurface = envOr("GLADIUS_AGENT_BENCH_TOOL_SURFACE", std::string{"geometry"});
+        config.documentSeed = envOr("GLADIUS_AGENT_BENCH_DOCUMENT_SEED", std::string{"template"});
         config.autoCompleteDesignGraph =
           envOr("GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH", "1") != "0";
         config.maxViewportReviews = std::max(0, envInt("GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS", 2));
@@ -164,7 +166,11 @@ namespace gladius::agent::bench
         m_logger = std::make_shared<events::Logger>(events::OutputMode::Silent);
         m_document = std::make_unique<Document>(m_logger);
         m_document->setBackendRuntime(m_runtime.get());
-        seedTemplateDocument();
+        seedDocument();
+        if (!m_initializeError.empty())
+        {
+            return {false, m_initializeError};
+        }
 
         // Hermetic user library so export counting never touches the developer's library.
         auto const userLibrary = getUserLibraryDir();
@@ -211,15 +217,22 @@ namespace gladius::agent::bench
         return getAppDir() / "examples" / "template.3mf";
     }
 
-    void HeadlessAgentHost::seedTemplateDocument()
+    void HeadlessAgentHost::seedDocument()
     {
-        // A blank document has no root output, so nothing can ever be rendered or measured.
-        // The shipped template provides the root function (ID 3) plus the primitive helpers the
-        // design agent is expected to reuse.
+        // The template is what a user gets from File > New: root function (ID 3), primitive helpers,
+        // domain object, level set, volumetric data and build item. Seeding it keeps the benchmark
+        // measuring design capability instead of scaffold construction.
+        if (m_config.documentSeed == "blank")
+        {
+            m_document->newModel();
+            return;
+        }
+
         auto const path = templatePath();
         if (!std::filesystem::exists(path))
         {
-            m_document->newModel();
+            // Silently falling back to a blank document made every downstream metric meaningless.
+            m_initializeError = "Benchmark template document not found at " + path.string();
             return;
         }
         m_document->load(path);
@@ -333,7 +346,7 @@ namespace gladius::agent::bench
         beginTaskTrace(task);
         {
             agent::trace::ScopedTracePhase seeding(m_trace.get(), "seed_document");
-            seedTemplateDocument();
+            seedDocument();
             m_graph.clear();
             m_todos.clear();
             m_checkpoints.clear();
@@ -370,6 +383,14 @@ namespace gladius::agent::bench
               agent::DesignContextSnapshot snap;
               snap.autonomy = m_policy.autonomy();
               snap.designPhase = design::toString(m_graph.phase());
+              if (m_document != nullptr)
+              {
+                  auto const facts = design::collectRenderabilityFacts(m_document.get());
+                  if (!facts.isRenderable())
+                  {
+                      snap.renderabilitySummary = facts.blockersAsText();
+                  }
+              }
               snap.designGraphSummary = m_graph.summarize();
               snap.availableSkillsSummary = m_skills.summarizeForPrompt();
               snap.todoSummary = m_todos.summarize();
