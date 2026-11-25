@@ -19,6 +19,7 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <string>
@@ -78,7 +79,8 @@ namespace gladius::mcp::tools
         auto snapshot = compute::FunctionEvaluatorSnapshot{};
         try
         {
-            auto const sceneGeneration = std::max(document.structuralEditEpoch(), 1ULL);
+            auto const sceneGeneration =
+              std::max<std::uint64_t>(document.structuralEditEpoch(), std::uint64_t{1});
             compute::AnalyticRenderSceneSnapshotFactory snapshotFactory;
             snapshot = snapshotFactory.createFunctionEvaluator(
               assembly, functionId, sceneGeneration, &document.getResourceManager());

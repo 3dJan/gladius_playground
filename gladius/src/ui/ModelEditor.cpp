@@ -49,7 +49,7 @@
 #include <nodes/Assembly.h>
 #include <nodes/FunctionDeduplicator.h>
 #include <nodes/Model.h>
-#include <tracy/Tracy.hpp>
+#include "Profiling.h"
 
 namespace gladius::ui
 {

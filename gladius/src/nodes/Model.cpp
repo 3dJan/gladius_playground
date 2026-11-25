@@ -4,11 +4,11 @@
 #include "exceptions.h"
 #include "graph/GraphAlgorithms.h"
 #include "nodesfwd.h"
+#include "Profiling.h"
 
 #include <algorithm>
 #include <iostream>
 #include <string>
-#include <tracy/Tracy.hpp>
 
 namespace gladius::nodes
 {

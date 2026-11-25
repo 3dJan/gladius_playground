@@ -7,7 +7,18 @@
 #include <syncstream>
 #endif
 #include <thread>
+#ifdef TRACY_ENABLE
 #include <tracy/Tracy.hpp>
+#else
+#define FrameMark ((void) 0)
+#define FrameMarkStart(name) ((void) 0)
+#define FrameMarkEnd(name) ((void) 0)
+#define ZoneScoped ((void) 0)
+#define ZoneScopedN(name) ((void) 0)
+#define ZoneName(text, len) ((void) 0)
+#define ZoneText(text, len) ((void) 0)
+#define ZoneValue(value) ((void) 0)
+#endif
 #include <utility>
 
 // Optional detailed FWN preparation timings. These logs intentionally

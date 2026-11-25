@@ -192,6 +192,18 @@ namespace gladius::mcp::tools
             kernelSrc << "}\n";
             return kernelSrc.str();
         }
+
+        nlohmann::json evaluateFunctionOpenCL(
+          Document & document,
+          ComputeCore & core,
+          nodes::Assembly & assembly,
+          uint32_t functionId,
+          bool isAssembly,
+          std::vector<FunctionInputInfo> const & inputs,
+          std::vector<FunctionOutputInfo> const & outputInfos,
+          std::vector<float> const & inputBuffer,
+          int totalInputComponents,
+          int totalOutputComponents);
 #endif
 
     } // anonymous namespace
@@ -291,7 +303,7 @@ namespace gladius::mcp::tools
         if (auto const core = document->getCore(); core != nullptr)
         {
             return evaluateFunctionOpenCL(*document, *core, *assembly, functionId, isAssembly,
-                                          *functionModel, inputs, outputInfos, inputBuffer,
+                                          inputs, outputInfos, inputBuffer,
                                           totalInputComponents, totalOutputComponents);
         }
 #endif
@@ -320,7 +332,6 @@ namespace gladius::mcp::tools
         nodes::Assembly & assembly,
         uint32_t functionId,
         bool isAssembly,
-        nodes::Model & functionModel,
         std::vector<FunctionInputInfo> const & inputs,
         std::vector<FunctionOutputInfo> const & outputInfos,
         std::vector<float> const & inputBuffer,
@@ -350,10 +361,12 @@ namespace gladius::mcp::tools
         {
             // Visitor walks the entire assembly to pull in all function definitions,
             // but we invoke the specific function directly.
-            nodes::ToOCLVisitor oclVisitor(assembly);
+            nodes::ToOclVisitor oclVisitor;
             oclVisitor.setStandaloneMode(true);
             assembly.visitNodes(oclVisitor);
-            oclVisitor.write(modelSource);
+            std::ostringstream modelSourceStream;
+            oclVisitor.write(modelSourceStream);
+            modelSource = modelSourceStream.str();
 
             if (modelSource.empty())
             {
@@ -373,13 +386,18 @@ namespace gladius::mcp::tools
         // The kernel is appended directly to modelSource - no separate include needed.
         std::string fullSource = modelSource + "\n" + kernelSource;
 
+        CLProgram evaluationProgram(computeContext);
+        evaluationProgram.setLogger(core.getProgramManager().getSharedLogger());
+        evaluationProgram.setDebugLabel("FunctionEvaluatorTool");
+
         std::vector<std::string> const fileNames{
             "arguments.h", "types.h", "sdf.h", "sampler.h", "rendering.h", "sdf_generator.h",
             "mesh_sdf.cl", "sdf.cl", "rendering.cl", "sdf_generator.cl"};
 
         try
         {
-            core.getProgramManager().buildFromSourceAndLinkWithLib(fileNames, fullSource, nullptr);
+            BuildCallBack buildCallback;
+            evaluationProgram.buildFromSourceAndLinkWithLib(fileNames, fullSource, buildCallback);
         }
         catch (std::exception const & e)
         {
@@ -392,8 +410,7 @@ namespace gladius::mcp::tools
                                                e.what(), dumpPath.string(), kernelSource));
         }
 
-        auto program = core.getProgramManager().getProgram();
-        if (!program)
+        if (!evaluationProgram.isValid())
         {
             return MCPToolBase::createToolError("Compiled OpenCL program is not available.");
         }
@@ -403,55 +420,45 @@ namespace gladius::mcp::tools
 
         std::vector<float> outputData(static_cast<size_t>(sampleCount) * totalOutputComponents, 0.0f);
 
-        cl::CommandQueue queue = computeContext->getCommandQueue();
+        auto const & queue = computeContext->GetQueue();
 
+        auto inputBufferCopy = inputBuffer;
         auto inputBufferPtr = computeContext->createBufferChecked(
           CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
           sizeof(float) * inputBuffer.size(),
-          inputBuffer.data());
+          inputBufferCopy.data());
 
         auto outputBufferPtr = computeContext->createBufferChecked(
           CL_MEM_WRITE_ONLY,
           sizeof(float) * outputData.size(),
           nullptr);
 
-        // --- Build payload bundle ------------------------------------------------------
-        // Resource paths (Mesh, Image) are active if the model was compiled with them.
-        // We capture all payloads; unused kernel arguments are harmless in OpenCL.
-        auto resources = document.getResourceManager();
-        auto const & resourceContext = core.getResourceContext();
-        auto const * primitives = core.getPrimitiveManagerPtr();
+        // Track the shared render buffers read by the generated OpenCL function kernel.
+        auto resources = core.getResourceContext();
+        auto primitives = core.getPrimitives();
 
-        if (!primitives)
+        if (!resources || !primitives)
         {
-            return MCPToolBase::createToolError("Primitive buffers are not available.");
+            return MCPToolBase::createToolError("OpenCL evaluation resources are not available.");
         }
 
-        compute::RenderPayloadSnapshot const payloadSnapshot =
-            compute::RenderPayloadSnapshot::capture(resources, *primitives);
-        if (!payloadSnapshot.isValid())
-        {
-            return MCPToolBase::createToolError("GPU resources are not available for evaluation.");
-        }
+        RenderPayloadSnapshot const payloadSnapshot =
+          RenderPayloadSnapshot::capture(resources, *primitives);
 
         // --- Launch kernel -------------------------------------------------------------
         const uint32_t evalSampleCount = sampleCount;
-        auto & meshBuffer = payloadSnapshot.meshBuffer;
-        auto & beamBuffer = payloadSnapshot.beamBuffer;
-        auto & imageBuffer = payloadSnapshot.imageBuffer;
-        uint32_t meshCount = payloadSnapshot.meshCount;
-        uint32_t beamCount = payloadSnapshot.beamCount;
-        uint32_t imageCount = payloadSnapshot.imageCount;
-        uint32_t meshSdfCapacity = primitives->getMeshSdfCellCapacity();
-        uint32_t meshBeamLatticeCapacity = primitives->getBeamLatticeCellCapacity();
-        uint32_t meshMaxFaces = primitives->getMeshMaxFaceCount();
-        uint32_t meshMaxVertexIndex = primitives->getMaxVertexIndex();
 
         try
         {
-            compute::GpuKernelAccessGuard gpuAccess(*computeContext, queue, "gladius_eval",
-                                                    payloadSnapshot.readAccesses());
-            auto evalEvent = program->runNonBlockingWithWaitList(
+            GpuKernelAccessGuard gpuAccess(*computeContext, queue, "gladius_eval",
+                                           payloadSnapshot.readAccesses());
+            if (!gpuAccess.granted())
+            {
+                return MCPToolBase::createToolError(
+                  "OpenCL resources could not be acquired for function evaluation.");
+            }
+
+            auto evalEvent = evaluationProgram.runNonBlockingWithWaitList(
               queue,
               "gladius_eval",
               cl::NullRange,
@@ -460,16 +467,17 @@ namespace gladius::mcp::tools
               *inputBufferPtr,
               *outputBufferPtr,
               evalSampleCount,
-              meshBuffer,
-              beamBuffer,
-              imageBuffer,
-              meshCount,
-              beamCount,
-              imageCount,
-              meshSdfCapacity,
-              meshBeamLatticeCapacity,
-              meshMaxFaces,
-              meshMaxVertexIndex);
+              resources->getBuildArea(),
+              primitives->primitives.getBuffer(),
+              cl_int(primitives->primitives.getSize()),
+              primitives->data.getBuffer(),
+              cl_int(primitives->data.getSize()),
+              resources->getRenderingSettings(),
+              resources->getPrecompSdfBuffer().getBuffer(),
+              resources->getParameterBuffer().getBuffer(),
+              resources->getCommandBuffer().getBuffer(),
+              cl_int(resources->getCommandBuffer().getData().size()),
+              resources->getPreCompSdfBBox());
             gpuAccess.complete(evalEvent);
 
             // Wait for all work
@@ -480,10 +488,10 @@ namespace gladius::mcp::tools
                                              sizeof(float) * outputData.size(),
                                              outputData.data()));
         }
-        catch (cl::Error const & e)
+        catch (std::exception const & e)
         {
-            return MCPToolBase::createToolError(fmt::format("OpenCL runtime error: {} ({})",
-                                               compute::clErrorMessage(e), e.what()));
+            return MCPToolBase::createToolError(
+              fmt::format("OpenCL runtime error: {}", e.what()));
         }
 
         return formatFunctionResults(outputData, outputInfos, totalOutputComponents,

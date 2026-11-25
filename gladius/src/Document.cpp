@@ -80,7 +80,6 @@
 #include <iostream>
 #include <map>
 #include <thread>
-#include <tracy/Tracy.hpp>
 #include <utility>
 
 #include <cmrc/cmrc.hpp>
