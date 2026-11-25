@@ -13,6 +13,14 @@
   status stay pinned at the bottom of the panel, and the former verbose logs moved into collapsible
   "Activity log" / "Developer diagnostics" sections. A run can now be paused and resumed between
   agent steps.
+- **Design Agent prompt card**: the prompt field, the "Start fresh" / "Clear session" actions, the
+  model and fallback pickers and the send action now sit inside a single rounded card with a
+  focus-highlighted border, the way modern chat composers look. An empty field shows the
+  placeholder "What do you want to build?", send is an icon button, "Attach image" and
+  "Paste image" are icon buttons in the card's toolbar, and the pickers stay usable at half the
+  previous panel width by wrapping onto a second toolbar row instead of shrinking. The status line
+  and the pause / stop / settings controls stay above the card, and the footer height is measured
+  from its contents instead of being hard coded.
 - **Large Design Agent prompts**: the Design Agent prompt field is no longer limited to ~2000
   characters and two visible lines. It now grows with the text up to ten lines, `Ctrl/Cmd+Enter`
   sends (plain `Enter` inserts a newline), a maximize button opens a resizable
