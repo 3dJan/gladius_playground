@@ -204,19 +204,28 @@ Measured, on `strata/iq3_s` (one run per seed, `python3 scripts/agent_bench_comp
 
 | Seed | Passed | What the gate did |
 | --- | --- | --- |
-| `template` | 2/3 | The scene was already wired, so `ensure_output_chain` reported `chainAction: already-wired` and no run paid for a repair. |
-| `blank` | 2/3 | All 13 turns of all three tasks carried `THE MODEL DOES NOT RENDER YET`, and `ensure_output_chain` failed twice per task with real errors (`Function 3 does not exist`, `... has no scalar 'shape' output`) before the agent recovered. `sphere_r5` and `lego_brick_3x4` still passed; `sphere_gyroid` produced a program whose surface the bounds probe could not find, so it failed `mesh_export` instead of passing on the judge alone — exactly the old silent pass, now caught. |
+| `template` | 2/3 to 3/3 | The scene was already wired, so every `ensure_output_chain` call reported `chainAction: already-wired` and no run paid for a repair. |
+| `blank` | 2/3 | The line is in the live context of every turn until the scene renders: on the blank-seed brick task, 13 requests carried `THE MODEL DOES NOT RENDER YET` and the seven that followed `ensure_output_chain` returning `chainAction: created` did not. The seeded run carries it zero times. `ensure_output_chain` failed once on each sphere task with a real error — `Function 3 does not exist. Read get_model_summary for the ids.` and `Function 3 has no scalar 'shape' output…` — and the agent recovered from both. `sphere_r5` and `lego_brick_3x4` still passed; `sphere_gyroid` produced a program whose surface the bounds probe could not find, so it failed `mesh_export` instead of passing on the judge alone — exactly the old silent pass, now caught. |
 
 Before this change a blank-seed run scored 3/3 while exporting three empty meshes.
 
-On the seeded document `sphere_r5` and `sphere_gyroid` pass every run; `lego_brick_3x4` is the noisy
-one, and its failures are task quality rather than a harness regression. Five seeded lego runs after
-the gate landed: one passed (fill 0.40 — a real shell with studs and clutch tubes), one exported a
-solid block (fill 0.96), one exported a nearly solid block (fill 0.81), and two produced a program
-the harness could not measure (`set_program_snippet` output-type mismatch, and imported library
-functions left with unconnected `pos`/`height` inputs). The committed baseline lego run filled 0.66.
-A single lego failure is therefore a prompt to re-run, not a verdict; prompt cost varies over the same
-range (33 k to 148 k tokens for the same task), which is why the comparer gates pass counts first.
+The gate is not free. The eleventh tool schema raises the fixed prefix from 1 709 to 1 844 tokens per
+turn (+8 %); the system prompt itself did not grow. Everything else is turns: a seeded document is
+already wired, yet the model still calls `ensure_output_chain` once or twice per task, and each extra
+call is another turn that pays for the whole prefix. Five seeded runs after the gate landed took 24 to
+39 turns and 95 848 to 195 724 prompt tokens, against 23 turns / 79 510 tokens before it. Two follow-ups
+the profile suggests: hide `ensure_output_chain` while the scene already renders (the probe can decide
+that), and return a near-empty result for an already-wired chain so calling it costs almost nothing.
+
+On the seeded document `sphere_r5` and `sphere_gyroid` passed all five runs; `lego_brick_3x4` is the
+noisy one, and its failures are task quality rather than a harness regression. Seven seeded lego runs
+after the gate landed: two passed (fill 0.40 — a real shell with studs and clutch tubes — and 0.66,
+which is the committed baseline), three exported a block that was too solid (fill 0.81, 0.96 and 1.02:
+the model never hollowed the underside or added the clutch tubes), and two produced a program the
+harness could not measure at all (a rejected snippet left the bounds probe with no surface; imported
+library functions were left with unconnected `pos` and `height` inputs). A single lego failure is
+therefore a prompt to re-run, not a verdict; the same task has cost anything from 33 k to 148 k prompt
+tokens, which is why the comparer gates pass counts first.
 
 ## Profiling and bottleneck analysis
 
@@ -300,8 +309,8 @@ That profile drove four harness changes, each of which the same aggregates then 
 4. **Cache breakpoints are a policy, not a constant.** `tools` (cache the system prompt plus schemas)
    beats `none` and `all` on this endpoint; with `none` the LEGO task failed its geometry gates.
 
-Measured effect on the LEGO task (same endpoint, same model, `tools` breakpoints), against the
-committed baseline in `tests/baselines/agent_bench/baseline.json`:
+Measured effect on the LEGO task (same endpoint, same model, `tools` breakpoints), against the baseline
+that was committed at the time:
 
 | | baseline | current |
 | --- | --- | --- |
@@ -349,6 +358,13 @@ What it bought, on the same machine, endpoint (`strata/iq3_s`) and task set:
 Two consecutive lean runs landed within 0.3 % of each other on total prompt tokens (the
 full-surface runs spread by ~15 %): with almost nothing left in the prompt and no retries the run is
 close to deterministic, which makes the cost gates trustworthy again.
+
+That last claim did not survive the renderability gate. Five lean runs after the gate landed totalled
+95 848, 109 268, 122 049, 142 448 and 195 724 prompt tokens — a spread of 2x — while only two of them
+passed 3/3. Almost all of the spread is turn count: the local model needs 6 to 17 turns for the same
+shape, and a seeded document is wired already yet `ensure_output_chain` still gets called once or twice
+per task. The committed baseline is now one of the post-gate 3/3 runs (122 049 prompt tokens, first
+turn 1 844), so the trustworthy signals are the pass count and the per-task counters, not the total.
 
 
 Two consequences to know about before reading the report:
