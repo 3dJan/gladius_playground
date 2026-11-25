@@ -110,7 +110,7 @@
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "ENABLE_COVERAGE": "OFF",
-                "ENABLE_TRACY": "TRUE",
+                "ENABLE_TRACY": "OFF",
                 "GLADIUS_ENABLE_WEBGPU": "ON"
             }
         },
@@ -235,7 +235,7 @@
                 "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlay-ports",
                 "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-triplets",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-                "ENABLE_TRACY": "true",
+                "ENABLE_TRACY": "OFF",
                 "USE_CACHE": "true"
             }
         },
