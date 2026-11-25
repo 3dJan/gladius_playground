@@ -572,6 +572,72 @@ namespace gladius::agent::tests
                   std::string::npos);
     }
 
+    TEST(AgentLoop, Run_PausedBeforeModelTurn_WaitsThenResumes)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        bool finished = false;
+        registry.registerSyncTool(
+          {"finish_design", "Finish", {{"type", "object"}}, tools::ToolPolicy::DesignGraphModification},
+          [&](nlohmann::json const &) {
+              finished = true;
+              return nlohmann::json{{"success", true}};
+          });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(CompletionResponse{
+          "Finishing now",
+          {ToolCall{"c1", "finish_design", nlohmann::json::object()}},
+          "tool_calls",
+          true,
+          ""});
+
+        Conversation conv;
+        conv.appendUserText("Design a lamp");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentRunControl runControl;
+        AgentLoop loop;
+        runControl.requestPause();
+
+        // Act: the run is started while paused, so it must not reach the model yet.
+        AgentRunResult res;
+        std::thread runner(
+          [&]()
+          {
+              res = coro::sync_wait(loop.run(
+                conv,
+                provider,
+                registry,
+                executor,
+                ctxBuilder,
+                policy,
+                queue,
+                limits,
+                cancel,
+                [&]() { return finished; },
+                nullptr,
+                nullptr,
+                nullptr,
+                &runControl));
+          });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        EXPECT_TRUE(provider.capturedRequests.empty());
+
+        runControl.resume();
+        runner.join();
+
+        // Assert
+        EXPECT_TRUE(res.completed);
+        EXPECT_TRUE(finished);
+        EXPECT_FALSE(provider.capturedRequests.empty());
+    }
+
     TEST(SkillLoader, BuiltInSkills_ContainsModelingAndLibraryReuse)
     {
         SkillLoader loader;

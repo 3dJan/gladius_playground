@@ -1,0 +1,826 @@
+// UI half of the Design Agent: the single consolidated panel, its persistent footer, and the
+// collapsible diagnostics. State, run control, and persistence stay in AgentPanels.cpp.
+
+#include "AgentPanels.h"
+
+#include "AgentWorkflow.h"
+#include "AgentWorkflowAnimation.h"
+#include "AgentWorkflowView.h"
+#include "ClipboardImageHelper.h"
+#include "WorkflowArtifacts.h"
+
+#include "../Document.h"
+
+#include <IconsFontAwesome5.h>
+#include <imgui.h>
+#include <tinyfiledialogs/tinyfiledialogs.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+namespace gladius::ui
+{
+    namespace
+    {
+        ImVec4 colorOk()
+        {
+            return {0.40f, 0.82f, 0.46f, 1.f};
+        }
+
+        ImVec4 colorWarn()
+        {
+            return {1.00f, 0.72f, 0.32f, 1.f};
+        }
+
+        ImVec4 colorInfo()
+        {
+            return {0.40f, 0.82f, 0.98f, 1.f};
+        }
+    } // namespace
+
+    WorkflowSignals AgentPanels::workflowSignals() const
+    {
+        WorkflowSignals signals;
+        signals.running = m_running.load();
+        signals.agentFailed = !m_lastError.empty();
+        signals.planningBlocked = hasBlockedPlanning(m_todos);
+        std::size_t passed = 0;
+        countDeterministicResults(m_graph, passed, signals.deterministicWarnings);
+        return signals;
+    }
+
+    std::string AgentPanels::phaseSummary(std::size_t index) const
+    {
+        if (index == indexOf(WorkflowPhase::Understand))
+        {
+            std::size_t const hard = static_cast<std::size_t>(
+              std::count_if(m_graph.requirements().begin(),
+                            m_graph.requirements().end(),
+                            [](design::Requirement const & r) { return r.mandatory; }));
+            std::size_t const soft = m_graph.requirements().size() - hard;
+            if (m_graph.requirements().empty())
+            {
+                return "Nothing captured yet";
+            }
+            return std::to_string(hard) + " constraints, " + std::to_string(soft) + " preferences";
+        }
+        if (index == indexOf(WorkflowPhase::Decompose))
+        {
+            if (m_graph.nodes().empty())
+            {
+                return "Not decomposed yet";
+            }
+            return std::to_string(m_graph.nodes().size()) + " elements";
+        }
+        if (index == indexOf(WorkflowPhase::Explore))
+        {
+            std::size_t ready = 0;
+            std::size_t rejected = 0;
+            for (auto const & [id, variant] : m_graph.variants())
+            {
+                (void) id;
+                (variant.status == design::DesignStatus::Rejected ? rejected : ready)++;
+            }
+            if (m_graph.variants().empty())
+            {
+                return "No alternatives generated yet";
+            }
+            std::string text = std::to_string(ready) + " alternatives ready";
+            if (rejected > 0)
+            {
+                text += ", " + std::to_string(rejected) + " rejected";
+            }
+            return text;
+        }
+        if (index == indexOf(WorkflowPhase::Develop))
+        {
+            std::size_t const done = static_cast<std::size_t>(
+              std::count_if(m_todos.items().begin(),
+                            m_todos.items().end(),
+                            [](design::TodoItem const & t) {
+                                return t.status == design::TodoStatus::Done;
+                            }));
+            if (m_todos.items().empty())
+            {
+                return "No planning tasks yet";
+            }
+            return std::to_string(done) + " of " + std::to_string(m_todos.items().size())
+                   + " tasks complete";
+        }
+
+        std::size_t passed = 0;
+        std::size_t warnings = 0;
+        countDeterministicResults(m_graph, passed, warnings);
+        if (isDesignComplete(m_graph))
+        {
+            return "Design finished - " + std::to_string(passed) + " checks measured";
+        }
+        if (passed + warnings == 0)
+        {
+            return "Nothing measured yet";
+        }
+        return std::to_string(passed) + " measured ok, " + std::to_string(warnings) + " warnings";
+    }
+
+    void AgentPanels::render()
+    {
+        if (!m_visible)
+        {
+            return;
+        }
+        drainEvents();
+        renderWorkflowPanel();
+        if (m_showSettings)
+        {
+            renderProviderSettingsPanel();
+        }
+    }
+
+    void AgentPanels::renderWorkflowPanel()
+    {
+        ImGuiViewport const * vp = ImGui::GetMainViewport();
+        float const panelWidth = std::clamp(vp->WorkSize.x * 0.30f, 360.f, 520.f);
+        ImGui::SetNextWindowPos(
+          ImVec2(vp->WorkPos.x + vp->WorkSize.x - panelWidth, vp->WorkPos.y),
+          ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(panelWidth, vp->WorkSize.y), ImGuiCond_FirstUseEver);
+
+        if (!ImGui::Begin("Design Agent", &m_visible))
+        {
+            ImGui::End();
+            return;
+        }
+
+        WorkflowSignals const signals = workflowSignals();
+        auto const states = derivePhaseStates(m_graph, signals);
+        std::size_t const activeIndex = indexOf(activePhaseOf(m_graph));
+
+        float const nowSeconds = static_cast<float>(ImGui::GetTime());
+        if (m_lastActivePhaseIndex != activeIndex)
+        {
+            // Reaching a new phase expands it: the user always sees what the agent is doing now.
+            m_phaseExpanded[activeIndex] = true;
+            if (m_lastActivePhaseIndex < kWorkflowPhaseCount)
+            {
+                m_phaseExpanded[m_lastActivePhaseIndex] = false;
+            }
+            m_lastActivePhaseIndex = activeIndex;
+        }
+        m_workflowAnimation.update(activeIndex, states, nowSeconds);
+
+        std::array<std::string, kWorkflowPhaseCount> summaries;
+        for (std::size_t i = 0; i < kWorkflowPhaseCount; ++i)
+        {
+            summaries[i] = phaseSummary(i);
+        }
+
+        m_artifacts.activeToolName = m_activeToolName;
+        std::array<AgentWorkflowView::ArtifactRenderer, kWorkflowPhaseCount> const renderers = {
+          [this]() { m_artifacts.renderUnderstand(m_workflowAnimation); },
+          [this]() { m_artifacts.renderDecompose(m_workflowAnimation); },
+          [this]() { m_artifacts.renderExplore(m_workflowAnimation); },
+          [this]() { m_artifacts.renderDevelop(m_workflowAnimation); },
+          [this]() { m_artifacts.renderValidate(m_workflowAnimation); }};
+
+        float const footerHeight = measureFooterHeight();
+        ImGui::BeginChild("WorkflowScroll", ImVec2(0.f, -footerHeight), true);
+        m_workflowView.render(states, activeIndex, summaries, m_phaseExpanded, renderers,
+                              m_workflowAnimation);
+        ImGui::Spacing();
+        ImGui::Separator();
+        renderConversationSection();
+        renderDiagnosticsSection();
+        ImGui::EndChild();
+
+        renderFooter();
+        ImGui::End();
+    }
+
+    void AgentPanels::renderConversationSection()
+    {
+        // The design state above is the primary record; the transcript stays short and readable.
+        bool const anyText = std::any_of(
+          m_conversation.messages().begin(),
+          m_conversation.messages().end(),
+          [](agent::Message const & msg) {
+              return std::any_of(msg.parts.begin(),
+                                 msg.parts.end(),
+                                 [](agent::Content const & part) {
+                                     return std::holds_alternative<agent::TextContent>(part);
+                                 });
+          });
+        if (!anyText)
+        {
+            return;
+        }
+        if (!ImGui::CollapsingHeader("Conversation"))
+        {
+            return;
+        }
+        for (auto const & msg : m_conversation.messages())
+        {
+            char const * role = msg.role == agent::MessageRole::Assistant
+                                  ? "Agent"
+                                  : (msg.role == agent::MessageRole::Tool ? "Tool" : "You");
+            if (msg.role == agent::MessageRole::Tool && !m_showDeveloperTrace)
+            {
+                continue;
+            }
+            for (auto const & part : msg.parts)
+            {
+                if (auto const * text = std::get_if<agent::TextContent>(&part))
+                {
+                    ImGui::TextWrapped("[%s] %s", role, text->text.c_str());
+                }
+                else if (std::holds_alternative<agent::ImageContent>(part))
+                {
+                    ImGui::TextDisabled("[image attached]");
+                }
+            }
+        }
+    }
+
+    void AgentPanels::renderDiagnosticsSection()
+    {
+        if (!m_activityLog.empty()
+            && ImGui::CollapsingHeader(("Activity log (" + std::to_string(m_activityLog.size())
+                                        + " steps)").c_str()))
+        {
+            for (std::size_t idx = 0; idx < m_activityLog.size(); ++idx)
+            {
+                auto const & entry = m_activityLog[idx];
+                ImGui::PushID(static_cast<int>(idx));
+                ImGui::TextColored(entry.success ? colorInfo() : colorWarn(),
+                                   "%s",
+                                   entry.label.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Copy"))
+                {
+                    std::string const text = entry.label + "\n" + entry.detail;
+                    ImGui::SetClipboardText(text.c_str());
+                }
+                if (m_showDeveloperTrace && !entry.detail.empty())
+                {
+                    std::string detail = entry.detail;
+                    ImGui::PushID("detail");
+                    ImGui::InputTextMultiline("##detail",
+                                              detail.data(),
+                                              detail.size() + 1,
+                                              ImVec2(-1.f, ImGui::GetTextLineHeight() * 4.f),
+                                              ImGuiInputTextFlags_ReadOnly);
+                    ImGui::PopID();
+                }
+                ImGui::PopID();
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Developer diagnostics"))
+        {
+            ImGui::Checkbox("Developer trace", &m_showDeveloperTrace);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy trace"))
+            {
+                ImGui::SetClipboardText(buildDeveloperTrace().c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear log"))
+            {
+                m_activityLog.clear();
+            }
+
+            ImGui::Text("Model: %s",
+                        m_primarySelection.profileId.empty()
+                          ? "not selected"
+                          : (m_primarySelection.profileId + " / " + m_primarySelection.model).c_str());
+            ImGui::Text("Fallbacks: %zu | Phase: %s",
+                        m_fallbackSelections.size(),
+                        design::toString(m_graph.phase()));
+            if (m_modelFetchRunning.load())
+            {
+                ImGui::TextDisabled("Querying provider models...");
+            }
+            if (!m_credentialWarning.empty())
+            {
+                ImGui::TextColored(colorWarn(), "%s", m_credentialWarning.c_str());
+            }
+            if (!m_lastError.empty())
+            {
+                ImGui::TextColored(colorWarn(), "Last error: %s", m_lastError.c_str());
+            }
+            if (!m_streamingBuffer.empty())
+            {
+                ImGui::TextDisabled("Streaming: %s", m_streamingBuffer.c_str());
+            }
+
+            if (m_showDeveloperTrace)
+            {
+                for (auto const & msg : m_conversation.messages())
+                {
+                    for (auto const & part : msg.parts)
+                    {
+                        if (auto const * tc = std::get_if<agent::ToolCall>(&part))
+                        {
+                            ImGui::TextWrapped("[ToolCall] %s %s",
+                                               tc->name.c_str(),
+                                               tc->arguments.dump().c_str());
+                        }
+                        else if (auto const * tr = std::get_if<agent::ToolResult>(&part))
+                        {
+                            ImGui::TextWrapped("[ToolResult] %s", tr->value.dump().c_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::string AgentPanels::buildDeveloperTrace() const
+    {
+        std::string trace;
+        for (auto const & entry : m_activityLog)
+        {
+            trace += entry.label + "\n";
+            if (!entry.detail.empty())
+            {
+                trace += entry.detail + "\n";
+            }
+        }
+        for (auto const & msg : m_conversation.messages())
+        {
+            char const * role = msg.role == agent::MessageRole::Assistant
+                                  ? "Agent"
+                                  : (msg.role == agent::MessageRole::Tool ? "Tool" : "User");
+            for (auto const & part : msg.parts)
+            {
+                if (auto const * t = std::get_if<agent::TextContent>(&part))
+                {
+                    trace += std::string("[") + role + "] " + t->text + "\n";
+                }
+                else if (auto const * tc = std::get_if<agent::ToolCall>(&part))
+                {
+                    trace += "[ToolCall] " + tc->name + ": " + tc->arguments.dump() + "\n";
+                }
+                else if (auto const * tr = std::get_if<agent::ToolResult>(&part))
+                {
+                    trace += "[ToolResult] " + tr->callId + ": " + tr->value.dump() + "\n";
+                }
+            }
+        }
+        if (!m_lastError.empty())
+        {
+            trace += "[Error] " + m_lastError + "\n";
+        }
+        return trace;
+    }
+
+    float AgentPanels::measureFooterHeight() const
+    {
+        float const baseFooterHeight = m_pendingImages.empty() ? 152.f : 206.f;
+        constexpr float workflowMinHeight = 120.f;
+        float const promptWidth = m_prompt.inlineFieldWidth();
+        float const availableHeight =
+          std::max(0.f, ImGui::GetContentRegionAvail().y - workflowMinHeight);
+        float const promptHeightLimit =
+          std::max(0.f, availableHeight - (baseFooterHeight - m_prompt.config().minHeight));
+        float const promptHeight = m_prompt.measureInlineHeight(promptWidth, promptHeightLimit);
+        return baseFooterHeight - m_prompt.config().minHeight + promptHeight
+               + ImGui::GetTextLineHeightWithSpacing();
+    }
+
+    void AgentPanels::renderFooter()
+    {
+        bool const running = m_running.load();
+        bool const paused = m_runControl.isPaused();
+        bool awaiting = false;
+        {
+            std::lock_guard<std::mutex> lock(m_confirmMutex);
+            awaiting = m_awaitingConfirmation && !m_confirmationResolved;
+        }
+
+        // Status line: meaningful operation names, never a bare elapsed-time spinner.
+        if (running && paused)
+        {
+            ImGui::TextColored(colorWarn(), "Paused - press Resume to continue");
+        }
+        else if (running)
+        {
+            char const * spinner[] = {"|", "/", "-", "\\"};
+            int const frame = static_cast<int>(ImGui::GetTime() * 6.0) % 4;
+            if (!m_activeToolName.empty())
+            {
+                ImGui::TextColored(colorInfo(),
+                                   "%s Running %s",
+                                   spinner[frame],
+                                   humaniseToolName(m_activeToolName).c_str());
+            }
+            else
+            {
+                ImGui::TextColored(colorInfo(), "%s Waiting for the model", spinner[frame]);
+            }
+        }
+        else if (awaiting)
+        {
+            ImGui::TextColored(colorWarn(), "Action required: approve or decline below");
+        }
+        else if (isDesignComplete(m_graph))
+        {
+            ImGui::TextColored(colorOk(), "Design complete");
+        }
+        else if (!m_conversation.empty())
+        {
+            ImGui::TextColored(colorInfo(), "Waiting for your instruction");
+        }
+        else
+        {
+            ImGui::TextDisabled("Describe what you want to design");
+        }
+
+        if (running)
+        {
+            if (paused)
+            {
+                if (ImGui::Button("Resume"))
+                {
+                    m_runControl.resume();
+                }
+            }
+            else if (ImGui::Button("Pause"))
+            {
+                m_runControl.requestPause();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Stop"))
+            {
+                stopRun();
+            }
+        }
+        else if (ImGui::Button("Clear session"))
+        {
+            m_conversation.clear();
+            m_activityLog.clear();
+            m_lastError.clear();
+            m_streamingBuffer.clear();
+            m_workflowAnimation.reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Settings"))
+        {
+            m_showSettings = !m_showSettings;
+        }
+
+        if (awaiting)
+        {
+            std::lock_guard<std::mutex> lock(m_confirmMutex);
+            ImGui::TextWrapped("%s", m_pendingConfirmPrompt.c_str());
+            if (ImGui::Button("Approve"))
+            {
+                m_confirmationApproved = true;
+                m_confirmationResolved = true;
+                m_confirmCv.notify_all();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Decline"))
+            {
+                m_confirmationApproved = false;
+                m_confirmationResolved = true;
+                m_confirmCv.notify_all();
+            }
+        }
+
+        if (ImGui::Button(reinterpret_cast<char const *>(ICON_FA_IMAGE " Attach Image")))
+        {
+            char const * filters[] = {"*.png", "*.jpg", "*.jpeg"};
+            char const * selected =
+              tinyfd_openFileDialog("Attach Reference Image", "", 3, filters, "Image files", 0);
+            if (selected != nullptr)
+            {
+                (void) attachImageFile(selected);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Paste Image"))
+        {
+            attachClipboardImage();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Insert Image to Document"))
+        {
+            insertClipboardOrFileImageIntoDocument();
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Start fresh", &m_startFresh);
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+              "Clear current model & history on next prompt (auto-unchecks after first prompt)");
+        }
+
+        renderPendingAttachments();
+
+        float const promptWidth = m_prompt.inlineFieldWidth();
+        float const footerHeight = measureFooterHeight();
+        float const promptHeight = footerHeight - (m_pendingImages.empty() ? 152.f : 206.f)
+                                   + m_prompt.config().minHeight;
+        PromptInput::RenderResult const promptResult =
+          m_prompt.renderInline("agentPrompt", "Send", promptWidth, promptHeight, !running);
+        if (m_prompt.isFocused())
+        {
+            ImGuiIO const & io = ImGui::GetIO();
+            if ((io.KeyCtrl || io.KeySuper) && ImGui::IsKeyPressed(ImGuiKey_V, false))
+            {
+                attachClipboardImage();
+            }
+        }
+        if (promptResult.sendRequested)
+        {
+            startRun(m_prompt.consumeDraft());
+        }
+        if (auto const expanded = m_prompt.renderExpandedWindow(!running); expanded)
+        {
+            if (expanded->sendRequested)
+            {
+                startRun(m_prompt.consumeDraft());
+            }
+        }
+
+        renderModelSelection();
+    }
+
+    void AgentPanels::attachClipboardImage()
+    {
+        auto clip = ClipboardImageHelper::readClipboardImage();
+        if (!clip.success || clip.pngBytes.empty())
+        {
+            return;
+        }
+        std::string const key = "att_" + std::to_string(m_nextAttachmentId++);
+        m_pendingImages.push_back(PendingImageAttachment{
+          std::move(clip.filename), std::move(clip.pngBytes), std::move(clip.mimeType), "", key});
+    }
+
+    void AgentPanels::insertClipboardOrFileImageIntoDocument()
+    {
+        if (m_document == nullptr)
+        {
+            return;
+        }
+        char const * filters[] = {"*.png", "*.jpg", "*.jpeg"};
+        char const * selected =
+          tinyfd_openFileDialog("Insert Image Into 3MF Document", "", 3, filters, "Image files", 0);
+        if (selected == nullptr)
+        {
+            return;
+        }
+        try
+        {
+            (void) m_document->addImageStackResource(selected);
+            m_document->markFileAsChanged();
+            if (m_onDocumentModified)
+            {
+                m_onDocumentModified();
+            }
+        }
+        catch (std::exception const & ex)
+        {
+            m_lastError = std::string("Failed to insert image: ") + ex.what();
+        }
+    }
+
+    void AgentPanels::renderPendingAttachments()
+    {
+        for (std::size_t i = 0; i < m_pendingImages.size(); ++i)
+        {
+            if (i > 0)
+            {
+                ImGui::SameLine();
+            }
+            ImGui::PushID(static_cast<int>(i));
+            auto & att = m_pendingImages[i];
+            if (att.previewKey.empty())
+            {
+                att.previewKey = "att_" + std::to_string(m_nextAttachmentId++);
+            }
+            int w = 0;
+            int h = 0;
+            unsigned int const texId = getOrCreatePreviewTexture(att.previewKey, att.bytes, w, h);
+            float const thumb = ImGui::GetFontSize() * 1.7f;
+            if (texId != 0u)
+            {
+                if (ImGui::ImageButton("##thumb",
+                                       static_cast<ImTextureID>(static_cast<std::uintptr_t>(texId)),
+                                       ImVec2(thumb, thumb)))
+                {
+                    m_inspectedImageIndex = static_cast<int>(i);
+                    ImGui::OpenPopup("AttachedImageModal");
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip("%s\nClick to enlarge & add comment%s",
+                                      att.filename.c_str(),
+                                      att.comment.empty()
+                                        ? ""
+                                        : ("\nComment: " + att.comment).c_str());
+                }
+            }
+            else if (ImGui::SmallButton(att.filename.c_str()))
+            {
+                m_inspectedImageIndex = static_cast<int>(i);
+                ImGui::OpenPopup("AttachedImageModal");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x"))
+            {
+                if (m_inspectedImageIndex == static_cast<int>(i))
+                {
+                    m_inspectedImageIndex = -1;
+                }
+                m_pendingImages.erase(m_pendingImages.begin() + static_cast<long>(i));
+                ImGui::PopID();
+                break;
+            }
+            ImGui::PopID();
+        }
+
+        if (ImGui::BeginPopup("AttachedImageModal"))
+        {
+            if (m_inspectedImageIndex >= 0
+                && static_cast<std::size_t>(m_inspectedImageIndex) < m_pendingImages.size())
+            {
+                auto & att = m_pendingImages[static_cast<std::size_t>(m_inspectedImageIndex)];
+                ImGui::Text("File: %s (%zu bytes, %s)",
+                            att.filename.c_str(),
+                            att.bytes.size(),
+                            att.mimeType.c_str());
+                int w = 0;
+                int h = 0;
+                unsigned int const texId = getOrCreatePreviewTexture(att.previewKey, att.bytes, w, h);
+                if (texId != 0u && w > 0 && h > 0)
+                {
+                    float const maxDim = 280.f;
+                    float const scale = std::min(maxDim / static_cast<float>(w),
+                                                 maxDim / static_cast<float>(h));
+                    ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(texId)),
+                                 ImVec2(static_cast<float>(w) * scale,
+                                        static_cast<float>(h) * scale));
+                }
+                char commentBuf[512];
+                std::snprintf(commentBuf, sizeof(commentBuf), "%s", att.comment.c_str());
+                if (ImGui::InputText("Comment / Feedback", commentBuf, sizeof(commentBuf)))
+                {
+                    att.comment = commentBuf;
+                }
+                if (ImGui::Button("Close"))
+                {
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            else
+            {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    void AgentPanels::renderModelSelection()
+    {
+        std::vector<agent::ModelSelection> allChoices;
+        std::vector<std::string> allLabels;
+        for (auto const & prof : m_providerProfiles)
+        {
+            for (auto const & mdl : prof.models)
+            {
+                if (!prof.isModelAvailable(mdl))
+                {
+                    continue;
+                }
+                allChoices.push_back(agent::ModelSelection{prof.id, mdl});
+                allLabels.push_back(prof.name + " / " + mdl);
+            }
+        }
+        if (allChoices.empty())
+        {
+            if (ImGui::Button("No available models - Configure Providers"))
+            {
+                m_showSettings = true;
+            }
+            return;
+        }
+
+        std::string primaryLabel = "Select model...";
+        for (std::size_t i = 0; i < allChoices.size(); ++i)
+        {
+            if (allChoices[i] == m_primarySelection)
+            {
+                primaryLabel = allLabels[i];
+                break;
+            }
+        }
+
+        auto showModelTooltip = [&](agent::ModelSelection const & sel) {
+            if (!ImGui::IsItemHovered())
+            {
+                return;
+            }
+            for (auto const & prof : m_providerProfiles)
+            {
+                if (prof.id != sel.profileId)
+                {
+                    continue;
+                }
+                auto mit = prof.modelMetadata.find(sel.model);
+                if (mit != prof.modelMetadata.end())
+                {
+                    auto const & meta = mit->second;
+                    std::string ctxStr = meta.contextLength > 0
+                                           ? (std::to_string(meta.contextLength / 1000) + "k ctx")
+                                           : "Context unknown";
+                    ImGui::SetTooltip("Price: %s\nContext: %s\nVision: %s",
+                                      meta.formatPriceSummary().c_str(),
+                                      ctxStr.c_str(),
+                                      meta.supportsVision ? "Yes" : "No");
+                }
+                else if (agent::isLocalEndpoint(prof.endpoint))
+                {
+                    ImGui::SetTooltip("Local model (free / no API cost)");
+                }
+                else
+                {
+                    ImGui::SetTooltip("Provider: %s\nPrice info not queried", prof.name.c_str());
+                }
+                break;
+            }
+        };
+
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.48f);
+        if (ImGui::BeginCombo("##PrimaryModel", primaryLabel.c_str()))
+        {
+            for (std::size_t i = 0; i < allChoices.size(); ++i)
+            {
+                bool const selected = allChoices[i] == m_primarySelection;
+                if (ImGui::Selectable(allLabels[i].c_str(), selected))
+                {
+                    m_primarySelection = allChoices[i];
+                    saveSettings();
+                }
+                showModelTooltip(allChoices[i]);
+                if (selected)
+                {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        showModelTooltip(m_primarySelection);
+        ImGui::SameLine();
+        std::string const fbPreview = m_fallbackSelections.empty()
+                                        ? "Fallbacks: None"
+                                        : ("Fallbacks: " + std::to_string(m_fallbackSelections.size()));
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::BeginCombo("##FallbackModels", fbPreview.c_str()))
+        {
+            for (std::size_t i = 0; i < allChoices.size(); ++i)
+            {
+                auto it = std::find(
+                  m_fallbackSelections.begin(), m_fallbackSelections.end(), allChoices[i]);
+                bool checked = it != m_fallbackSelections.end();
+                if (ImGui::Checkbox(allLabels[i].c_str(), &checked))
+                {
+                    if (checked && it == m_fallbackSelections.end())
+                    {
+                        m_fallbackSelections.push_back(allChoices[i]);
+                    }
+                    else if (!checked && it != m_fallbackSelections.end())
+                    {
+                        m_fallbackSelections.erase(it);
+                    }
+                    saveSettings();
+                }
+                showModelTooltip(allChoices[i]);
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    std::string AgentPanels::humaniseToolName(std::string const & toolName)
+    {
+        // Tool ids are snake_case; the status line should read like an operation, not an identifier.
+        std::string out;
+        bool atWordStart = true;
+        for (char c : toolName)
+        {
+            if (c == '_')
+            {
+                atWordStart = true;
+                out += ' ';
+                continue;
+            }
+            out += atWordStart ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : c;
+            atWordStart = false;
+        }
+        return out;
+    }
+} // namespace gladius::ui

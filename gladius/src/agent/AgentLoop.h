@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AgentEvent.h"
+#include "AgentRunControl.h"
 #include "ContextBuilder.h"
 #include "Conversation.h"
 #include "PermissionPolicy.h"
@@ -67,6 +68,7 @@ namespace gladius::agent
           CompletionPredicate isDesignComplete = nullptr,
           ConfirmationCallback confirmCallback = nullptr,
           SnapshotProvider snapshotProvider = nullptr,
-          trace::AgentTraceRecorder * traceRecorder = nullptr);
+          trace::AgentTraceRecorder * traceRecorder = nullptr,
+          AgentRunControl * runControl = nullptr);
     };
 } // namespace gladius::agent

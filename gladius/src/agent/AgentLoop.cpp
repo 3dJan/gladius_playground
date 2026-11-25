@@ -115,7 +115,8 @@ namespace gladius::agent
                                               CompletionPredicate isDesignComplete,
                                               ConfirmationCallback confirmCallback,
                                               SnapshotProvider snapshotProvider,
-                                              trace::AgentTraceRecorder * traceRecorder)
+                                              trace::AgentTraceRecorder * traceRecorder,
+                                              AgentRunControl * runControl)
     {
         AgentRunResult result;
         auto const startTime = std::chrono::steady_clock::now();
@@ -135,6 +136,13 @@ namespace gladius::agent
         while (limits.maxModelTurns <= 0
                || result.modelTurns < static_cast<std::size_t>(limits.maxModelTurns))
         {
+            // Pause is cooperative: it takes effect between turns and between tool calls, never
+            // in the middle of a tool that is already mutating the document.
+            if (runControl != nullptr)
+            {
+                co_await runControl->waitForResume(cancellation);
+            }
+
             if (cancellation.isCancelled())
             {
                 result.cancelled = true;
@@ -239,6 +247,18 @@ namespace gladius::agent
 
             for (auto const & call : response.toolCalls)
             {
+                if (runControl != nullptr)
+                {
+                    co_await runControl->waitForResume(cancellation);
+                }
+                if (cancellation.isCancelled())
+                {
+                    result.cancelled = true;
+                    result.error = "Agent run cancelled";
+                    eventQueue.push(AgentFailedEvent{result.error});
+                    co_return result;
+                }
+
                 if (result.toolCalls >= limits.maxToolCalls)
                 {
                     result.error = "Maximum tool-call limit reached";

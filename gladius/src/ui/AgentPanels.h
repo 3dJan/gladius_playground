@@ -2,6 +2,7 @@
 
 #include "../agent/AgentEvent.h"
 #include "../agent/AgentLoop.h"
+#include "../agent/AgentRunControl.h"
 #include "../agent/ContextBuilder.h"
 #include "../agent/Conversation.h"
 #include "../agent/CredentialStore.h"
@@ -21,8 +22,13 @@
 #include "../tools/ToolRegistry.h"
 #include "../tools/TransactionManager.h"
 #include "PromptInput.h"
+#include "AgentWorkflow.h"
+#include "AgentWorkflowAnimation.h"
+#include "AgentWorkflowView.h"
+#include "WorkflowArtifacts.h"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <coro/coro.hpp>
@@ -93,7 +99,7 @@ namespace gladius::ui
         void onDocumentSaved(std::filesystem::path const & docPath);
         void onDocumentOpened(std::filesystem::path const & docPath);
 
-        /// @brief Render all visible agent, design-tree, variant-comparison, and settings panels
+        /// @brief Render the design agent workflow panel and the provider settings panel
         void render();
 
       private:
@@ -136,9 +142,21 @@ namespace gladius::ui
                                                int & outW,
                                                int & outH);
 
-        void renderChatPanel();
-        void renderDesignTreePanel();
-        void renderVariantComparisonPanel();
+        // --- Workflow panel ---
+        [[nodiscard]] WorkflowSignals workflowSignals() const;
+        [[nodiscard]] std::string phaseSummary(std::size_t index) const;
+        void renderWorkflowPanel();
+        void renderConversationSection();
+        void renderDiagnosticsSection();
+        [[nodiscard]] std::string buildDeveloperTrace() const;
+        [[nodiscard]] float measureFooterHeight() const;
+        void renderFooter();
+        void attachClipboardImage();
+        void insertClipboardOrFileImageIntoDocument();
+        void renderPendingAttachments();
+        void renderModelSelection();
+        [[nodiscard]] static std::string humaniseToolName(std::string const & toolName);
+
         void renderProviderSettingsPanel();
         void startModelFetch(std::string const & profileId,
                              bool freeOnly = false,
@@ -158,7 +176,6 @@ namespace gladius::ui
         bool m_visible = false;
         bool m_showSettings = false;
         bool m_showDeveloperTrace = false;
-
         Document * m_document = nullptr;
         ConfigManager * m_configManager = nullptr;
         std::function<void()> m_onDocumentModified;
@@ -182,6 +199,14 @@ namespace gladius::ui
         agent::KnowledgeStore m_knowledge;
         agent::SkillLoader m_skills;
         io::CancellationToken m_cancellation;
+        agent::AgentRunControl m_runControl;
+
+        // Workflow rail presentation (never holds authoritative state)
+        AgentWorkflowView m_workflowView;
+        AgentWorkflowAnimationState m_workflowAnimation;
+        WorkflowArtifacts m_artifacts;
+        std::array<bool, kWorkflowPhaseCount> m_phaseExpanded{};
+        std::size_t m_lastActivePhaseIndex = kWorkflowPhaseCount;
 
         bool m_startFresh = true;
         bool m_documentSeededByCaller = false;
@@ -192,7 +217,6 @@ namespace gladius::ui
         int m_editingProfileIndex = 0;
         agent::ModelSelection m_primarySelection;
         std::vector<agent::ModelSelection> m_fallbackSelections;
-        std::vector<std::string> m_selectedRecombineConfigs;
 
         int m_providerIndex = 0; // legacy fallback
         char m_endpointBuf[512] = "";
@@ -212,9 +236,6 @@ namespace gladius::ui
         char m_modelFilterBuf[128] = "";
         std::string m_credentialWarning;
         PromptInput m_prompt;
-        char m_newReqBuf[256] = "";
-        char m_newReqCatBuf[64] = "functional";
-        bool m_newReqMandatory = true;
         std::size_t m_nextAttachmentId = 1;
 
         std::string m_streamingBuffer;
