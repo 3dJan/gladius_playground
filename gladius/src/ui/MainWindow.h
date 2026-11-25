@@ -255,6 +255,13 @@ namespace gladius::ui
         void updateContours();
         void close();
         void open();
+
+        /**
+         * @brief Routes a file dropped onto the viewport to the agent panels or the model
+         * @param path Dropped file
+         * @param screenPos Drop position, used by the STL import
+         */
+        void handleFileDrop(std::filesystem::path const & path, ImVec2 screenPos);
     #ifdef __EMSCRIPTEN__
         void requestBrowserFileOpen();
     #endif

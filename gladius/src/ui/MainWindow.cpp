@@ -211,32 +211,8 @@ namespace gladius::ui
         nodeEditor();
 
         m_mainView.setFileDropCallback(
-          [&](std::filesystem::path const & path, ImVec2 screenPos)
-          {
-              std::string ext = path.extension().string();
-              std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
-                  return static_cast<char>(std::tolower(c));
-              });
-              if (m_agentPanels.isVisible()
-                  && (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp"))
-              {
-                  (void) m_agentPanels.attachImageFile(path);
-                  return;
-              }
-              if (m_agentPanels.isDocumentLocked())
-              {
-                  return;
-              }
-              if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
-                  !m_doc->isLoadingInProgress())
-              {
-                  m_modelEditor.importStlDrop(path, screenPos);
-              }
-              else
-              {
-                  open(path);
-              }
-          });
+          [this](std::filesystem::path const & path, ImVec2 screenPos)
+          { handleFileDrop(path, screenPos); });
 
         // Set up welcome screen callbacks
         m_welcomeScreen.setNewModelCallback(
@@ -676,32 +652,8 @@ namespace gladius::ui
         m_mainView.setRenderCallback(m_renderCallback);
         m_mainView.addViewCallBack([&]() { render(); });
         m_mainView.setFileDropCallback(
-          [&](std::filesystem::path const & path, ImVec2 screenPos)
-          {
-              std::string ext = path.extension().string();
-              std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
-                  return static_cast<char>(std::tolower(c));
-              });
-              if (m_agentPanels.isVisible()
-                  && (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp"))
-              {
-                  (void) m_agentPanels.attachImageFile(path);
-                  return;
-              }
-              if (m_agentPanels.isDocumentLocked())
-              {
-                  return;
-              }
-              if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
-                  !m_doc->isLoadingInProgress())
-              {
-                  m_modelEditor.importStlDrop(path, screenPos);
-              }
-              else
-              {
-                  open(path);
-              }
-          });
+          [this](std::filesystem::path const & path, ImVec2 screenPos)
+          { handleFileDrop(path, screenPos); });
 
         // Start asynchronous initialization of the selected backend.
         startAsyncComputeInit();
@@ -2762,6 +2714,38 @@ namespace gladius::ui
         }
 
         loadFileDeferred(filename);
+    }
+
+    void MainWindow::handleFileDrop(std::filesystem::path const & path, ImVec2 screenPos)
+    {
+        std::string ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (m_agentPanels.isVisible()
+            && (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp"))
+        {
+            (void) m_agentPanels.attachImageFile(path);
+            return;
+        }
+        if (m_agentPanels.isVisible() && PromptInput::isSupportedTextFile(path))
+        {
+            (void) m_agentPanels.attachPromptTextFile(path);
+            return;
+        }
+        if (m_agentPanels.isDocumentLocked())
+        {
+            return;
+        }
+        if (path.extension() == ".stl" && m_doc && m_modelEditor.isVisible() &&
+            !m_doc->isLoadingInProgress())
+        {
+            m_modelEditor.importStlDrop(path, screenPos);
+        }
+        else
+        {
+            open(path);
+        }
     }
 
 #ifdef __EMSCRIPTEN__

@@ -20,6 +20,7 @@
 #include "../tools/ToolExecutor.h"
 #include "../tools/ToolRegistry.h"
 #include "../tools/TransactionManager.h"
+#include "PromptInput.h"
 
 #include <atomic>
 #include <chrono>
@@ -79,6 +80,9 @@ namespace gladius::ui
 
         /// @brief Attach an image file (e.g. from drag-and-drop) to the pending prompt attachments
         bool attachImageFile(std::filesystem::path const & path);
+
+        /// @brief Append a dropped .txt/.md instruction file to the prompt draft
+        bool attachPromptTextFile(std::filesystem::path const & path);
 
         /// @brief Save/load agent state associated with the given .3mf document (sidecar/session)
         void saveSessionState();
@@ -182,7 +186,6 @@ namespace gladius::ui
         bool m_startFresh = true;
         bool m_documentSeededByCaller = false;
         bool m_followUpRequest = false;
-        bool m_promptFocused = false;
         int m_inspectedImageIndex = -1;
 
         std::vector<agent::ProviderProfile> m_providerProfiles;
@@ -208,7 +211,7 @@ namespace gladius::ui
         std::vector<agent::ModelMetadata> m_queriedModels;
         char m_modelFilterBuf[128] = "";
         std::string m_credentialWarning;
-        char m_promptBuf[2048] = "";
+        PromptInput m_prompt;
         char m_newReqBuf[256] = "";
         char m_newReqCatBuf[64] = "functional";
         bool m_newReqMandatory = true;

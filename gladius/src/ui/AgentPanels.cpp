@@ -326,6 +326,18 @@ namespace gladius::ui
         return true;
     }
 
+    bool AgentPanels::attachPromptTextFile(std::filesystem::path const & path)
+    {
+        std::string error;
+        if (!m_prompt.appendTextFile(path, error))
+        {
+            m_lastError = error;
+            return false;
+        }
+        m_lastError.clear();
+        return true;
+    }
+
     void AgentPanels::saveSessionState()
     {
         try
@@ -1533,7 +1545,16 @@ namespace gladius::ui
             }
         }
 
-        float const footerHeight = m_pendingImages.empty() ? 152.f : 206.f;
+        // Reserve room for the prompt footer, which grows with the draft up to a limit.
+        float const baseFooterHeight = m_pendingImages.empty() ? 152.f : 206.f;
+        constexpr float messagesMinHeight = 120.f;
+        float const promptWidth = m_prompt.inlineFieldWidth();
+        float const availableHeight =
+          std::max(0.f, ImGui::GetContentRegionAvail().y - messagesMinHeight);
+        float const promptHeightLimit =
+          std::max(0.f, availableHeight - (baseFooterHeight - m_prompt.config().minHeight));
+        float const promptHeight = m_prompt.measureInlineHeight(promptWidth, promptHeightLimit);
+        float const footerHeight = baseFooterHeight - m_prompt.config().minHeight + promptHeight;
         ImGui::BeginChild("AgentMessages", ImVec2(0, -footerHeight), true);
         for (auto const & msg : m_conversation.messages())
         {
@@ -1764,9 +1785,9 @@ namespace gladius::ui
             ImGui::EndPopup();
         }
 
-        ImGui::InputTextMultiline("##AgentPrompt", m_promptBuf, sizeof(m_promptBuf), ImVec2(-75.f, 52.f));
-        m_promptFocused = ImGui::IsItemFocused();
-        if (m_promptFocused)
+        PromptInput::RenderResult const promptResult =
+          m_prompt.renderInline("agentPrompt", "Send", promptWidth, promptHeight, !m_running.load());
+        if (m_prompt.isFocused())
         {
             ImGuiIO const & io = ImGui::GetIO();
             bool const pasteChord =
@@ -1787,15 +1808,18 @@ namespace gladius::ui
             }
         }
 
-        ImGui::SameLine();
-        ImGui::BeginDisabled(m_running.load());
-        if (ImGui::Button("Send", ImVec2(65.f, 52.f)))
+        if (promptResult.sendRequested)
         {
-            std::string prompt(m_promptBuf);
-            m_promptBuf[0] = '\0';
-            startRun(prompt);
+            startRun(m_prompt.consumeDraft());
         }
-        ImGui::EndDisabled();
+
+        if (auto const expanded = m_prompt.renderExpandedWindow(!m_running.load()); expanded)
+        {
+            if (expanded->sendRequested)
+            {
+                startRun(m_prompt.consumeDraft());
+            }
+        }
 
         // Primary & Fallback provider/model selection dropdowns below prompt
         std::vector<agent::ModelSelection> allChoices;
