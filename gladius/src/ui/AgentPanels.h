@@ -149,12 +149,33 @@ namespace gladius::ui
         void renderConversationSection();
         void renderDiagnosticsSection();
         [[nodiscard]] std::string buildDeveloperTrace() const;
-        [[nodiscard]] float measureFooterHeight() const;
+
+        /// @brief Everything the pinned panel footer needs, measured once per frame
+        struct FooterMetrics
+        {
+            PromptInput::CardMetrics composer;
+            float statusLineHeight = 0.f;
+            float controlRowsHeight = 0.f;
+            float confirmationHeight = 0.f;
+            float totalHeight = 0.f;
+            std::size_t controlRows = 1u;
+        };
+
+        [[nodiscard]] FooterMetrics measureFooter();
+        [[nodiscard]] float measureStatusLineHeight();
+        [[nodiscard]] std::size_t measureControlRows();
+        void renderStatusLine();
+        void renderControlRow();
+        void renderConfirmation();
+        void renderComposer(PromptInput::CardMetrics const & metrics);
+        void renderComposerToolbar(PromptInput::ToolbarLayout const & layout, int row);
+        void renderImageControls(float buttonSize);
+        [[nodiscard]] float leadingControlsWidth();
         void renderFooter();
         void attachClipboardImage();
         void insertClipboardOrFileImageIntoDocument();
         void renderPendingAttachments();
-        void renderModelSelection();
+        void renderModelCombos(PromptInput::ToolbarLayout const & layout);
         [[nodiscard]] static std::string humaniseToolName(std::string const & toolName);
 
         void renderProviderSettingsPanel();
