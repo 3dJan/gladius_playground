@@ -52,8 +52,8 @@ It focuses on how to navigate the codebase safely, how to validate changes, and 
 
 ### Fast validation loop
 
-- Build: **Build ALL (linux-releaseWithDebug)**
-- Tests: **Run Gladius Tests (linux-releaseWithDebug)**
+- Build: **Build ALL (active preset)**
+- Tests: **Run Gladius Tests**
 
 ### If OpenCL isn’t available
 

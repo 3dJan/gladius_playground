@@ -313,18 +313,36 @@ the project using Ninja.
 ### Use the pre-configured tasks
 
 The repository includes VS Code tasks for the most common operations. Open
-them via **Terminal → Run Task**:
+them via **Terminal → Run Task**. They are CMake Tools tasks, so they always
+run against the preset selected in the status bar and read the same on Linux
+and macOS.
 
 | Task | What it does |
 |---|---|
-| Build ALL (linux-releaseWithDebug) | Full rebuild |
-| Build incremental | Incremental build (fast) |
-| Run Gladius Tests (ReleaseWithDebug, summary) | Run the full test suite |
+| CMake: Configure | Configure the active preset |
+| Build ALL (active preset) | Full rebuild (`<` default build task) |
+| Build gladius / Build gladiusmcp / Build gladius_test | Single target |
+| Run Gladius Tests | Run the CTest test preset (`<` default test task) |
 
 ### Debugging
 
-The repository includes a launch configuration (`cppdbg: gladius`). Press
-**F5** or use the Run & Debug panel to start a debug session with LLDB/GDB.
+Debug sessions use the **LLDB Debug Adapter** extension
+(`llvm-vs-code-extensions.lldb-dap`), which locates the adapter itself with
+`xcrun --find lldb-dap` (macOS) or `lldb-dap` from a system LLVM install
+(Linux). Install that extension next to C/C++ and CMake Tools.
+
+The launch configurations are preset-driven — they use
+`${command:cmake.launchTargetPath}` and
+`${command:cmake.activeBuildPresetName}` instead of hard-coded build
+directories, so the same file works for every platform. After selecting the
+configure preset and the launch target (`gladius`) in the CMake Tools status
+bar, press **F5**.
+
+`cmake.debugConfig` in the workspace settings pins the debugger used by the
+CMake Tools **Debug** button and by CTest debugging to `lldb-dap`. Without a
+`type` there, CMake Tools derives an MI path from `CMAKE_CXX_COMPILER` and ends
+up launching plain `lldb`, which has no MI interpreter; the session then fails
+with `error: unknown option: --interpreter=mi`.
 
 ---
 

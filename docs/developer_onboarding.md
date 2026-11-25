@@ -39,7 +39,7 @@ This repo is set up to be built via **VS Code tasks**.
 
 ### Recommended task
 
-- **Build ALL (linux-releaseWithDebug)**
+- **Build ALL (active preset)**
 
 This corresponds to the CMake preset:
 
@@ -124,7 +124,7 @@ gladiusmcp`, it ignores `SIGTERM`) so the client relaunches the new binary.
 
 Use the task:
 
-- **Run Gladius Tests (linux-releaseWithDebug)**
+- **Run Gladius Tests**
 
 This uses the CMake test preset `ReleaseWithDebug`.
 
