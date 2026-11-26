@@ -11,6 +11,23 @@
 
 namespace gladius::agent
 {
+    enum class ImageApiType
+    {
+        OpenAiCompatible = 0,
+        SdWebUi = 1,
+        GeminiImagen = 2
+    };
+
+    /// @brief Configuration for reference image generation backends
+    struct ImageProviderConfig
+    {
+        ImageApiType apiType = ImageApiType::OpenAiCompatible;
+        std::string endpoint;
+        std::string apiKey;
+        std::string model;
+        std::string defaultSize = "1024x1024";
+    };
+
     struct ImageGenerationRequest
     {
         std::string prompt;
@@ -50,6 +67,43 @@ namespace gladius::agent
         ProviderConfig m_config;
         std::shared_ptr<IHttpTransport> m_transport;
     };
+
+    /// @brief Automatic1111 / Forge WebUI (/sdapi/v1/txt2img) image provider
+    class SdWebUiImageProvider final : public IImageProvider
+    {
+      public:
+        explicit SdWebUiImageProvider(ImageProviderConfig config,
+                                      std::shared_ptr<IHttpTransport> transport = nullptr);
+
+        [[nodiscard]] coro::task<ImageGenerationResponse>
+        generate(ImageGenerationRequest const & request,
+                 io::CancellationToken const & cancellation) override;
+
+      private:
+        ImageProviderConfig m_config;
+        std::shared_ptr<IHttpTransport> m_transport;
+    };
+
+    /// @brief Google Gemini / Imagen REST API image provider
+    class GeminiImageProvider final : public IImageProvider
+    {
+      public:
+        explicit GeminiImageProvider(ImageProviderConfig config,
+                                     std::shared_ptr<IHttpTransport> transport = nullptr);
+
+        [[nodiscard]] coro::task<ImageGenerationResponse>
+        generate(ImageGenerationRequest const & request,
+                 io::CancellationToken const & cancellation) override;
+
+      private:
+        ImageProviderConfig m_config;
+        std::shared_ptr<IHttpTransport> m_transport;
+    };
+
+    /// @brief Create a concrete image provider for the configured backend
+    [[nodiscard]] std::unique_ptr<IImageProvider>
+    createImageProvider(ImageProviderConfig const & config,
+                        std::shared_ptr<IHttpTransport> transport = nullptr);
 
     /// @brief Decode a standard Base64 string to raw bytes
     [[nodiscard]] std::vector<std::byte> decodeBase64(std::string const & encoded);
