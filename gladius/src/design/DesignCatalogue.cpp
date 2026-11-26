@@ -1,6 +1,8 @@
 #include "DesignCatalogue.h"
 
 #include <algorithm>
+#include <array>
+#include <fstream>
 
 namespace gladius::design
 {
@@ -91,7 +93,159 @@ namespace gladius::design
                 addEntry(std::move(e));
             }
         }
+        if (doc.contains("compatibilityRules") && doc["compatibilityRules"].is_array())
+        {
+            for (auto const & r : doc["compatibilityRules"])
+            {
+                CompatibilityRule rule;
+                rule.compatible = r.value("compatible", false);
+                rule.rationale = r.value("rationale", "");
+                if (r.contains("conditions") && r["conditions"].is_array())
+                {
+                    for (auto const & cond : r["conditions"])
+                    {
+                        if (cond.is_array() && cond.size() == 2 && cond[0].is_string() && cond[1].is_string())
+                        {
+                            rule.conditions.emplace_back(cond[0].get<std::string>(), cond[1].get<std::string>());
+                        }
+                        else if (cond.is_object())
+                        {
+                            std::string const nodeKey = cond.value("node", "");
+                            std::string const varVal = cond.value("variant", "");
+                            if (!nodeKey.empty() && !varVal.empty())
+                            {
+                                rule.conditions.emplace_back(nodeKey, varVal);
+                            }
+                        }
+                    }
+                }
+                if (!rule.conditions.empty())
+                {
+                    addCompatibilityRule(std::move(rule));
+                }
+            }
+        }
         return true;
+    }
+
+    CatalogueEntry const * DesignCatalogue::findById(std::string const & entryId) const
+    {
+        auto it = m_entries.find(entryId);
+        return it != m_entries.end() ? &it->second : nullptr;
+    }
+
+    bool DesignCatalogue::loadFromFile(std::filesystem::path const & path)
+    {
+        std::ifstream file(path);
+        if (!file.is_open())
+        {
+            return false;
+        }
+        try
+        {
+            nlohmann::json doc;
+            file >> doc;
+            return loadFromJson(doc);
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool DesignCatalogue::loadDefaultCatalogue()
+    {
+        static std::array<char const *, 4> const kCandidatePaths = {
+          "resources/design_catalogue.json",
+          "gladius/resources/design_catalogue.json",
+          "../resources/design_catalogue.json",
+          "../../resources/design_catalogue.json"};
+
+        for (char const * candidate : kCandidatePaths)
+        {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec) && loadFromFile(candidate))
+            {
+                return true;
+            }
+        }
+
+        // Embedded baseline fallback so catalogue queries and compatibility checks always work
+        // even when launched from a working directory without resources/ next to the binary.
+        nlohmann::json const fallback = {
+          {"entries",
+           {{{"id", "enclosure.shell.rounded_box"},
+             {"name", "Rounded Box Shell Enclosure"},
+             {"functions", {"Enclosure", "Housing", "ProtectiveShell"}},
+             {"parameters",
+              {{"width", {{"type", "length"}, {"minimum", 15.0}, {"maximum", 350.0}, {"default", 80.0}}},
+               {"depth", {{"type", "length"}, {"minimum", 15.0}, {"maximum", 350.0}, {"default", 60.0}}},
+               {"height", {{"type", "length"}, {"minimum", 10.0}, {"maximum", 300.0}, {"default", 40.0}}},
+               {"wallThickness", {{"type", "length"}, {"minimum", 1.2}, {"maximum", 12.0}, {"default", 2.4}}}}},
+             {"manufacturing", {{"processes", {"FDM", "SLA", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"planar_mount", "lid_seam"}}},
+            {{"id", "enclosure.shell.cylindrical"},
+             {"name", "Cylindrical Shell Enclosure"},
+             {"functions", {"Enclosure", "Housing", "ProtectiveShell"}},
+             {"parameters",
+              {{"radius", {{"type", "length"}, {"minimum", 8.0}, {"maximum", 180.0}, {"default", 35.0}}},
+               {"height", {{"type", "length"}, {"minimum", 10.0}, {"maximum", 300.0}, {"default", 60.0}}},
+               {"wallThickness", {{"type", "length"}, {"minimum", 1.2}, {"maximum", 12.0}, {"default", 2.4}}}}},
+             {"manufacturing", {{"processes", {"FDM", "SLA", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"circular_spigot", "axial_thread"}}},
+            {{"id", "stand.pedestal.weighted"},
+             {"name", "Weighted Pedestal Base"},
+             {"functions", {"Stand", "Base", "Support"}},
+             {"manufacturing", {{"processes", {"FDM", "SLA", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"circular_spigot", "planar_mount"}}},
+            {{"id", "stand.tripod.spread"},
+             {"name", "Three-Leg Tripod Stand"},
+             {"functions", {"Stand", "Base", "Support"}},
+             {"manufacturing", {{"processes", {"FDM", "SLS"}}, {"supportsRequired", true}}},
+             {"interfaces", {"circular_spigot"}}},
+            {{"id", "stand.clamp.desk"},
+             {"name", "C-Clamp Desk Mount"},
+             {"functions", {"Stand", "Mount", "Clamp"}},
+             {"manufacturing", {{"processes", {"FDM", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"planar_mount", "m3_fastener_pattern"}}},
+            {{"id", "mount.boss.m3_heatset"},
+             {"name", "M3 Heat-Set Insert Boss"},
+             {"functions", {"Fastening", "Mount", "Interface"}},
+             {"manufacturing", {{"processes", {"FDM", "SLA", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"m3_fastener_pattern"}}},
+            {{"id", "mount.snapfit.cantilever"},
+             {"name", "Cantilever Snap-Fit Clip"},
+             {"functions", {"Fastening", "Latch", "Interface"}},
+             {"manufacturing", {{"processes", {"FDM", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"lid_seam"}}},
+            {{"id", "core.lattice.gyroid"},
+             {"name", "Gyroid TPMS Lightweight Core"},
+             {"functions", {"Infill", "LightweightCore", "HeatDissipation"}},
+             {"manufacturing", {{"processes", {"FDM", "SLA", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"volumetric_core"}}},
+            {{"id", "routing.channel.rear_slot"},
+             {"name", "Rear Cable Routing Slot"},
+             {"functions", {"CableRoute", "Ventilation"}},
+             {"manufacturing", {{"processes", {"FDM", "SLA", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"cable_exit"}}},
+            {{"id", "shade.diffuser.cone"},
+             {"name", "Conical Light Diffuser Shade"},
+             {"functions", {"Shade", "Diffuser", "Cover"}},
+             {"manufacturing", {{"processes", {"FDM", "SLA", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"circular_spigot"}}},
+            {{"id", "shade.diffuser.ribbed"},
+             {"name", "Ribbed Cylindrical Diffuser"},
+             {"functions", {"Shade", "Diffuser"}},
+             {"manufacturing", {{"processes", {"FDM", "SLA", "SLS"}}, {"supportsRequired", false}}},
+             {"interfaces", {"circular_spigot"}}}}},
+          {"compatibilityRules",
+           {{{"conditions", {{{"node", "Stand"}, {"variant", "stand.clamp.desk"}}, {{"node", "Shade"}, {"variant", "shade.diffuser.ribbed"}}}},
+             {"compatible", false},
+             {"rationale", "Desk C-clamp lacks a concentric spigot collar for the ribbed cylindrical diffuser"}},
+            {{"conditions", {{{"node", "Enclosure"}, {"variant", "enclosure.shell.cylindrical"}}, {{"node", "Fastening"}, {"variant", "mount.snapfit.cantilever"}}}},
+             {"compatible", false},
+             {"rationale", "Planar cantilever snap-fit requires a straight lid seam rather than a cylindrical shell"}}}}};
+        return loadFromJson(fallback);
     }
 
     std::vector<CatalogueEntry> DesignCatalogue::findByFunction(std::string const & functionName) const

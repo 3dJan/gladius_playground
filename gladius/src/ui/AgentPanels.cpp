@@ -1,4 +1,5 @@
 #include "AgentPanels.h"
+#include "../design/ManufacturingValidator.h"
 
 #include "ClipboardImageHelper.h"
 #include "../ConfigManager.h"
@@ -98,6 +99,7 @@ namespace gladius::ui
     {
         m_knowledge.setStoragePath(agent::KnowledgeStore::defaultStoragePath());
         (void) m_knowledge.load();
+        (void) m_catalogue.loadDefaultCatalogue();
 
         m_toolCtx = std::make_unique<design::DesignToolContext>(design::DesignToolContext{
           m_graph,
@@ -132,11 +134,25 @@ namespace gladius::ui
                   return {};
               }
           },
-          nullptr,
+          design::ManufacturingValidator::makeValidationCallback(m_toolCtx->document, m_catalogue),
           [this]() { m_documentModifiedPending.store(true); },
           &m_skills,
           &m_todos,
-          &m_knowledge});
+          &m_knowledge,
+          false,
+          0,
+          0,
+          [this](agent::ImageGenerationRequest const & req,
+                 io::CancellationToken const & cancellation)
+            -> coro::task<agent::ImageGenerationResponse> {
+              auto provider = agent::createImageProvider(m_imageProviderConfig);
+              auto resp = co_await provider->generate(req, cancellation);
+              if (resp.success && !resp.image.data.empty())
+              {
+                  m_eventQueue.push(agent::ImageGeneratedEvent{resp.image, req.prompt});
+              }
+              co_return resp;
+          }});
         design::registerDesignTools(m_registry, *m_toolCtx);
     }
 
@@ -591,6 +607,19 @@ namespace gladius::ui
             std::snprintf(m_apiKeyBuf, sizeof(m_apiKeyBuf), "%s", key->c_str());
         }
 
+        m_imageProviderConfig.apiType = static_cast<agent::ImageApiType>(std::clamp(
+          m_configManager->getValue<int>("AgentImageProvider", "apiType", 0), 0, 2));
+        m_imageProviderConfig.endpoint =
+          m_configManager->getValue<std::string>("AgentImageProvider", "endpoint", "");
+        m_imageProviderConfig.model =
+          m_configManager->getValue<std::string>("AgentImageProvider", "model", "");
+        m_imageProviderConfig.defaultSize =
+          m_configManager->getValue<std::string>("AgentImageProvider", "defaultSize", "1024x1024");
+        if (auto imgKey = m_credentialStore.loadSecret(kCredentialService, "image_provider"))
+        {
+            m_imageProviderConfig.apiKey = *imgKey;
+        }
+
         // Load multi-provider profiles (or seed defaults from legacy config)
         m_providerProfiles.clear();
         auto const profilesStr =
@@ -779,6 +808,25 @@ namespace gladius::ui
             m_configManager->setValue<bool>("AgentPrivacy", "allowViewportImages", privacy.allowViewportImages);
             m_configManager->setValue<bool>("AgentPrivacy", "allowReferenceImages", privacy.allowReferenceImages);
             m_configManager->setValue<bool>("AgentPrivacy", "allowRawGeometry", privacy.allowRawGeometry);
+
+            m_configManager->setValue<int>(
+              "AgentImageProvider", "apiType", static_cast<int>(m_imageProviderConfig.apiType));
+            m_configManager->setValue<std::string>(
+              "AgentImageProvider", "endpoint", m_imageProviderConfig.endpoint);
+            m_configManager->setValue<std::string>(
+              "AgentImageProvider", "model", m_imageProviderConfig.model);
+            m_configManager->setValue<std::string>(
+              "AgentImageProvider", "defaultSize", m_imageProviderConfig.defaultSize);
+            if (!m_imageProviderConfig.apiKey.empty())
+            {
+                (void) m_credentialStore.storeSecret(
+                  kCredentialService, "image_provider", m_imageProviderConfig.apiKey);
+            }
+            else
+            {
+                (void) m_credentialStore.deleteSecret(kCredentialService, "image_provider");
+            }
+
             m_configManager->save();
         }
         std::string const account = (m_providerIndex == 1) ? "anthropic" : "openai";
@@ -977,6 +1025,10 @@ namespace gladius::ui
                 m_activeToolName.clear();
                 m_activityLog.push_back(
                   {(tc->success ? "Completed " : "Failed ") + tc->name, tc->result.dump(), tc->success});
+            }
+            else if (auto const * ig = std::get_if<agent::ImageGeneratedEvent>(&ev))
+            {
+                m_activityLog.push_back({"Generated reference image", ig->caption, true});
             }
             else if (auto const * ud = std::get_if<agent::UserDecisionRequiredEvent>(&ev))
             {
@@ -1616,6 +1668,46 @@ namespace gladius::ui
                     m_configManager->save();
                 }
             }
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Image Generation Provider");
+        int imgApiType = static_cast<int>(m_imageProviderConfig.apiType);
+        char const * imgApiTypes[] = {
+            "OpenAI-compatible (/images/generations)",
+            "SD WebUI / Forge (/sdapi/v1/txt2img)",
+            "Google Gemini / Imagen"};
+        if (ImGui::Combo("Image Backend", &imgApiType, imgApiTypes, 3))
+        {
+            m_imageProviderConfig.apiType = static_cast<agent::ImageApiType>(imgApiType);
+        }
+
+        char imgEpBuf[512];
+        std::snprintf(imgEpBuf, sizeof(imgEpBuf), "%s", m_imageProviderConfig.endpoint.c_str());
+        if (ImGui::InputText("Image Endpoint", imgEpBuf, sizeof(imgEpBuf)))
+        {
+            m_imageProviderConfig.endpoint = imgEpBuf;
+        }
+
+        char imgKeyBuf[512];
+        std::snprintf(imgKeyBuf, sizeof(imgKeyBuf), "%s", m_imageProviderConfig.apiKey.c_str());
+        if (ImGui::InputText("Image API Key", imgKeyBuf, sizeof(imgKeyBuf), ImGuiInputTextFlags_Password))
+        {
+            m_imageProviderConfig.apiKey = imgKeyBuf;
+        }
+
+        char imgMdlBuf[256];
+        std::snprintf(imgMdlBuf, sizeof(imgMdlBuf), "%s", m_imageProviderConfig.model.c_str());
+        if (ImGui::InputText("Image Model", imgMdlBuf, sizeof(imgMdlBuf)))
+        {
+            m_imageProviderConfig.model = imgMdlBuf;
+        }
+
+        char imgSizeBuf[64];
+        std::snprintf(imgSizeBuf, sizeof(imgSizeBuf), "%s", m_imageProviderConfig.defaultSize.c_str());
+        if (ImGui::InputText("Default Image Size", imgSizeBuf, sizeof(imgSizeBuf)))
+        {
+            m_imageProviderConfig.defaultSize = imgSizeBuf;
         }
 
         ImGui::Separator();

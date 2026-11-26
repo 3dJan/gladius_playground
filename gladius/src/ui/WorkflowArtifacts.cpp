@@ -703,15 +703,20 @@ namespace gladius::ui
         ImGui::SetCursorScreenPos(ImVec2(textX, row.max.y - ImGui::GetFrameHeight()));
         float const restoreWidth = ImGui::CalcTextSize(ICON_FA_HISTORY " Restore").x
                                  + ImGui::GetStyle().FramePadding.x * 2.f;
-        ImGui::SetNextItemWidth(std::max(40.f, row.max.x - textX - restoreWidth
-                                                     - ImGui::GetStyle().ItemSpacing.x));
+        float const forkWidth = ImGui::CalcTextSize(ICON_FA_CODE_BRANCH " Fork").x
+                              + ImGui::GetStyle().FramePadding.x * 2.f;
+        ImGui::SetNextItemWidth(std::max(40.f, row.max.x - textX - restoreWidth - forkWidth
+                                                     - ImGui::GetStyle().ItemSpacing.x * 2.f));
         bool const edited = ImGui::InputTextWithHint("##cpFb",
                                                      "Snapshot comment...",
                                                      cpFb,
                                                      sizeof(cpFb))
                             != false;
         ImGui::SameLine();
-        if (ImGui::SmallButton(ICON_FA_HISTORY " Restore"))
+        bool const doRestore = ImGui::SmallButton(ICON_FA_HISTORY " Restore");
+        ImGui::SameLine();
+        bool const doFork = ImGui::SmallButton(ICON_FA_CODE_BRANCH " Fork");
+        if (doRestore || doFork)
         {
             bool restored = false;
             if (m_document != nullptr && m_document->getAssembly())
@@ -731,6 +736,17 @@ namespace gladius::ui
                 {
                     m_onDocumentModified();
                 }
+            }
+            if (doFork)
+            {
+                std::unordered_map<std::string, std::string> baseSelections;
+                if (auto const active = m_graph->activeConfiguration())
+                {
+                    baseSelections = active->selectedVariants;
+                }
+                std::string const newCfgId = m_graph->createConfiguration(
+                  "Fork: " + checkpoint.label, std::move(baseSelections));
+                (void) m_graph->activateConfiguration(newCfgId);
             }
         }
         if (edited)
@@ -830,6 +846,40 @@ namespace gladius::ui
                             explored->second.variantIds.size(),
                             rejected);
 
+        if (explored->second.variantIds.size() >= 2
+            && ImGui::BeginTable("##variantCompare", 4, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg))
+        {
+            ImGui::TableSetupColumn("Option");
+            ImGui::TableSetupColumn("Fidelity");
+            ImGui::TableSetupColumn("Score");
+            ImGui::TableSetupColumn("Checks");
+            ImGui::TableHeadersRow();
+            std::size_t idx = 0;
+            for (auto const & vid : explored->second.variantIds)
+            {
+                auto const vit = m_graph->variants().find(vid);
+                if (vit == m_graph->variants().end())
+                {
+                    continue;
+                }
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                char const letter = static_cast<char>('A' + static_cast<int>(idx % 26u));
+                ++idx;
+                ImGui::Text("%c: %s", letter, vit->second.name.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(design::toString(vit->second.fidelity));
+                ImGui::TableNextColumn();
+                ImGui::Text("%.1f", vit->second.evaluation.pruningScore);
+                ImGui::TableNextColumn();
+                ImGui::Text("%zu ok / %zu warn",
+                            vit->second.evaluation.deterministicPassed.size(),
+                            vit->second.evaluation.deterministicWarnings.size());
+            }
+            ImGui::EndTable();
+            ImGui::Spacing();
+        }
+
         auto const activeConfig = m_graph->activeConfiguration();
         std::size_t cardIndex = 0;
         for (auto const & vid : explored->second.variantIds)
@@ -894,6 +944,110 @@ namespace gladius::ui
             for (auto const & cp : checkpoints)
             {
                 renderCheckpointRow(cp, animation);
+            }
+        }
+
+        if (!m_graph->referenceImages().empty())
+        {
+            ImGui::Spacing();
+            renderReferenceImages(animation);
+        }
+    }
+
+    void WorkflowArtifacts::renderReferenceImages(AgentWorkflowAnimationState & animation)
+    {
+        sectionLabel(ICON_FA_IMAGE, "Reference images");
+        auto const refs = m_graph->referenceImages();
+        for (auto const & ref : refs)
+        {
+            std::string const key = "ref_" + ref.id;
+            float const alpha = noteArrival(key, animation);
+            pushRowAlpha(alpha);
+            ImGui::PushID(ref.id.c_str());
+
+            int w = 0;
+            int h = 0;
+            unsigned int const texId =
+              m_previewTexture ? m_previewTexture(key, ref.pngBytes, w, h) : 0u;
+            if (texId != 0)
+            {
+                ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(texId)),
+                             ImVec2(48.f, 48.f));
+                ImGui::SameLine();
+            }
+            ImGui::BeginGroup();
+            ImGui::TextWrapped("%s", ref.caption.empty() ? ref.prompt.c_str() : ref.caption.c_str());
+            bool const isComparing = (m_comparedReferenceId == ref.id);
+            if (ImGui::SmallButton(isComparing ? "Hide Compare" : "Compare with Viewport"))
+            {
+                m_comparedReferenceId = isComparing ? "" : ref.id;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_FA_TIMES " Remove"))
+            {
+                if (m_comparedReferenceId == ref.id)
+                {
+                    m_comparedReferenceId.clear();
+                }
+                (void) m_graph->removeReferenceImage(ref.id);
+                ImGui::EndGroup();
+                ImGui::PopID();
+                popRowAlpha(alpha);
+                break;
+            }
+            ImGui::EndGroup();
+            ImGui::PopID();
+            popRowAlpha(alpha);
+        }
+
+        if (!m_comparedReferenceId.empty())
+        {
+            if (auto const * ref = m_graph->findReferenceImage(m_comparedReferenceId))
+            {
+                ImGui::Spacing();
+                if (ImGui::BeginTable("##refVsViewport", 2, ImGuiTableFlags_BordersInnerV))
+                {
+                    ImGui::TableSetupColumn("Reference Concept");
+                    ImGui::TableSetupColumn("Active Viewport / Config");
+                    ImGui::TableHeadersRow();
+                    ImGui::TableNextRow();
+
+                    ImGui::TableNextColumn();
+                    int rw = 0;
+                    int rh = 0;
+                    unsigned int const refTex =
+                      m_previewTexture ? m_previewTexture("ref_" + ref->id, ref->pngBytes, rw, rh)
+                                       : 0u;
+                    if (refTex != 0)
+                    {
+                        ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(refTex)),
+                                     ImVec2(140.f, 140.f));
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("No reference preview");
+                    }
+
+                    ImGui::TableNextColumn();
+                    unsigned int vpTex = 0u;
+                    if (auto const active = m_graph->activeConfiguration();
+                        active.has_value() && !active->previewPng.empty() && m_previewTexture)
+                    {
+                        int vw = 0;
+                        int vh = 0;
+                        vpTex = m_previewTexture("cfg_" + active->id, active->previewPng, vw, vh);
+                    }
+                    if (vpTex != 0)
+                    {
+                        ImGui::Image(static_cast<ImTextureID>(static_cast<intptr_t>(vpTex)),
+                                     ImVec2(140.f, 140.f));
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("Capture viewport or activate a configuration to compare");
+                    }
+                    ImGui::EndTable();
+                }
             }
         }
     }

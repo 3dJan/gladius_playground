@@ -10,6 +10,7 @@
 #include "../agent/PermissionPolicy.h"
 #include "../agent/SkillLoader.h"
 #include "../agent/providers/IAiProvider.h"
+#include "../agent/providers/ImageProvider.h"
 #include "../agent/providers/ModelDiscovery.h"
 #include "../agent/providers/ProviderProfile.h"
 #include "../design/DesignCatalogue.h"
@@ -264,6 +265,7 @@ namespace gladius::ui
         int m_editingProfileIndex = 0;
         agent::ModelSelection m_primarySelection;
         std::vector<agent::ModelSelection> m_fallbackSelections;
+        agent::ImageProviderConfig m_imageProviderConfig;
 
         int m_providerIndex = 0; // legacy fallback
         char m_endpointBuf[512] = "";

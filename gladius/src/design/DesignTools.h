@@ -5,10 +5,12 @@
 #include "TodoStore.h"
 #include "../agent/KnowledgeStore.h"
 #include "../agent/SkillLoader.h"
+#include "../agent/providers/ImageProvider.h"
 #include "../tools/CheckpointManager.h"
 #include "../tools/ToolRegistry.h"
 #include "../tools/TransactionManager.h"
 
+#include <coro/coro.hpp>
 #include <cstddef>
 #include <functional>
 #include <nlohmann/json.hpp>
@@ -28,6 +30,11 @@ namespace gladius::design
 
     /// @brief Callback for running deterministic model/manufacturing validation
     using ModelValidationCallback = std::function<Evaluation(DesignGraph const &, Configuration const &)>;
+
+    /// @brief Callback for generating a reference image asynchronously via the configured image provider
+    using ImageGenerationCallback = std::function<coro::task<agent::ImageGenerationResponse>(
+      agent::ImageGenerationRequest const & request,
+      io::CancellationToken const & cancellation)>;
 
     /// @brief How much of the tool surface a host exposes to its model
     /// @details Every tool definition is re-sent on every model turn, so the tool list itself is a
@@ -69,6 +76,7 @@ namespace gladius::design
         std::size_t maxViewportReviews = 0;
         /// @brief Viewport images already handed out; the host resets this per run
         std::size_t viewportReviewsUsed = 0;
+        ImageGenerationCallback generateImage;
     };
 
     /// @brief Register the canonical design-space, lifecycle, evaluation, and viewport tools

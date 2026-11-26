@@ -118,6 +118,8 @@ namespace gladius::ui
         void renderCheckpointRow(tools::CheckpointSummary const & checkpoint,
                                  AgentWorkflowAnimationState & animation);
 
+        void renderReferenceImages(AgentWorkflowAnimationState & animation);
+
         /// @brief Fades a row in when it first appears; returns the row's alpha
         float noteArrival(std::string const & key, AgentWorkflowAnimationState & animation) const;
 
@@ -132,5 +134,6 @@ namespace gladius::ui
         char m_newRequirementCategoryBuf[64] = "functional";
         bool m_newRequirementMandatory = true;
         std::string m_exploredNodeId;
+        std::string m_comparedReferenceId;
     };
 } // namespace gladius::ui

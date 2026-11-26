@@ -8,6 +8,7 @@
 #include "../ProgramSnippetApplier.h"
 #include "../agent/Conversation.h"
 #include "AgentToolOutput.h"
+#include "ManufacturingValidator.h"
 #include "Renderability.h"
 #include "../io/3mf/Lib3mfLoader.h"
 #include "../io/3mf/LibraryMetadata.h"
@@ -468,7 +469,9 @@ namespace gladius::design
               {"name", {{"type", "string"}}},
               {"rationale", {{"type", "string"}}},
               {"fidelity", {{"type", "string"}, {"enum", {"symbolic", "envelope", "structural", "detailed"}}}},
-              {"parameters", {{"type", "object"}}}}}},
+              {"parameters", {{"type", "object"}}},
+              {"modelResourceId", {{"type", "integer"}}},
+              {"functionName", {{"type", "string"}}}}}},
            tools::ToolPolicy::DesignGraphModification},
           [&ctx](nlohmann::json const & args) -> nlohmann::json {
               std::string const nodeId = args.value("nodeId", "");
@@ -495,6 +498,12 @@ namespace gladius::design
                           {"error",
                            unknownIdError("nodeId", nodeId, ctx.graph.nodes(),
                                           [](DesignNode const & n) { return n.name; })}};
+              }
+              uint32_t const resId = args.value("modelResourceId", 0u);
+              std::string const fnName = args.value("functionName", "");
+              if (resId != 0u || !fnName.empty())
+              {
+                  ctx.graph.setVariantResource(id, resId, fnName);
               }
               return {{"success", true}, {"variantId", id}};
           });
@@ -756,12 +765,14 @@ namespace gladius::design
 
         registry.registerSyncTool(
           {"capture_viewport",
-           "Capture the current 3D viewport as a PNG image for visual assessment.",
+           "Capture the current 3D viewport as a PNG image for visual assessment. Optionally target a variant or node to record its preview.",
            {{"type", "object"},
             {"properties",
              {{"width", {{"type", "integer"}}},
               {"height", {{"type", "integer"}}},
-              {"camera", {{"type", "string"}}}}}},
+              {"camera", {{"type", "string"}}},
+              {"variant", {{"type", "string"}}},
+              {"nodeId", {{"type", "string"}}}}}},
            tools::ToolPolicy::ReadOnly},
           [&ctx](nlohmann::json const & args) -> nlohmann::json {
               if (!ctx.captureViewport)
@@ -774,6 +785,26 @@ namespace gladius::design
                           {"error", "Viewport review budget exhausted. Continue with set_program_snippet "
                                     "and call finish_design; the geometry is already what you described."}};
               }
+              std::string targetVariantId = args.value("variant", "");
+              std::string const targetNodeId = args.value("nodeId", "");
+              if (targetVariantId.empty() && !targetNodeId.empty())
+              {
+                  if (auto const active = ctx.graph.activeConfiguration())
+                  {
+                      auto selIt = active->selectedVariants.find(targetNodeId);
+                      if (selIt != active->selectedVariants.end())
+                      {
+                          targetVariantId = selIt->second;
+                      }
+                  }
+              }
+              if (!targetVariantId.empty() && ctx.graph.findVariant(targetVariantId) == nullptr)
+              {
+                  return {{"success", false},
+                          {"error", unknownIdError("variant", targetVariantId, ctx.graph.variants(),
+                                                   [](DesignVariant const & v) { return v.name; })}};
+              }
+
               int const w = args.value("width", 512);
               int const h = args.value("height", 512);
               std::string const cam = args.value("camera", "isometric");
@@ -783,11 +814,30 @@ namespace gladius::design
                   return {{"success", false}, {"error", "Viewport capture returned empty image"}};
               }
               ++ctx.viewportReviewsUsed;
+              if (!targetVariantId.empty())
+              {
+                  ctx.graph.setVariantPreview(targetVariantId, png);
+              }
               nlohmann::json res = {{"success", true},
                                     {"width", w},
                                     {"height", h},
                                     {"mimeType", "image/png"},
                                     {"base64", agent::encodeBase64(png)}};
+              if (!targetVariantId.empty())
+              {
+                  res["variantId"] = targetVariantId;
+                  if (auto const * var = ctx.graph.findVariant(targetVariantId))
+                  {
+                      if (!var->functionName.empty())
+                      {
+                          res["functionName"] = var->functionName;
+                      }
+                      if (var->modelResourceId != 0)
+                      {
+                          res["modelResourceId"] = var->modelResourceId;
+                      }
+                  }
+              }
               // An empty render is otherwise indistinguishable from "the shape looks wrong", and the
               // model spends its remaining turns polishing geometry that is never sampled.
               if (ctx.document != nullptr)
@@ -1967,6 +2017,515 @@ namespace gladius::design
               }
               return {{"success", ctx.knowledge->remove(args.value("id", ""))}};
           });
+
+        if (full)
+        {
+            registry.registerSyncTool(
+              {"get_node",
+               "Inspect a decomposed design node, its children, and its variants.",
+               {{"type", "object"},
+                {"required", {"nodeId"}},
+                {"properties", {{"nodeId", {{"type", "string"}}}}}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  std::string const nid = args.value("nodeId", "");
+                  auto const * node = ctx.graph.findNode(nid);
+                  if (!node)
+                  {
+                      return {{"success", false},
+                              {"error", unknownIdError("nodeId", nid, ctx.graph.nodes(),
+                                                       [](DesignNode const & n) { return n.name; })}};
+                  }
+                  nlohmann::json vars = nlohmann::json::array();
+                  for (auto const & vid : node->variantIds)
+                  {
+                      if (auto const * v = ctx.graph.findVariant(vid))
+                      {
+                          vars.push_back({{"id", v->id},
+                                          {"name", v->name},
+                                          {"status", toString(v->status)},
+                                          {"fidelity", toString(v->fidelity)},
+                                          {"modelResourceId", v->modelResourceId},
+                                          {"functionName", v->functionName},
+                                          {"parameters", v->parameters},
+                                          {"pruningScore", v->evaluation.pruningScore}});
+                      }
+                  }
+                  return {{"success", true},
+                          {"id", node->id},
+                          {"type", toString(node->type)},
+                          {"name", node->name},
+                          {"status", toString(node->status)},
+                          {"addressedRequirements", node->addressedRequirements},
+                          {"children", node->children},
+                          {"variants", std::move(vars)}};
+              });
+
+            registry.registerSyncTool(
+              {"get_children",
+               "List child design nodes for a parent nodeId, or top-level root nodes when omitted.",
+               {{"type", "object"},
+                {"properties", {{"nodeId", {{"type", "string"}}}}}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  std::string const nid = args.value("nodeId", "");
+                  nlohmann::json out = nlohmann::json::array();
+                  if (nid.empty())
+                  {
+                      std::set<std::string> hasParent;
+                      for (auto const & [_id, n] : ctx.graph.nodes())
+                      {
+                          for (auto const & c : n.children)
+                          {
+                              hasParent.insert(c);
+                          }
+                      }
+                      for (auto const & [id, n] : ctx.graph.nodes())
+                      {
+                          if (!hasParent.contains(id))
+                          {
+                              out.push_back({{"id", n.id},
+                                             {"type", toString(n.type)},
+                                             {"name", n.name},
+                                             {"status", toString(n.status)},
+                                             {"variantCount", n.variantIds.size()},
+                                             {"childCount", n.children.size()}});
+                          }
+                      }
+                      return {{"success", true}, {"children", std::move(out)}};
+                  }
+                  auto const * parent = ctx.graph.findNode(nid);
+                  if (!parent)
+                  {
+                      return {{"success", false},
+                              {"error", unknownIdError("nodeId", nid, ctx.graph.nodes(),
+                                                       [](DesignNode const & n) { return n.name; })}};
+                  }
+                  for (auto const & cid : parent->children)
+                  {
+                      if (auto const * child = ctx.graph.findNode(cid))
+                      {
+                          out.push_back({{"id", child->id},
+                                         {"type", toString(child->type)},
+                                         {"name", child->name},
+                                         {"status", toString(child->status)},
+                                         {"variantCount", child->variantIds.size()},
+                                         {"childCount", child->children.size()}});
+                      }
+                  }
+                  return {{"success", true}, {"nodeId", nid}, {"children", std::move(out)}};
+              });
+
+            registry.registerSyncTool(
+              {"get_active_configuration",
+               "Return the currently active system configuration and its selected component variants.",
+               {{"type", "object"}, {"properties", nlohmann::json::object()}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const &) -> nlohmann::json {
+                  auto const active = ctx.graph.activeConfiguration();
+                  if (!active)
+                  {
+                      return {{"success", true}, {"active", false}};
+                  }
+                  return {{"success", true},
+                          {"active", true},
+                          {"configurationId", active->id},
+                          {"name", active->name},
+                          {"selectedVariants", active->selectedVariants},
+                          {"evaluation",
+                           {{"deterministicPassed", active->evaluation.deterministicPassed},
+                            {"deterministicWarnings", active->evaluation.deterministicWarnings},
+                            {"pruningScore", active->evaluation.pruningScore}}},
+                          {"userFeedback", active->userFeedback}};
+              });
+
+            registry.registerSyncTool(
+              {"substitute_variant",
+               "Swap a component variant in a configuration after validating frozen state, interfaces, and catalogue compatibility.",
+               {{"type", "object"},
+                {"required", {"nodeId", "variantId"}},
+                {"properties",
+                 {{"configurationId", {{"type", "string"}}},
+                  {"nodeId", {{"type", "string"}}},
+                  {"variantId", {{"type", "string"}}}}}},
+               tools::ToolPolicy::DesignGraphModification},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  std::string cfgId = args.value("configurationId", "");
+                  if (cfgId.empty())
+                  {
+                      if (auto const active = ctx.graph.activeConfiguration())
+                      {
+                          cfgId = active->id;
+                      }
+                  }
+                  if (cfgId.empty())
+                  {
+                      return {{"success", false}, {"error", "No configurationId provided and no active configuration"}};
+                  }
+                  std::string err;
+                  if (!ctx.graph.substituteVariant(cfgId, args.value("nodeId", ""), args.value("variantId", ""), err))
+                  {
+                      return {{"success", false}, {"error", err}};
+                  }
+                  auto const * cfg = ctx.graph.findConfiguration(cfgId);
+                  std::vector<std::string> violations;
+                  bool const compat = cfg != nullptr ? ctx.catalogue.checkCompatibility(cfg->selectedVariants, violations) : true;
+                  return {{"success", true},
+                          {"configurationId", cfgId},
+                          {"compatible", compat},
+                          {"violations", violations},
+                          {"selectedVariants", cfg ? nlohmann::json(cfg->selectedVariants) : nlohmann::json::object()}};
+              });
+
+            registry.registerSyncTool(
+              {"query_catalogue",
+               "Query the engineering design catalogue for reusable component principles, parameter bounds, interfaces, and snippet templates.",
+               {{"type", "object"},
+                {"properties",
+                 {{"function", {{"type", "string"}}},
+                  {"query", {{"type", "string"}}}}}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  std::string const fn = args.value("function", "");
+                  std::string const q = args.value("query", "");
+                  nlohmann::json items = nlohmann::json::array();
+                  auto matchesQuery = [&](CatalogueEntry const & e) {
+                      if (!fn.empty())
+                      {
+                          if (std::find(e.functions.begin(), e.functions.end(), fn) == e.functions.end())
+                          {
+                              return false;
+                          }
+                      }
+                      if (!q.empty())
+                      {
+                          std::string hay = e.id + " " + e.name;
+                          for (auto const & f : e.functions)
+                          {
+                              hay += " " + f;
+                          }
+                          std::string hayLower = hay;
+                          std::string qLower = q;
+                          std::transform(hayLower.begin(), hayLower.end(), hayLower.begin(), ::tolower);
+                          std::transform(qLower.begin(), qLower.end(), qLower.begin(), ::tolower);
+                          return anyTokenMatches(hayLower, qLower);
+                      }
+                      return true;
+                  };
+                  for (auto const & [_id, e] : ctx.catalogue.entries())
+                  {
+                      if (!matchesQuery(e))
+                      {
+                          continue;
+                      }
+                      nlohmann::json params = nlohmann::json::object();
+                      for (auto const & [pName, p] : e.parameters)
+                      {
+                          params[pName] = {{"type", p.type},
+                                           {"default", p.defaultValue},
+                                           {"minimum", p.hasMin ? nlohmann::json(p.minimum) : nlohmann::json(nullptr)},
+                                           {"maximum", p.hasMax ? nlohmann::json(p.maximum) : nlohmann::json(nullptr)}};
+                      }
+                      items.push_back({{"id", e.id},
+                                       {"name", e.name},
+                                       {"functions", e.functions},
+                                       {"parameters", std::move(params)},
+                                       {"processes", e.processes},
+                                       {"supportsRequired", e.supportsRequired},
+                                       {"interfaces", e.interfaces},
+                                       {"generator", e.generator},
+                                       {"snippetTemplate", e.snippetTemplate}});
+                  }
+                  return {{"success", true}, {"count", items.size()}, {"entries", std::move(items)}};
+              });
+
+            registry.registerSyncTool(
+              {"prune_beam",
+               "Filter incompatible configurations via catalogue rules and prune candidates to the top beamWidth concepts.",
+               {{"type", "object"},
+                {"properties",
+                 {{"beamWidth", {{"type", "integer"}}},
+                  {"candidateIds", {{"type", "array"}, {"items", {{"type", "string"}}}}}}}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  std::size_t const beamWidth = static_cast<std::size_t>(std::max(1, args.value("beamWidth", 3)));
+                  std::vector<std::string> requested = readStringArray(args, "candidateIds");
+                  std::vector<Configuration> candidates;
+                  for (auto const & [cid, cfg] : ctx.graph.configurations())
+                  {
+                      if (!requested.empty() && std::find(requested.begin(), requested.end(), cid) == requested.end())
+                      {
+                          continue;
+                      }
+                      Configuration evaluated = cfg;
+                      if (ctx.validateModel)
+                      {
+                          evaluated.evaluation = ctx.validateModel(ctx.graph, evaluated);
+                      }
+                      else
+                      {
+                          evaluated.evaluation = defaultEvaluateConfiguration(ctx.graph, ctx.catalogue, evaluated);
+                      }
+                      candidates.push_back(std::move(evaluated));
+                  }
+                  auto const survivors = ctx.catalogue.pruneBeam(candidates, beamWidth);
+                  nlohmann::json kept = nlohmann::json::array();
+                  for (auto const & s : survivors)
+                  {
+                      kept.push_back({{"configurationId", s.id},
+                                      {"name", s.name},
+                                      {"pruningScore", s.evaluation.pruningScore},
+                                      {"passed", s.evaluation.deterministicPassed},
+                                      {"warnings", s.evaluation.deterministicWarnings}});
+                  }
+                  return {{"success", true},
+                          {"beamWidth", beamWidth},
+                          {"candidateCount", candidates.size()},
+                          {"survivors", std::move(kept)}};
+              });
+
+            registry.registerSyncTool(
+              {"get_bounding_box",
+               "Return the current model bounding box and overall dimensions in millimetres.",
+               {{"type", "object"}, {"properties", nlohmann::json::object()}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const &) -> nlohmann::json {
+                  if (!ctx.document)
+                  {
+                      return {{"success", false}, {"error", "No active document"}};
+                  }
+                  auto const bbox = ctx.document->computeBoundingBox();
+                  bool const valid = bbox.min.x < bbox.max.x && bbox.min.y < bbox.max.y && bbox.min.z < bbox.max.z;
+                  if (!valid)
+                  {
+                      return {{"success", false}, {"error", "Bounding box is empty or invalid"}};
+                  }
+                  return {{"success", true},
+                          {"min", {bbox.min.x, bbox.min.y, bbox.min.z}},
+                          {"max", {bbox.max.x, bbox.max.y, bbox.max.z}},
+                          {"dimensionsMm", {bbox.max.x - bbox.min.x, bbox.max.y - bbox.min.y, bbox.max.z - bbox.min.z}}};
+              });
+
+            registry.registerSyncTool(
+              {"measure_thickness",
+               "Measure deterministic minimum wall thickness on the current model.",
+               {{"type", "object"},
+                {"properties", {{"minWallThicknessMm", {{"type", "number"}}}}}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  if (!ctx.document)
+                  {
+                      return {{"success", false}, {"error", "No active document"}};
+                  }
+                  PrintabilityLimits limits;
+                  limits.minWallThicknessMm = args.value("minWallThicknessMm", limits.minWallThicknessMm);
+                  auto const report = ManufacturingValidator::analyzeDocument(*ctx.document, ctx.graph, limits);
+                  return {{"success", true},
+                          {"hasMeshMetrics", report.hasMeshMetrics},
+                          {"minWallThicknessMm", report.minWallThicknessMm},
+                          {"thresholdMm", limits.minWallThicknessMm},
+                          {"passed", report.minWallThicknessMm <= 0.0 || report.minWallThicknessMm >= limits.minWallThicknessMm},
+                          {"warnings", report.warnings}};
+              });
+
+            registry.registerSyncTool(
+              {"check_printability",
+               "Run full deterministic manufacturing and printability analysis (3MF validity, bounds, wall thickness, overhangs, bridges, materials).",
+               {{"type", "object"},
+                {"properties",
+                 {{"minWallThicknessMm", {{"type", "number"}}},
+                  {"maxOverhangAngleDeg", {{"type", "number"}}},
+                  {"maxBridgeLengthMm", {{"type", "number"}}}}}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  if (!ctx.document)
+                  {
+                      return {{"success", false}, {"error", "No active document"}};
+                  }
+                  PrintabilityLimits limits;
+                  limits.minWallThicknessMm = args.value("minWallThicknessMm", limits.minWallThicknessMm);
+                  limits.maxOverhangAngleDeg = args.value("maxOverhangAngleDeg", limits.maxOverhangAngleDeg);
+                  limits.maxBridgeLengthMm = args.value("maxBridgeLengthMm", limits.maxBridgeLengthMm);
+                  auto const report = ManufacturingValidator::analyzeDocument(*ctx.document, ctx.graph, limits);
+                  nlohmann::json res = report.toJson();
+                  res["success"] = true;
+                  return res;
+              });
+
+            registry.registerSyncTool(
+              {"compare_variants",
+               "Compare two or more variants (or all variants of a nodeId) side by side across parameters, interfaces, and evaluations.",
+               {{"type", "object"},
+                {"properties",
+                 {{"nodeId", {{"type", "string"}}},
+                  {"variantIds", {{"type", "array"}, {"items", {{"type", "string"}}}}}}}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  std::vector<std::string> ids = readStringArray(args, "variantIds");
+                  std::string const nid = args.value("nodeId", "");
+                  if (ids.empty() && !nid.empty())
+                  {
+                      if (auto const * node = ctx.graph.findNode(nid))
+                      {
+                          ids = node->variantIds;
+                      }
+                  }
+                  if (ids.empty())
+                  {
+                      return {{"success", false}, {"error", "Provide variantIds or a nodeId with variants"}};
+                  }
+                  nlohmann::json compared = nlohmann::json::array();
+                  for (auto const & vid : ids)
+                  {
+                      auto const * v = ctx.graph.findVariant(vid);
+                      if (!v)
+                      {
+                          continue;
+                      }
+                      compared.push_back({{"id", v->id},
+                                          {"nodeId", v->nodeId},
+                                          {"name", v->name},
+                                          {"status", toString(v->status)},
+                                          {"fidelity", toString(v->fidelity)},
+                                          {"parameters", v->parameters},
+                                          {"functionName", v->functionName},
+                                          {"modelResourceId", v->modelResourceId},
+                                          {"interfaceCount", v->interfaces.size()},
+                                          {"pruningScore", v->evaluation.pruningScore},
+                                          {"passed", v->evaluation.deterministicPassed},
+                                          {"warnings", v->evaluation.deterministicWarnings}});
+                  }
+                  return {{"success", true}, {"variants", std::move(compared)}};
+              });
+
+            registry.registerSyncTool(
+              {"compare_checkpoint",
+               "Compare a stored checkpoint against the current assembly.",
+               {{"type", "object"},
+                {"required", {"checkpointId"}},
+                {"properties", {{"checkpointId", {{"type", "string"}}}}}},
+               tools::ToolPolicy::ReadOnly},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  std::string const cid = args.value("checkpointId", "");
+                  if (!ctx.checkpoints.hasCheckpoint(cid))
+                  {
+                      return {{"success", false}, {"error", "Unknown checkpointId: " + cid}};
+                  }
+                  if (ctx.document && ctx.document->getAssembly())
+                  {
+                      auto const assemblyToken = ctx.document->waitForAssemblyToken();
+                      nlohmann::json diff = ctx.checkpoints.compareCheckpoint(cid, *ctx.document->getAssembly());
+                      diff["success"] = true;
+                      return diff;
+                  }
+                  nodes::Assembly emptyAssembly;
+                  nlohmann::json diff = ctx.checkpoints.compareCheckpoint(cid, emptyAssembly);
+                  diff["success"] = true;
+                  return diff;
+              });
+
+            registry.registerSyncTool(
+              {"fork_from_checkpoint",
+               "Restore a checkpoint and fork a new active configuration in the design graph to explore an alternative branch.",
+               {{"type", "object"},
+                {"required", {"checkpointId"}},
+                {"properties",
+                 {{"checkpointId", {{"type", "string"}}},
+                  {"name", {{"type", "string"}}}}}},
+               tools::ToolPolicy::ModelModification},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json {
+                  std::string const cpId = args.value("checkpointId", "");
+                  if (!ctx.checkpoints.hasCheckpoint(cpId))
+                  {
+                      return {{"success", false}, {"error", "Unknown checkpointId: " + cpId}};
+                  }
+                  if (ctx.document && ctx.document->getAssembly())
+                  {
+                      auto const assemblyToken = ctx.document->waitForAssemblyToken();
+                      if (!ctx.checkpoints.restoreCheckpoint(cpId, *ctx.document->getAssembly()))
+                      {
+                          return {{"success", false}, {"error", "Failed to restore checkpoint: " + cpId}};
+                      }
+                  }
+                  std::unordered_map<std::string, std::string> baseSelections;
+                  if (auto const active = ctx.graph.activeConfiguration())
+                  {
+                      baseSelections = active->selectedVariants;
+                  }
+                  std::string const forkName = args.value("name", "Fork from " + cpId);
+                  std::string const newCfgId = ctx.graph.createConfiguration(forkName, std::move(baseSelections));
+                  (void)ctx.graph.activateConfiguration(newCfgId);
+                  return {{"success", true},
+                          {"checkpointId", cpId},
+                          {"configurationId", newCfgId},
+                          {"name", forkName}};
+              });
+
+            class GenerateReferenceImageTool final : public tools::ITool
+            {
+              public:
+                explicit GenerateReferenceImageTool(DesignToolContext & context)
+                    : m_ctx(context)
+                {
+                }
+
+                [[nodiscard]] tools::ToolDefinition definition() const override
+                {
+                    return {"generate_reference_image",
+                            "Generate a visual concept reference image using the configured image generator and store it in the design graph.",
+                            {{"type", "object"},
+                             {"required", {"prompt"}},
+                             {"properties",
+                              {{"prompt", {{"type", "string"}}},
+                               {"size", {{"type", "string"}}},
+                               {"caption", {{"type", "string"}}},
+                               {"nodeId", {{"type", "string"}}},
+                               {"variantId", {{"type", "string"}}}}}},
+                            tools::ToolPolicy::DesignGraphModification};
+                }
+
+                [[nodiscard]] coro::task<nlohmann::json>
+                execute(nlohmann::json const & args, io::CancellationToken const & cancellation) override
+                {
+                    if (!m_ctx.generateImage)
+                    {
+                        co_return nlohmann::json{{"success", false},
+                                                 {"error", "No image generator is configured"}};
+                    }
+                    std::string const prompt = args.value("prompt", "");
+                    if (prompt.empty())
+                    {
+                        co_return nlohmann::json{{"success", false}, {"error", "prompt is required"}};
+                    }
+                    agent::ImageGenerationRequest req;
+                    req.prompt = prompt;
+                    req.size = args.value("size", "1024x1024");
+                    auto const resp = co_await m_ctx.generateImage(req, cancellation);
+                    if (!resp.success || resp.image.data.empty())
+                    {
+                        co_return nlohmann::json{
+                          {"success", false},
+                          {"error", resp.error.empty() ? "Image generation failed" : resp.error}};
+                    }
+                    std::string const caption = args.value("caption", prompt);
+                    std::string const nodeId = args.value("nodeId", "");
+                    std::string const variantId = args.value("variantId", "");
+                    std::string const refId = m_ctx.graph.addReferenceImage(
+                      prompt, caption, resp.image.data, resp.image.mimeType, nodeId, variantId);
+                    co_return nlohmann::json{{"success", true},
+                                             {"referenceId", refId},
+                                             {"mimeType", resp.image.mimeType},
+                                             {"base64", agent::encodeBase64(resp.image.data)},
+                                             {"linkedNodeId", nodeId},
+                                             {"linkedVariantId", variantId}};
+                }
+
+              private:
+                DesignToolContext & m_ctx;
+            };
+
+            registry.registerTool(std::make_shared<GenerateReferenceImageTool>(ctx));
+        }
 
         if (!full)
         {

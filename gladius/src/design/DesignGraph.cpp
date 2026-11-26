@@ -204,6 +204,163 @@ namespace gladius::design
         return true;
     }
 
+    bool DesignGraph::setVariantResource(std::string const & variantId,
+                                         uint32_t modelResourceId,
+                                         std::string functionName)
+    {
+        auto it = m_variants.find(variantId);
+        if (it == m_variants.end())
+        {
+            return false;
+        }
+        it->second.modelResourceId = modelResourceId;
+        if (!functionName.empty())
+        {
+            it->second.functionName = std::move(functionName);
+        }
+        return true;
+    }
+
+    bool DesignGraph::substituteVariant(std::string const & configId,
+                                          std::string const & nodeId,
+                                          std::string const & newVariantId,
+                                          std::string & errorOut)
+    {
+        auto cfgIt = m_configurations.find(configId);
+        if (cfgIt == m_configurations.end())
+        {
+            errorOut = "Unknown configurationId: " + configId;
+            return false;
+        }
+        auto nodeIt = m_nodes.find(nodeId);
+        if (nodeIt == m_nodes.end())
+        {
+            errorOut = "Unknown nodeId: " + nodeId;
+            return false;
+        }
+        if (nodeIt->second.status == DesignStatus::Frozen)
+        {
+            errorOut = "Node '" + nodeIt->second.name + "' (" + nodeId + ") is frozen";
+            return false;
+        }
+        auto varIt = m_variants.find(newVariantId);
+        if (varIt == m_variants.end())
+        {
+            errorOut = "Unknown variantId: " + newVariantId;
+            return false;
+        }
+        if (varIt->second.nodeId != nodeId)
+        {
+            errorOut = "Variant '" + newVariantId + "' belongs to node '" + varIt->second.nodeId + "', not '" + nodeId + "'";
+            return false;
+        }
+        if (varIt->second.status == DesignStatus::Rejected)
+        {
+            errorOut = "Variant '" + newVariantId + "' is rejected";
+            return false;
+        }
+
+        // Verify interface compatibility with other selected variants in the configuration.
+        for (auto const & [otherNodeId, otherVarId] : cfgIt->second.selectedVariants)
+        {
+            if (otherNodeId == nodeId)
+            {
+                continue;
+            }
+            auto otherVarIt = m_variants.find(otherVarId);
+            if (otherVarIt == m_variants.end())
+            {
+                continue;
+            }
+            for (auto const & ifaceA : varIt->second.interfaces)
+            {
+                for (auto const & ifaceB : otherVarIt->second.interfaces)
+                {
+                    if (ifaceA.name != ifaceB.name || ifaceA.kind != ifaceB.kind)
+                    {
+                        continue;
+                    }
+                    if (!ifaceA.specification.is_object() || !ifaceB.specification.is_object())
+                    {
+                        continue;
+                    }
+                    for (auto const & [key, valA] : ifaceA.specification.items())
+                    {
+                        if (ifaceB.specification.contains(key) && ifaceB.specification[key] != valA)
+                        {
+                            errorOut = "Interface mismatch on '" + ifaceA.name + "' (" + ifaceA.kind + "), key '" + key +
+                                       "': variant '" + newVariantId + "' has " + valA.dump() + " vs '" + otherVarId +
+                                       "' " + ifaceB.specification[key].dump();
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        cfgIt->second.selectedVariants[nodeId] = newVariantId;
+        return true;
+    }
+
+    DesignNode const * DesignGraph::findNode(std::string const & nodeId) const
+    {
+        auto it = m_nodes.find(nodeId);
+        return it != m_nodes.end() ? &it->second : nullptr;
+    }
+
+    DesignVariant const * DesignGraph::findVariant(std::string const & variantId) const
+    {
+        auto it = m_variants.find(variantId);
+        return it != m_variants.end() ? &it->second : nullptr;
+    }
+
+    Configuration const * DesignGraph::findConfiguration(std::string const & configId) const
+    {
+        auto it = m_configurations.find(configId);
+        return it != m_configurations.end() ? &it->second : nullptr;
+    }
+
+    std::string DesignGraph::addReferenceImage(std::string prompt,
+                                               std::string caption,
+                                               std::vector<std::byte> pngBytes,
+                                               std::string mimeType,
+                                               std::string linkedNodeId,
+                                               std::string linkedVariantId)
+    {
+        std::string const id = "ref_" + std::to_string(m_nextRefImageId++);
+        ReferenceImage img;
+        img.id = id;
+        img.prompt = std::move(prompt);
+        img.caption = std::move(caption);
+        img.linkedNodeId = std::move(linkedNodeId);
+        img.linkedVariantId = std::move(linkedVariantId);
+        img.mimeType = mimeType.empty() ? "image/png" : std::move(mimeType);
+        img.pngBytes = std::move(pngBytes);
+        m_referenceImages.push_back(std::move(img));
+        return id;
+    }
+
+    bool DesignGraph::removeReferenceImage(std::string const & id)
+    {
+        auto const it = std::find_if(m_referenceImages.begin(),
+                                     m_referenceImages.end(),
+                                     [&id](ReferenceImage const & r) { return r.id == id; });
+        if (it == m_referenceImages.end())
+        {
+            return false;
+        }
+        m_referenceImages.erase(it);
+        return true;
+    }
+
+    ReferenceImage const * DesignGraph::findReferenceImage(std::string const & id) const
+    {
+        auto const it = std::find_if(m_referenceImages.begin(),
+                                     m_referenceImages.end(),
+                                     [&id](ReferenceImage const & r) { return r.id == id; });
+        return it != m_referenceImages.end() ? &(*it) : nullptr;
+    }
+
     bool DesignGraph::setVariantEvaluation(std::string const & variantId, Evaluation eval)
     {
         auto it = m_variants.find(variantId);
@@ -391,8 +548,21 @@ namespace gladius::design
                 {"parameters", v.parameters},
                 {"evaluation", evalToJson(v.evaluation)},
                 {"modelResourceId", v.modelResourceId},
+                {"functionName", v.functionName},
                 {"userFeedback", v.userFeedback}
             };
+            if (!v.interfaces.empty())
+            {
+                nlohmann::json ifaces = nlohmann::json::array();
+                for (auto const & iface : v.interfaces)
+                {
+                    ifaces.push_back({{"id", iface.id},
+                                      {"name", iface.name},
+                                      {"kind", iface.kind},
+                                      {"specification", iface.specification}});
+                }
+                item["interfaces"] = std::move(ifaces);
+            }
             if (!v.previewPng.empty())
             {
                 item["previewPngBase64"] = agent::encodeBase64(v.previewPng);
@@ -418,6 +588,23 @@ namespace gladius::design
             cfgsArr.push_back(std::move(item));
         }
 
+        nlohmann::json refsArr = nlohmann::json::array();
+        for (auto const & r : m_referenceImages)
+        {
+            nlohmann::json item = {
+              {"id", r.id},
+              {"prompt", r.prompt},
+              {"caption", r.caption},
+              {"linkedNodeId", r.linkedNodeId},
+              {"linkedVariantId", r.linkedVariantId},
+              {"mimeType", r.mimeType}};
+            if (!r.pngBytes.empty())
+            {
+                item["pngBase64"] = agent::encodeBase64(r.pngBytes);
+            }
+            refsArr.push_back(std::move(item));
+        }
+
         return {
             {"phase", toString(m_phase)},
             {"goal", m_goal},
@@ -425,11 +612,13 @@ namespace gladius::design
             {"nodes", std::move(nodesArr)},
             {"variants", std::move(varsArr)},
             {"configurations", std::move(cfgsArr)},
+            {"referenceImages", std::move(refsArr)},
             {"pendingRequirementChanges", m_pendingRequirementChanges},
             {"nextReqId", m_nextReqId},
             {"nextNodeId", m_nextNodeId},
             {"nextVariantId", m_nextVariantId},
-            {"nextConfigId", m_nextConfigId}
+            {"nextConfigId", m_nextConfigId},
+            {"nextRefImageId", m_nextRefImageId}
         };
     }
 
@@ -520,6 +709,17 @@ namespace gladius::design
                     var.evaluation = evalFromJson(v["evaluation"]);
                 }
                 var.modelResourceId = v.value("modelResourceId", 0u);
+                var.functionName = v.value("functionName", "");
+                if (v.contains("interfaces") && v["interfaces"].is_array())
+                {
+                    for (auto const & ij : v["interfaces"])
+                    {
+                        var.interfaces.push_back(Interface{ij.value("id", ""),
+                                                           ij.value("name", ""),
+                                                           ij.value("kind", ""),
+                                                           ij.value("specification", nlohmann::json::object())});
+                    }
+                }
                 var.userFeedback = v.value("userFeedback", "");
                 if (v.contains("previewPngBase64"))
                 {
@@ -558,12 +758,35 @@ namespace gladius::design
             }
         }
 
+        if (json.contains("referenceImages") && json["referenceImages"].is_array())
+        {
+            for (auto const & r : json["referenceImages"])
+            {
+                ReferenceImage img;
+                img.id = r.value("id", "");
+                img.prompt = r.value("prompt", "");
+                img.caption = r.value("caption", "");
+                img.linkedNodeId = r.value("linkedNodeId", "");
+                img.linkedVariantId = r.value("linkedVariantId", "");
+                img.mimeType = r.value("mimeType", "image/png");
+                if (r.contains("pngBase64"))
+                {
+                    img.pngBytes = agent::decodeBase64(r.value("pngBase64", ""));
+                }
+                if (!img.id.empty())
+                {
+                    m_referenceImages.push_back(std::move(img));
+                }
+            }
+        }
+
         m_pendingRequirementChanges =
           json.value("pendingRequirementChanges", std::vector<std::string>{});
         m_nextReqId = json.value("nextReqId", m_requirements.size() + 1);
         m_nextNodeId = json.value("nextNodeId", m_nodes.size() + 1);
         m_nextVariantId = json.value("nextVariantId", m_variants.size() + 1);
         m_nextConfigId = json.value("nextConfigId", m_configurations.size() + 1);
+        m_nextRefImageId = json.value("nextRefImageId", m_referenceImages.size() + 1);
         return true;
     }
 
@@ -606,10 +829,12 @@ namespace gladius::design
         m_nodes.clear();
         m_variants.clear();
         m_configurations.clear();
+        m_referenceImages.clear();
         m_pendingRequirementChanges.clear();
         m_nextReqId = 1;
         m_nextNodeId = 1;
         m_nextVariantId = 1;
         m_nextConfigId = 1;
+        m_nextRefImageId = 1;
     }
 } // namespace gladius::design

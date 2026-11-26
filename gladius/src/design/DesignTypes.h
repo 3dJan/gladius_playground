@@ -236,8 +236,21 @@ namespace gladius::design
         std::vector<Interface> interfaces;
         Evaluation evaluation;
         uint32_t modelResourceId = 0;
+        std::string functionName;
         std::vector<std::byte> previewPng;
         std::string userFeedback;
+    };
+
+    /// @brief Generated or attached visual reference image stored as a design artifact
+    struct ReferenceImage
+    {
+        std::string id;
+        std::string prompt;
+        std::string caption;
+        std::string linkedNodeId;
+        std::string linkedVariantId;
+        std::string mimeType = "image/png";
+        std::vector<std::byte> pngBytes;
     };
 
     struct DesignNode

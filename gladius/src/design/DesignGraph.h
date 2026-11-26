@@ -78,11 +78,24 @@ namespace gladius::design
         bool isNodeFrozen(std::string const & nodeId) const;
 
         bool defineInterface(std::string const & variantId, Interface iface);
+        bool setVariantResource(std::string const & variantId,
+                                uint32_t modelResourceId,
+                                std::string functionName = "");
         bool setVariantEvaluation(std::string const & variantId, Evaluation eval);
         bool setVariantPreview(std::string const & variantId, std::vector<std::byte> pngBytes);
         bool setConfigurationPreview(std::string const & configId, std::vector<std::byte> pngBytes);
         bool setVariantFeedback(std::string const & variantId, std::string feedback);
         bool setConfigurationFeedback(std::string const & configId, std::string feedback);
+
+        /// @brief Substitute a variant for a node in a configuration after checking frozen state and interfaces
+        bool substituteVariant(std::string const & configId,
+                               std::string const & nodeId,
+                               std::string const & newVariantId,
+                               std::string & errorOut);
+
+        [[nodiscard]] DesignNode const * findNode(std::string const & nodeId) const;
+        [[nodiscard]] DesignVariant const * findVariant(std::string const & variantId) const;
+        [[nodiscard]] Configuration const * findConfiguration(std::string const & configId) const;
 
         std::string createConfiguration(std::string name,
                                         std::unordered_map<std::string, std::string> selectedVariants);
@@ -94,6 +107,23 @@ namespace gladius::design
                                                            std::string const & baseConfigId,
                                                            std::string const & overrideConfigId,
                                                            std::vector<std::string> const & overrideNodeIds);
+
+        /// @brief Store a generated or attached reference image and return its ID
+        std::string addReferenceImage(std::string prompt,
+                                      std::string caption,
+                                      std::vector<std::byte> pngBytes,
+                                      std::string mimeType = "image/png",
+                                      std::string linkedNodeId = "",
+                                      std::string linkedVariantId = "");
+
+        bool removeReferenceImage(std::string const & id);
+
+        [[nodiscard]] std::vector<ReferenceImage> const & referenceImages() const noexcept
+        {
+            return m_referenceImages;
+        }
+
+        [[nodiscard]] ReferenceImage const * findReferenceImage(std::string const & id) const;
 
         [[nodiscard]] std::vector<Requirement> const & requirements() const noexcept
         {
@@ -130,10 +160,12 @@ namespace gladius::design
         std::map<std::string, DesignNode> m_nodes;
         std::map<std::string, DesignVariant> m_variants;
         std::map<std::string, Configuration> m_configurations;
+        std::vector<ReferenceImage> m_referenceImages;
         std::vector<std::string> m_pendingRequirementChanges;
         std::size_t m_nextReqId = 1;
         std::size_t m_nextNodeId = 1;
         std::size_t m_nextVariantId = 1;
         std::size_t m_nextConfigId = 1;
+        std::size_t m_nextRefImageId = 1;
     };
 } // namespace gladius::design

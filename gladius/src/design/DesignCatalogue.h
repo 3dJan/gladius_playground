@@ -2,6 +2,7 @@
 
 #include "DesignTypes.h"
 
+#include <filesystem>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -48,8 +49,19 @@ namespace gladius::design
         void addEntry(CatalogueEntry entry);
         void addCompatibilityRule(CompatibilityRule rule);
         bool loadFromJson(nlohmann::json const & doc);
+        bool loadFromFile(std::filesystem::path const & path);
+        bool loadDefaultCatalogue();
 
         [[nodiscard]] std::vector<CatalogueEntry> findByFunction(std::string const & functionName) const;
+        [[nodiscard]] CatalogueEntry const * findById(std::string const & entryId) const;
+        [[nodiscard]] std::map<std::string, CatalogueEntry> const & entries() const noexcept
+        {
+            return m_entries;
+        }
+        [[nodiscard]] std::vector<CompatibilityRule> const & rules() const noexcept
+        {
+            return m_rules;
+        }
         [[nodiscard]] bool validateParameters(std::string const & entryId,
                                               nlohmann::json const & params,
                                               std::vector<std::string> & errors) const;
