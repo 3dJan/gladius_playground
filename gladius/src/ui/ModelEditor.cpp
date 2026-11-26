@@ -2218,6 +2218,9 @@ namespace gladius::ui
                 // about to be recompiled so validation results would be immediately stale.
                 if (m_doc != nullptr)
                 {
+                    // Reading and validating the assembly must be serialised against
+                    // concurrent graph mutations from worker threads.
+                    auto validationToken = m_doc->waitForAssemblyToken();
                     if (!m_doc->hasStructuralEditPending())
                     {
                         ZoneScopedN("ValidateAssemblyIfDirty");
@@ -2324,120 +2327,128 @@ namespace gladius::ui
 
                     ed::Begin("Model Editor");
 
-                    // Process any pending async STL imports (must run inside ed context).
-                    processPendingStlImports();
-
-                    // Clear selection now that the editor context is active
-                    if (m_pendingClearSelection)
+                    // The node graph may be mutated concurrently by the refresh worker, MCP
+                    // requests or importers. Traverse and mutate it only while holding the
+                    // document's assembly token. handleLibraryDrop() is deliberately excluded:
+                    // it calls Document helpers that acquire the same token themselves.
                     {
-                        ed::ClearSelection();
-                        m_pendingClearSelection = false;
-                    }
+                        auto assemblyToken = m_doc->waitForAssemblyToken();
+                        // Process any pending async STL imports (must run inside ed context).
+                        processPendingStlImports();
 
-                    // Handle any deferred paste request once editor is active
-                    if (m_pendingPasteRequest)
-                    {
-                        m_pendingPasteRequest = false;
-                        pasteClipboardAtMouse();
-                    }
-
-                    m_nodeViewVisitor.setAssembly(m_assembly);
-                    m_nodeViewVisitor.setModelEditor(this);
-                    m_nodeViewVisitor.setExportState(m_exportState);
-                    if (m_currentModel)
-                    {
-                        ZoneScopedN("VisitNodes");
-                        m_currentModel->visitNodes(m_nodeViewVisitor);
-                        m_nodeViewVisitor.renderConnectionPreview();
-
-                        // Update node groups after nodes are rendered and positioned
-                        m_nodeViewVisitor.updateNodeGroups();
-                    }
-
-                    onCreateNode();
-                    onDeleteNode();
-
-                    // Keyboard copy/paste when editor is focused
-                    // Block copy/paste during export to prevent model modifications
-                    bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
-                    if (!exportLocked &&
-                        ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
-                    {
-                        ImGuiIO & io = ImGui::GetIO();
-                        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
+                        // Clear selection now that the editor context is active
+                        if (m_pendingClearSelection)
                         {
-                            copySelectionToClipboard();
+                            ed::ClearSelection();
+                            m_pendingClearSelection = false;
                         }
-                        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
+
+                        // Handle any deferred paste request once editor is active
+                        if (m_pendingPasteRequest)
                         {
-                            m_pendingPasteRequest = true;
+                            m_pendingPasteRequest = false;
+                            pasteClipboardAtMouse();
                         }
-                    }
 
-                    // Handle group dragging via header/border areas - must be called before
-                    // rendering
-                    m_nodeViewVisitor.handleGroupDragging();
-
-                    // Render node group last, to prioritize node interaction
-                    m_nodeViewVisitor.renderNodeGroups();
-
-                    // Allow quick navigation with mouse back/forward buttons when editor is
-                    // hovered
-                    if (isHovered())
-                    {
-                        // Prefer key-based detection for mouse X buttons using ImGuiKey_*
-                        // constants
-                        if (ImGui::IsKeyPressed(ImGuiKey_MouseX1, false))
+                        m_nodeViewVisitor.setAssembly(m_assembly);
+                        m_nodeViewVisitor.setModelEditor(this);
+                        m_nodeViewVisitor.setExportState(m_exportState);
+                        if (m_currentModel)
                         {
-                            goBack();
-                        }
-                        if (ImGui::IsKeyPressed(ImGuiKey_MouseX2, false))
-                        {
-                            goForward();
-                        }
-                    }
+                            ZoneScopedN("VisitNodes");
+                            m_currentModel->visitNodes(m_nodeViewVisitor);
+                            m_nodeViewVisitor.renderConnectionPreview();
 
-                    // Check for group double-clicks and handle them AFTER rendering (so bounds
-                    // are updated)
-                    std::string doubleClickedGroup = m_nodeViewVisitor.checkForGroupClick();
-                    if (!doubleClickedGroup.empty())
-                    {
-                        m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
+                            // Update node groups after nodes are rendered and positioned
+                            m_nodeViewVisitor.updateNodeGroups();
+                        }
+
+                        onCreateNode();
+                        onDeleteNode();
+
+                        // Keyboard copy/paste when editor is focused
+                        // Block copy/paste during export to prevent model modifications
+                        bool const exportLocked = m_exportState && m_exportState->isExportInProgress();
+                        if (!exportLocked &&
+                            ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+                        {
+                            ImGuiIO & io = ImGui::GetIO();
+                            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
+                            {
+                                copySelectionToClipboard();
+                            }
+                            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false))
+                            {
+                                m_pendingPasteRequest = true;
+                            }
+                        }
+
+                        // Handle group dragging via header/border areas - must be called before
+                        // rendering
+                        m_nodeViewVisitor.handleGroupDragging();
+
+                        // Render node group last, to prioritize node interaction
+                        m_nodeViewVisitor.renderNodeGroups();
+
+                        // Allow quick navigation with mouse back/forward buttons when editor is
+                        // hovered
+                        if (isHovered())
+                        {
+                            // Prefer key-based detection for mouse X buttons using ImGuiKey_*
+                            // constants
+                            if (ImGui::IsKeyPressed(ImGuiKey_MouseX1, false))
+                            {
+                                goBack();
+                            }
+                            if (ImGui::IsKeyPressed(ImGuiKey_MouseX2, false))
+                            {
+                                goForward();
+                            }
+                        }
+
+                        // Check for group double-clicks and handle them AFTER rendering (so bounds
+                        // are updated)
+                        std::string doubleClickedGroup = m_nodeViewVisitor.checkForGroupClick();
+                        if (!doubleClickedGroup.empty())
+                        {
+                            m_nodeViewVisitor.handleGroupClick(doubleClickedGroup);
+                        }
                     }
 
                     // Handle drag-and-drop from the library browser
                     handleLibraryDrop();
 
-                    // Handle double-click on FunctionCall/FunctionGradient nodes to navigate
-                    // Uses ed::GetHoveredNode() for correct node-level hover detection
-                    ed::NodeId hoveredNodeId = ed::GetHoveredNode();
-                    if (hoveredNodeId && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                    // Function navigation reads the graph, so it needs the token as well.
                     {
-                        auto nodeId = static_cast<nodes::NodeId>(hoveredNodeId.Get());
-                        auto nodeOpt = m_currentModel->getNode(nodeId);
-                        if (nodeOpt)
+                        auto assemblyToken = m_doc->waitForAssemblyToken();
+                        ed::NodeId hoveredNodeId = ed::GetHoveredNode();
+                        if (hoveredNodeId && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
                         {
-                            nodes::NodeBase * node = *nodeOpt;
-                            nodes::ResourceId functionId = 0;
-                            if (auto * fc = dynamic_cast<nodes::FunctionCall *>(node))
+                            auto nodeId = static_cast<nodes::NodeId>(hoveredNodeId.Get());
+                            auto nodeOpt = m_currentModel->getNode(nodeId);
+                            if (nodeOpt)
                             {
-                                functionId = fc->getFunctionId();
-                            }
-                            else if (auto * fg = dynamic_cast<nodes::FunctionGradient *>(node))
-                            {
-                                fg->resolveFunctionId();
-                                functionId = fg->getFunctionId();
-                            }
+                                nodes::NodeBase * node = *nodeOpt;
+                                nodes::ResourceId functionId = 0;
+                                if (auto * fc = dynamic_cast<nodes::FunctionCall *>(node))
+                                {
+                                    functionId = fc->getFunctionId();
+                                }
+                                else if (auto * fg = dynamic_cast<nodes::FunctionGradient *>(node))
+                                {
+                                    fg->resolveFunctionId();
+                                    functionId = fg->getFunctionId();
+                                }
 
-                            if (functionId != 0)
-                            {
-                                // Pass nodeId as sourceNode - when user navigates back,
-                                // the view will center on this FunctionCall/FunctionGradient node
-                                navigateToFunction(functionId, nodeId);
+                                if (functionId != 0)
+                                {
+                                    // Pass nodeId as sourceNode - when user navigates back,
+                                    // the view will center on this FunctionCall/FunctionGradient node
+                                    navigateToFunction(functionId, nodeId);
+                                }
                             }
                         }
                     }
-
                     ed::End();
                     popNodeEditorTheme();
 
@@ -2495,6 +2506,8 @@ namespace gladius::ui
 
                 if (nodeViewParamChanged)
                 {
+                    // updateTypes() and storeState() read/write the node graph.
+                    auto assemblyToken = m_doc->waitForAssemblyToken();
                     m_dirty = true;
                     parameterChanged = true;
                     m_currentModel->setLogger(m_doc->getSharedLogger());
@@ -3361,7 +3374,12 @@ namespace gladius::ui
 
     void ModelEditor::undo()
     {
-        if (m_history.canUnDo())
+        if (!m_history.canUnDo())
+        {
+            return;
+        }
+
+        auto applyState = [this]()
         {
             std::optional<ResourceId> modelId;
             if (currentModel())
@@ -3376,12 +3394,29 @@ namespace gladius::ui
             }
             switchModel();
             invalidateEverything();
+        };
+
+        // Restoring a history state replaces the whole graph, so it must be
+        // serialised against concurrent mutations from worker threads.
+        if (m_doc)
+        {
+            auto assemblyToken = m_doc->waitForAssemblyToken();
+            applyState();
+        }
+        else
+        {
+            applyState();
         }
     }
 
     void ModelEditor::redo()
     {
-        if (m_history.canReDo())
+        if (!m_history.canReDo())
+        {
+            return;
+        }
+
+        auto applyState = [this]()
         {
             std::optional<ResourceId> modelId;
             if (currentModel())
@@ -3396,6 +3431,18 @@ namespace gladius::ui
             }
             switchModel();
             invalidateEverything();
+        };
+
+        // Restoring a history state replaces the whole graph, so it must be
+        // serialised against concurrent mutations from worker threads.
+        if (m_doc)
+        {
+            auto assemblyToken = m_doc->waitForAssemblyToken();
+            applyState();
+        }
+        else
+        {
+            applyState();
         }
     }
 

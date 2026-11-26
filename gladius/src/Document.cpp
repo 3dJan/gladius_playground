@@ -374,8 +374,9 @@ namespace gladius
         {
             return {};
         }
-        std::lock_guard<std::mutex> lock(m_assemblyMutex, std::adopt_lock);
-        return OptionalAssemblyToken(m_assemblyMutex);
+        // The mutex is already owned here, so the token must adopt that ownership.
+        // Constructing a lock_guard over the mutex would lock it a second time and deadlock.
+        return std::make_optional<AssemblyToken>(m_assemblyMutex, std::adopt_lock);
     }
 
     void Document::resetGeneratorContext()
@@ -691,10 +692,15 @@ namespace gladius
             }
         }
 
-        updateParameterRegistration();
-        updateParameter();
-        m_parameterDirty = true;
-        m_contoursDirty = true;
+        {
+            // These graph mutations are read by the UI traversal, so they need the assembly token.
+            // We already hold the compute token, keeping the established compute -> assembly order.
+            auto assemblyToken = waitForAssemblyToken();
+            updateParameterRegistration();
+            updateParameter();
+            m_parameterDirty = true;
+            m_contoursDirty = true;
+        }
 
         if (isStale())
         {
@@ -702,7 +708,12 @@ namespace gladius
             return;
         }
 
-        updateFlatAssembly();
+        {
+            // Snapshot the flat assembly under the same protection. The token is released before
+            // refreshProgram()/recompileIfRequired() so the UI can keep reading while the GPU works.
+            auto assemblyToken = waitForAssemblyToken();
+            updateFlatAssembly();
+        }
 
         m_core->refreshProgram(m_flatAssembly);
 
@@ -978,13 +989,20 @@ namespace gladius
             auto tempBackupFile = tempDir / "gladius_temp_backup.3mf";
 
             // Preserve the original filename before saving backup
-            auto originalFilename = m_currentAssemblyFileName;
+            std::optional<std::filesystem::path> originalFilename;
+            {
+                auto assemblyToken = waitForAssemblyToken();
+                originalFilename = m_currentAssemblyFileName;
+            }
 
             // Save current model to temporary file
             saveAs(tempBackupFile, false);
 
             // Restore the original filename (backup shouldn't change current file)
-            m_currentAssemblyFileName = originalFilename;
+            {
+                auto assemblyToken = waitForAssemblyToken();
+                m_currentAssemblyFileName = originalFilename;
+            }
 
             // Get original filename for backup naming
             std::string originalName = "untitled";
@@ -1060,12 +1078,12 @@ namespace gladius
         ProfileFunction;
         m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
         {
-
+            auto assemblyToken = waitForAssemblyToken();
             m_assembly = std::make_shared<nodes::Assembly>();
             m_assembly->assemblyModel()->createValidVoid();
+            m_modelFileName.clear();
+            m_3mfmodel.reset();
         }
-        m_modelFileName.clear();
-        m_3mfmodel.reset();
         {
             std::lock_guard<std::mutex> lock(m_resourceDependencyGraphMutex);
             m_resourceDependencyGraph.reset();
@@ -1085,6 +1103,7 @@ namespace gladius
         resetGeneratorContext();
         if (!m_core)
         {
+            auto assemblyToken = waitForAssemblyToken();
             updateFlatAssembly();
         }
     }
@@ -1094,12 +1113,12 @@ namespace gladius
         ProfileFunction;
         m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
         {
-
+            auto assemblyToken = waitForAssemblyToken();
             m_assembly = std::make_shared<nodes::Assembly>();
             m_assembly->assemblyModel()->createBeginEndWithDefaultInAndOuts();
+            m_modelFileName.clear();
+            m_3mfmodel.reset();
         }
-        m_modelFileName.clear();
-        m_3mfmodel.reset();
         {
             std::lock_guard<std::mutex> lock(m_resourceDependencyGraphMutex);
             m_resourceDependencyGraph.reset();
@@ -1119,6 +1138,7 @@ namespace gladius
         resetGeneratorContext();
         if (!m_core)
         {
+            auto assemblyToken = waitForAssemblyToken();
             updateFlatAssembly();
         }
     }
@@ -2582,6 +2602,7 @@ namespace gladius
 
     void Document::saveAs(std::filesystem::path filename, bool writeThumbnail)
     {
+        std::vector<Lib3MF_uint8> thumbnailPng;
         if (filename.extension() == ".3mf")
         {
             bool const webGpuSelected =
@@ -2590,32 +2611,66 @@ namespace gladius
             if (writeThumbnail && !webGpuSelected && m_core)
             {
 #if defined(GLADIUS_ENABLE_OPENCL)
-                auto computeToken = m_core->waitForComputeToken();
-                (void) computeToken;
-
-                // Ensure the GPU pipeline is fully up-to-date so the
-                // thumbnail reflects the latest model state (colors, geometry, etc.).
-                updateParameterRegistration();
-                updateParameter();
-                updateFlatAssembly();
-                m_core->tryRefreshProgramProtected(getFlatAssembly());
-
-                if (!m_core->prepareImageRendering())
                 {
-                    writeThumbnail = false;
+                    auto computeToken = m_core->waitForComputeToken();
+
+                    {
+                        // Refresh the graph for the thumbnail under the assembly token. It is
+                        // released before the GPU work below, which keeps the compute -> assembly
+                        // order and never holds the assembly while the GPU renders.
+                        auto assemblyToken = waitForAssemblyToken();
+                        updateParameterRegistration();
+                        updateParameter();
+                        updateFlatAssembly();
+                    }
+
+                    m_core->tryRefreshProgramProtected(getFlatAssembly());
+
+                    if (m_core->prepareImageRendering())
+                    {
+                        thumbnailPng = renderOpenClThumbnailPng(*m_core, std::nullopt).data;
+                    }
+                    else
+                    {
+                        writeThumbnail = false;
+                    }
                 }
 #else
                 writeThumbnail = false;
 #endif
             }
-            io::saveTo3mfFile(filename, *this, writeThumbnail);
+
+            // Serialize from an immutable snapshot: the live document stays readable for the UI
+            // while the package is written, and no assembly token is held during the file IO.
+            auto const snapshot = createSaveSnapshot();
+            io::Writer3mf writer(getSharedLogger());
+            if (!thumbnailPng.empty())
+            {
+                writer.attachThumbnail(snapshot.model, thumbnailPng);
+            }
+            if (!writer.save(filename, snapshot, false))
+            {
+                throw std::runtime_error("Failed to write 3MF file: " + filename.string());
+            }
+
+            if (!completeSave(filename, snapshot.documentIdentity, snapshot.version))
+            {
+                // The document was edited while the snapshot was written, so it remains changed.
+                auto assemblyToken = waitForAssemblyToken();
+                m_currentAssemblyFileName = filename;
+                if (m_assembly)
+                {
+                    m_assembly->setFilename(filename);
+                }
+            }
+            return;
         }
 
+        auto assemblyToken = waitForAssemblyToken();
         m_fileChanged = false;
         m_currentAssemblyFileName = filename;
-
+        if (m_assembly)
         {
-
             m_assembly->setFilename(filename);
         }
     }
@@ -2768,6 +2823,7 @@ namespace gladius
             return false;
         }
 
+        auto assemblyToken = waitForAssemblyToken();
         m_currentAssemblyFileName = filename;
         m_fileChanged = false;
         if (m_assembly)
@@ -3506,7 +3562,7 @@ namespace gladius
         m_primitiveDateNeedsUpdate = true;
 
         {
-
+            auto assemblyToken = waitForAssemblyToken();
             m_assembly->setFilename(filename);
         }
 
@@ -3514,6 +3570,7 @@ namespace gladius
         {
 #if defined(GLADIUS_ENABLE_OPENCL)
             newEmptyModel();
+            auto assemblyToken = waitForAssemblyToken();
             io::loadFromOpenVdbFile(filename, *this);
 #else
             throw std::runtime_error("VDB loading is unavailable for the selected backend");
@@ -3522,13 +3579,16 @@ namespace gladius
         }
 
         newFilename.replace_extension(".3mf");
-        m_currentAssemblyFileName = newFilename;
+        {
+            auto assemblyToken = waitForAssemblyToken();
+            m_currentAssemblyFileName = newFilename;
+        }
 
         if (filename.extension() == ".3mf")
         {
             m_documentIdentity.fetch_add(1, std::memory_order_acq_rel);
             {
-
+                auto assemblyToken = waitForAssemblyToken();
                 m_assembly = {};
             }
 
@@ -3797,7 +3857,7 @@ namespace gladius
     void Document::deleteResource(ResourceId id)
     {
         {
-
+            auto assemblyToken = waitForAssemblyToken();
             m_assembly->deleteModel(id); // will just return if not a function
         }
 
@@ -3833,7 +3893,7 @@ namespace gladius
     void Document::deleteFunction(ResourceId id)
     {
         {
-
+            auto assemblyToken = waitForAssemblyToken();
             m_assembly->deleteModel(id);
         }
 
@@ -4204,6 +4264,7 @@ namespace gladius
     void Document::update3mfModel()
     {
         io::Writer3mf writer(getSharedLogger());
+        auto assemblyToken = waitForAssemblyToken();
         writer.updateModel(*this);
     }
 
@@ -4214,10 +4275,16 @@ namespace gladius
             throw std::runtime_error("No 3MF model available to update the document.");
         }
 
+        // Resolved before the token: this helper locks the compute mutex internally, and an
+        // assembly token must never be held while acquiring it (see the compute -> assembly rule).
+        auto const nanoVdbBuildPolicy = getNanoVdbBuildPolicy();
+
         io::Importer3mf importer{getSharedLogger()};
         importer.setMeshRepairConfig(m_meshRepairConfig);
         importer.setMeshSdfEvaluationConfig(m_meshSdfEvaluationConfig);
-        importer.setNanoVdbBuildPolicy(getNanoVdbBuildPolicy());
+        importer.setNanoVdbBuildPolicy(nanoVdbBuildPolicy);
+
+        auto assemblyToken = waitForAssemblyToken();
 
         // Load build items from the 3MF model
         clearBuildItems();
@@ -4230,8 +4297,6 @@ namespace gladius
 
             m_assembly->updateInputsAndOutputs();
         }
-
-        // Update the assembly inputs and outputs
     }
 
     void Document::rebuildResourceDependencyGraph()

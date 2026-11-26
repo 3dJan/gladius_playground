@@ -802,34 +802,39 @@ namespace gladius
                             if (assembly)
                             {
                                 auto const resourceId = res->GetModelResourceID();
-                                auto model = assembly->findModel(resourceId);
-                                if (model)
+                                nlohmann::json constants = nlohmann::json::array();
                                 {
-                                    nlohmann::json constants = nlohmann::json::array();
-                                    for (auto & [nodeId, nodePtr] : *model)
+                                    // Token: the node traversal must not run concurrently
+                                    // with assembly mutations from other threads.
+                                    auto const assemblyToken = document->waitForAssemblyToken();
+                                    auto model = assembly->findModel(resourceId);
+                                    if (model)
                                     {
-                                        if (auto * cs = dynamic_cast<nodes::ConstantScalar *>(nodePtr.get()))
+                                        for (auto & [nodeId, nodePtr] : *model)
                                         {
-                                            constants.push_back({
-                                                {"name", cs->getDisplayName()},
-                                                {"type", "float"},
-                                                {"value", cs->getValue()}
-                                            });
-                                        }
-                                        else if (auto * cv = dynamic_cast<nodes::ConstantVector *>(nodePtr.get()))
-                                        {
-                                            auto const v = cv->getValue();
-                                            constants.push_back({
-                                                {"name", cv->getDisplayName()},
-                                                {"type", "vec3"},
-                                                {"value", {v.x, v.y, v.z}}
-                                            });
+                                            if (auto * cs = dynamic_cast<nodes::ConstantScalar *>(nodePtr.get()))
+                                            {
+                                                constants.push_back({
+                                                    {"name", cs->getDisplayName()},
+                                                    {"type", "float"},
+                                                    {"value", cs->getValue()}
+                                                });
+                                            }
+                                            else if (auto * cv = dynamic_cast<nodes::ConstantVector *>(nodePtr.get()))
+                                            {
+                                                auto const v = cv->getValue();
+                                                constants.push_back({
+                                                    {"name", cv->getDisplayName()},
+                                                    {"type", "vec3"},
+                                                    {"value", {v.x, v.y, v.z}}
+                                                });
+                                            }
                                         }
                                     }
-                                    if (!constants.empty())
-                                    {
-                                        r["constants"] = constants;
-                                    }
+                                }
+                                if (!constants.empty())
+                                {
+                                    r["constants"] = constants;
                                 }
                             }
                         }

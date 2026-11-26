@@ -240,44 +240,50 @@ namespace gladius::mcp::tools
             return createToolError(sampleError["error"].get<std::string>());
         }
 
-        // --- Locate the function model ------------------------------------------------
+        // --- Locate the function model and collect its metadata -----------------------
+        // Token: the lookup and metadata collection read the shared graph. It is released
+        // before any backend call below, which acquires the compute mutex.
         auto const assemblyModelId = assembly->getAssemblyModelId();
         bool const isAssembly = (functionId == assemblyModelId);
-        nodes::SharedModel functionModel = isAssembly
-                                             ? assembly->assemblyModel()
-                                             : assembly->findModel(functionId);
-
-        if (!functionModel)
-        {
-            return createToolError(fmt::format("Function with resource ID {} not found.", functionId));
-        }
-
-        // --- Collect input / output metadata ------------------------------------------
+        nodes::SharedModel functionModel;
         std::vector<FunctionInputInfo> inputs;
         std::vector<FunctionOutputInfo> outputInfos;
         int totalInputComponents = 0;
         int totalOutputComponents = 0;
 
-        if (isAssembly)
         {
-            // The assembly model always has a single float3 pos input and a single scalar result.
-            inputs.push_back({"pos", "pos", 3, nodes::ParameterTypeIndex::Float3});
-            totalInputComponents = 3;
-            outputInfos.push_back({"result", 1, nodes::ParameterTypeIndex::Float});
-            totalOutputComponents = 1;
-        }
-        else
-        {
-            inputs = collectFunctionInputs(*functionModel);
-            for (auto const & input : inputs)
+            auto const assemblyToken = document->waitForAssemblyToken();
+
+            functionModel = isAssembly ? assembly->assemblyModel()
+                                       : assembly->findModel(functionId);
+
+            if (!functionModel)
             {
-                totalInputComponents += input.components;
+                return createToolError(
+                  fmt::format("Function with resource ID {} not found.", functionId));
             }
 
-            outputInfos = collectFunctionOutputs(*functionModel);
-            for (auto const & output : outputInfos)
+            if (isAssembly)
             {
-                totalOutputComponents += output.components;
+                // The assembly model always has a single float3 pos input and a single scalar result.
+                inputs.push_back({"pos", "pos", 3, nodes::ParameterTypeIndex::Float3});
+                totalInputComponents = 3;
+                outputInfos.push_back({"result", 1, nodes::ParameterTypeIndex::Float});
+                totalOutputComponents = 1;
+            }
+            else
+            {
+                inputs = collectFunctionInputs(*functionModel);
+                for (auto const & input : inputs)
+                {
+                    totalInputComponents += input.components;
+                }
+
+                outputInfos = collectFunctionOutputs(*functionModel);
+                for (auto const & output : outputInfos)
+                {
+                    totalOutputComponents += output.components;
+                }
             }
         }
 

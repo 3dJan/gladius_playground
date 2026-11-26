@@ -51,35 +51,44 @@ namespace gladius::mcp::tools
             }
 
             nlohmann::json models = nlohmann::json::array();
+            std::size_t totalModels = 0u;
 
-            // Iterate through all models in the assembly using getFunctions()
-            auto & modelMap = assembly->getFunctions();
-            for (const auto & [resourceId, model] : modelMap)
+            // Token: iterating the function map must not overlap with mutations made by
+            // background workers or other MCP requests. Released before computeBoundingBox(),
+            // which takes the compute mutex.
             {
-                if (model)
+                auto const assemblyToken = document->waitForAssemblyToken();
+
+                // Iterate through all models in the assembly using getFunctions()
+                auto & modelMap = assembly->getFunctions();
+                totalModels = modelMap.size();
+                for (const auto & [resourceId, model] : modelMap)
                 {
-                    nlohmann::json modelInfo;
-                    modelInfo["id"] = resourceId;
-                    modelInfo["name"] =
-                      "Model_" + std::to_string(resourceId); // Generate name from ID
-                    modelInfo["type"] = "sdf_model";
+                    if (model)
+                    {
+                        nlohmann::json modelInfo;
+                        modelInfo["id"] = resourceId;
+                        modelInfo["name"] =
+                          "Model_" + std::to_string(resourceId); // Generate name from ID
+                        modelInfo["type"] = "sdf_model";
 
-                    // Basic model information
-                    modelInfo["has_root_node"] = true; // Assume valid models have nodes
-                    modelInfo["root_node_type"] = "function_graph";
+                        // Basic model information
+                        modelInfo["has_root_node"] = true; // Assume valid models have nodes
+                        modelInfo["root_node_type"] = "function_graph";
 
-                    // Try to get more details about the node structure
-                    modelInfo["node_info"] = {
-                      {"has_geometry", true}, // Assume has geometry if model exists
-                      {"is_function_based", true},
-                      {"supports_parameters", true}};
+                        // Try to get more details about the node structure
+                        modelInfo["node_info"] = {
+                          {"has_geometry", true}, // Assume has geometry if model exists
+                          {"is_function_based", true},
+                          {"supports_parameters", true}};
 
-                    models.push_back(modelInfo);
+                        models.push_back(modelInfo);
+                    }
                 }
             }
 
             hierarchy["models"] = models;
-            hierarchy["total_models"] = modelMap.size();
+            hierarchy["total_models"] = totalModels;
 
             // Get bounding box information
             try
@@ -306,6 +315,9 @@ namespace gladius::mcp::tools
             {
                 return functions; // Return empty vector if no assembly
             }
+
+            // Token: the traversal below reads every function model.
+            auto const assemblyToken = document->waitForAssemblyToken();
 
             // Iterate through all functions in the assembly
             auto & modelMap = assembly->getFunctions();

@@ -713,8 +713,16 @@ namespace gladius::ui
         ImGui::SameLine();
         if (ImGui::SmallButton(ICON_FA_HISTORY " Restore"))
         {
-            if (m_document != nullptr && m_document->getAssembly()
-                && m_checkpoints->restoreCheckpoint(checkpoint.id, *m_document->getAssembly()))
+            bool restored = false;
+            if (m_document != nullptr && m_document->getAssembly())
+            {
+                // Token: replacing the assembly races with UI-thread graph traversal and
+                // background workers. Released before update3mfModel(), which locks itself.
+                auto const assemblyToken = m_document->waitForAssemblyToken();
+                restored = m_checkpoints->restoreCheckpoint(checkpoint.id,
+                                                            *m_document->getAssembly());
+            }
+            if (restored)
             {
                 m_document->update3mfModel();
                 m_document->rebuildResourceDependencyGraph();

@@ -113,16 +113,21 @@ namespace gladius
             {
                 // Bring 3MF model in sync and update assembly IO relationship
                 document->update3mfModel();
-                if (auto assembly = document->getAssembly())
                 {
-                    assembly->updateInputsAndOutputs();
-                }
+                    // The graph update and validation traverse the node graph, so they run while
+                    // the assembly token is held; the backend compile in phase 2 must stay outside.
+                    auto const assemblyToken = document->waitForAssemblyToken();
+                    if (auto assembly = document->getAssembly())
+                    {
+                        assembly->updateInputsAndOutputs();
+                    }
 
-                bool validAsm = document->validateAssembly(nodes::ValidationContext::Api);
-                auto logger = document->getSharedLogger();
-                auto diag = snapshotLogger(logger);
-                phase1.update(diag);
-                phase1["ok"] = validAsm && (static_cast<int>(phase1["errors"]) == 0);
+                    bool validAsm = document->validateAssembly(nodes::ValidationContext::Api);
+                    auto logger = document->getSharedLogger();
+                    auto diag = snapshotLogger(logger);
+                    phase1.update(diag);
+                    phase1["ok"] = validAsm && (static_cast<int>(phase1["errors"]) == 0);
+                }
             }
             catch (const std::exception & e)
             {

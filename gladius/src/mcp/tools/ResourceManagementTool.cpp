@@ -43,43 +43,55 @@ namespace gladius
                 // Update the 3MF model to ensure all resources are up to date
                 document->update3mfModel();
 
-                // Update the assembly to process function graphs and outputs
-                document->getAssembly()->updateInputsAndOutputs();
-
-                auto model3mf = document->get3mfModel();
-                if (!model3mf)
+                auto const scaffold = [&]() -> std::optional<io::VolumetricScaffoldResult>
                 {
-                    setErrorMessage("No 3MF model available");
+                    // Node-graph inspection and mutation run while the assembly token is held;
+                    // updateDocumentFrom3mfModel() locks the mutex itself and must stay outside.
+                    auto const assemblyToken = document->waitForAssemblyToken();
+
+                    // Update the assembly to process function graphs and outputs
+                    document->getAssembly()->updateInputsAndOutputs();
+
+                    auto model3mf = document->get3mfModel();
+                    if (!model3mf)
+                    {
+                        setErrorMessage("No 3MF model available");
+                        return std::nullopt;
+                    }
+
+                    auto functionResource =
+                      io::findFunctionResource(model3mf,
+                                               static_cast<gladius::ResourceId>(functionId));
+                    if (!functionResource)
+                    {
+                        setErrorMessage("Function with ID " + std::to_string(functionId)
+                                        + " not found or is not a function");
+                        return std::nullopt;
+                    }
+
+                    return io::createVolumetricOutputChain(model3mf,
+                                                           functionResource,
+                                                           minPoint,
+                                                           maxPoint,
+                                                           document->getSharedLogger());
+                }();
+                if (!scaffold)
+                {
                     return {false, 0};
                 }
-
-                auto functionResource = io::findFunctionResource(model3mf,
-                                                                 static_cast<gladius::ResourceId>(functionId));
-                if (!functionResource)
+                if (!scaffold->success)
                 {
-                    setErrorMessage("Function with ID " + std::to_string(functionId) +
-                                    " not found or is not a function");
-                    return {false, 0};
-                }
-
-                auto const scaffold = io::createVolumetricOutputChain(model3mf,
-                                                                     functionResource,
-                                                                     minPoint,
-                                                                     maxPoint,
-                                                                     document->getSharedLogger());
-                if (!scaffold.success)
-                {
-                    setErrorMessage("Exception during level set creation: " + scaffold.error);
+                    setErrorMessage("Exception during level set creation: " + scaffold->error);
                     return {false, 0};
                 }
 
                 // Update the document from the 3MF model
                 document->updateDocumentFrom3mfModel();
 
-                setErrorMessage("Level set created successfully from function ID: " +
-                                std::to_string(functionId) + " using mesh ID: " +
-                                std::to_string(scaffold.domainMeshId));
-                return {true, scaffold.levelSetId};
+                setErrorMessage("Level set created successfully from function ID: "
+                                + std::to_string(functionId) + " using mesh ID: "
+                                + std::to_string(scaffold->domainMeshId));
+                return {true, scaffold->levelSetId};
             }
             catch (const std::exception & e)
             {

@@ -2661,11 +2661,16 @@ namespace gladius::io
 
         logWarnings(filename, reader);
 
-        loadImageStacks(filename, model, doc);
-        loadImplicitFunctions(model, doc);
-        loadMeshes(model, doc);
-        // loadComponentObjects(model, doc);
-        loadBuildItems(model, doc);
+        // The loaded resources become graph nodes, so the import must be serialised
+        // against concurrent traversal or mutation of the assembly.
+        {
+            auto assemblyToken = doc.waitForAssemblyToken();
+            loadImageStacks(filename, model, doc);
+            loadImplicitFunctions(model, doc);
+            loadMeshes(model, doc);
+            // loadComponentObjects(model, doc);
+            loadBuildItems(model, doc);
+        }
     }
 
     /// Remove attachments from sourceModel whose paths already exist in targetModel.
@@ -2754,6 +2759,11 @@ namespace gladius::io
         {
             try
             {
+            // The merged graph is read by the UI traversal, so mutate it under the assembly token.
+            // No Document helper below acquires the compute mutex, so the compute -> assembly order
+            // holds when a compute token is already in place.
+            auto assemblyToken = doc.waitForAssemblyToken();
+
             // backup the list of function ids
             std::set<Lib3MF_uint32> functionResourceIds = collectFunctionResourceIds(targetModel);
             // store the ptr to the original functions

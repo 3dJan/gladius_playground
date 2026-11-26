@@ -842,41 +842,47 @@ namespace gladius::mcp::tools
 
                     phase = "snippet_graph_conversion";
             ExpressionParser parser;
-            ExpressionToGraphConverter::setProgramSnippet(programSnippet, *assembly, parser);
-            logStep("Step 2: setProgramSnippet");
-
-            // If the template references a volumetric color on a function that
-            // doesn't have a "color" output (because the snippet only declared
-            // "shape"), add a default constant color so the reference stays valid.
-            // Note: We iterate assembly models (not 3MF resources) because
-            // setProgramSnippet invalidates the 3MF resource pointers.
             {
-                // The template uses functionid=3 (main) for its color reference.
-                // Check the main function's End node for a "color" output.
-                static constexpr nodes::ResourceId MAIN_FUNCTION_ID = 3;
-                auto funcModel = assembly->findModel(MAIN_FUNCTION_ID);
-                if (funcModel)
+                // The snippet rewrite rebuilds the whole node graph, so it runs while the assembly
+                // token is held. update3mfModel() below locks the mutex itself and stays outside.
+                auto const assemblyToken = document->waitForAssemblyToken();
+
+                ExpressionToGraphConverter::setProgramSnippet(programSnippet, *assembly, parser);
+                logStep("Step 2: setProgramSnippet");
+
+                // If the template references a volumetric color on a function that
+                // doesn't have a "color" output (because the snippet only declared
+                // "shape"), add a default constant color so the reference stays valid.
+                // Note: We iterate assembly models (not 3MF resources) because
+                // setProgramSnippet invalidates the 3MF resource pointers.
                 {
-                    auto * endNode = funcModel->getEndNode();
-                    if (endNode != nullptr
-                        && endNode->getParameter(nodes::FieldNames::Color) == nullptr)
+                    // The template uses functionid=3 (main) for its color reference.
+                    // Check the main function's End node for a "color" output.
+                    static constexpr nodes::ResourceId MAIN_FUNCTION_ID = 3;
+                    auto funcModel = assembly->findModel(MAIN_FUNCTION_ID);
+                    if (funcModel)
                     {
-                        // Add a constant default color and wire it to the end node.
-                        auto * constVec = funcModel->create<nodes::ConstantVector>();
-                        constVec->parameter().at(nodes::FieldNames::X) =
-                            nodes::VariantParameter(0.5f);
-                        constVec->parameter().at(nodes::FieldNames::Y) =
-                            nodes::VariantParameter(0.5f);
-                        constVec->parameter().at(nodes::FieldNames::Z) =
-                            nodes::VariantParameter(0.5f);
-                        funcModel->addFunctionOutput(
-                            nodes::FieldNames::Color,
-                            nodes::VariantParameter(nodes::float3{0.5f, 0.5f, 0.5f}));
-                        funcModel->addLink(
-                            constVec->getOutputs().at(nodes::FieldNames::Vector).getId(),
-                            endNode->parameter().at(nodes::FieldNames::Color).getId(),
-                            /*skipCheck=*/true);
-                        funcModel->updateGraphAndOrderIfNeeded();
+                        auto * endNode = funcModel->getEndNode();
+                        if (endNode != nullptr
+                            && endNode->getParameter(nodes::FieldNames::Color) == nullptr)
+                        {
+                            // Add a constant default color and wire it to the end node.
+                            auto * constVec = funcModel->create<nodes::ConstantVector>();
+                            constVec->parameter().at(nodes::FieldNames::X) =
+                                nodes::VariantParameter(0.5f);
+                            constVec->parameter().at(nodes::FieldNames::Y) =
+                                nodes::VariantParameter(0.5f);
+                            constVec->parameter().at(nodes::FieldNames::Z) =
+                                nodes::VariantParameter(0.5f);
+                            funcModel->addFunctionOutput(
+                                nodes::FieldNames::Color,
+                                nodes::VariantParameter(nodes::float3{0.5f, 0.5f, 0.5f}));
+                            funcModel->addLink(
+                                constVec->getOutputs().at(nodes::FieldNames::Vector).getId(),
+                                endNode->parameter().at(nodes::FieldNames::Color).getId(),
+                                /*skipCheck=*/true);
+                            funcModel->updateGraphAndOrderIfNeeded();
+                        }
                     }
                 }
             }

@@ -664,6 +664,7 @@ namespace gladius::design
               {
                   return {{"success", false}, {"error", "No active document assembly"}};
               }
+              auto const assemblyToken = ctx.document->waitForAssemblyToken();
               bool const ok =
                 ctx.transactions.beginEdit(args.value("description", "Agent edit"), *ctx.document->getAssembly());
               return ok ? nlohmann::json{{"success", true}}
@@ -680,6 +681,7 @@ namespace gladius::design
               {
                   return {{"success", false}, {"error", "No active document assembly"}};
               }
+              auto const assemblyToken = ctx.document->waitForAssemblyToken();
               bool const ok = ctx.transactions.commitEdit(*ctx.document->getAssembly());
               return ok ? nlohmann::json{{"success", true}}
                         : nlohmann::json{{"success", false}, {"error", "No active transaction"}};
@@ -695,6 +697,7 @@ namespace gladius::design
               {
                   return {{"success", false}, {"error", "No active document assembly"}};
               }
+              auto const assemblyToken = ctx.document->waitForAssemblyToken();
               bool const ok = ctx.transactions.rollbackEdit(*ctx.document->getAssembly());
               return ok ? nlohmann::json{{"success", true}}
                         : nlohmann::json{{"success", false}, {"error", "No active transaction"}};
@@ -708,16 +711,27 @@ namespace gladius::design
             {"properties", {{"label", {{"type", "string"}}}, {"level", {{"type", "integer"}}}}}},
            tools::ToolPolicy::DesignGraphModification},
           [&ctx](nlohmann::json const & args) -> nlohmann::json {
-              nodes::Assembly emptyAssembly;
-              nodes::Assembly const & target =
-                (ctx.document && ctx.document->getAssembly()) ? *ctx.document->getAssembly() : emptyAssembly;
               std::vector<std::byte> png;
               if (ctx.captureViewport)
               {
                   png = ctx.captureViewport(256, 256, "isometric");
               }
-              std::string const id = ctx.checkpoints.createCheckpoint(
-                args.value("label", ""), args.value("level", 0), target, std::move(png));
+              std::string id;
+              if (ctx.document && ctx.document->getAssembly())
+              {
+                  // Token: snapshotting the assembly copies every node graph.
+                  auto const assemblyToken = ctx.document->waitForAssemblyToken();
+                  id = ctx.checkpoints.createCheckpoint(args.value("label", ""),
+                                                        args.value("level", 0),
+                                                        *ctx.document->getAssembly(),
+                                                        std::move(png));
+              }
+              else
+              {
+                  nodes::Assembly emptyAssembly;
+                  id = ctx.checkpoints.createCheckpoint(
+                    args.value("label", ""), args.value("level", 0), emptyAssembly, std::move(png));
+              }
               return {{"success", true}, {"checkpointId", id}};
           });
 
@@ -734,6 +748,7 @@ namespace gladius::design
                   return {{"success", false}, {"error", "No active document assembly"}};
               }
               std::string const id = args.value("checkpointId", "");
+              auto const assemblyToken = ctx.document->waitForAssemblyToken();
               bool const ok = ctx.checkpoints.restoreCheckpoint(id, *ctx.document->getAssembly());
               return ok ? nlohmann::json{{"success", true}, {"checkpointId", id}}
                         : nlohmann::json{{"success", false}, {"error", "Unknown checkpointId: " + id}};
@@ -869,17 +884,22 @@ namespace gladius::design
               }
               auto const assembly = ctx.document->getAssembly();
               nlohmann::json funcs = nlohmann::json::array();
-              for (auto const & [fid, model] : assembly->getFunctions())
+              // Token: reading every function graph must not overlap with mutations.
+              // Released before collectRenderabilityFacts(), which probes the 3MF model.
               {
-                  if (!model)
+                  auto const assemblyToken = ctx.document->waitForAssemblyToken();
+                  for (auto const & [fid, model] : assembly->getFunctions())
                   {
-                      continue;
+                      if (!model)
+                      {
+                          continue;
+                      }
+                      funcs.push_back({
+                          {"id", fid},
+                          {"name", model->getDisplayName().value_or("")},
+                          {"nodeCount", model->getSize()}
+                      });
                   }
-                  funcs.push_back({
-                      {"id", fid},
-                      {"name", model->getDisplayName().value_or("")},
-                      {"nodeCount", model->getSize()}
-                  });
               }
               // Function counts alone cannot tell the model whether anything will be visible, which
               // is why the scene facts ride along. The bounds probe samples the whole model on the
@@ -943,64 +963,78 @@ namespace gladius::design
               try
               {
                   ctx.document->update3mfModel();
-                  ctx.document->getAssembly()->updateInputsAndOutputs();
-                  auto const model = ctx.document->get3mfModel();
-                  if (!model)
-                  {
-                      return {{"success", false}, {"error", "No 3MF model available"}};
-                  }
 
                   int functionId = args.value("functionId", 0);
-                  if (functionId == 0)
+                  auto const scaffold = [&]() -> io::VolumetricOutputChainReconciliation
                   {
-                      functionId = pickOutputChainFunction(model);
+                      // Everything in this scope inspects or mutates the node graph, so it runs
+                      // while the assembly token is held. updateDocumentFrom3mfModel() and
+                      // refreshModelBlocking() acquire their own locks and must stay outside.
+                      auto const assemblyToken = ctx.document->waitForAssemblyToken();
+
+                      ctx.document->getAssembly()->updateInputsAndOutputs();
+                      auto const fail = [](std::string message)
+                      {
+                          io::VolumetricOutputChainReconciliation result{};
+                          result.error = std::move(message);
+                          return result;
+                      };
+                      auto const model = ctx.document->get3mfModel();
+                      if (!model)
+                      {
+                          return fail("No 3MF model available");
+                      }
+
                       if (functionId == 0)
                       {
-                          return {{"success", false},
-                                  {"error", "Cannot tell which function to render. Pass functionId "
-                                            "with the id of the function that returns the shape."}};
+                          functionId = pickOutputChainFunction(model);
+                          if (functionId == 0)
+                          {
+                              return fail(
+                                "Cannot tell which function to render. Pass functionId with the id "
+                                "of the function that returns the shape.");
+                          }
                       }
-                  }
 
-                  auto function = io::findFunctionResource(model,
-                                                           static_cast<ResourceId>(functionId));
-                  if (!function)
-                  {
-                      // A function the agent added lives in the 3MF model under the next free id, so
-                      // look it up by the display name the caller already knows.
-                      if (auto const gladiusModel =
-                              ctx.document->getAssembly()->findModel(static_cast<ResourceId>(functionId));
-                          gladiusModel)
+                      auto function = io::findFunctionResource(model,
+                                                               static_cast<ResourceId>(functionId));
+                      if (!function)
                       {
-                          function = io::findFunctionResourceByName(
-                              model, gladiusModel->getDisplayName().value_or(""));
+                          // A function the agent added lives in the 3MF model under the next free
+                          // id, so look it up by the display name the caller already knows.
+                          if (auto const gladiusModel = ctx.document->getAssembly()->findModel(
+                                static_cast<ResourceId>(functionId));
+                              gladiusModel)
+                          {
+                              function = io::findFunctionResourceByName(
+                                model, gladiusModel->getDisplayName().value_or(""));
+                          }
                       }
-                  }
-                  if (!function)
-                  {
-                      return {{"success", false},
-                              {"error", "Function " + std::to_string(functionId)
-                                        + " does not exist. Read get_model_summary for the ids."}};
-                  }
+                      if (!function)
+                      {
+                          return fail("Function " + std::to_string(functionId)
+                                     + " does not exist. Read get_model_summary for the ids.");
+                      }
 
-                  // lib3mf reports a default 'shape' port for every function, so the Gladius
-                  // function is the only place that can say whether the snippet actually returned
-                  // one. Checking it here keeps the failure from arriving half applied, after the
-                  // level set already exists.
-                  if (!functionReturnsShape(*ctx.document->getAssembly(), functionId))
-                  {
-                      return {{"success", false},
-                              {"error", "Function " + std::to_string(functionId)
-                                        + " has no scalar 'shape' output, so nothing can be sampled "
-                                          "from it. Return the signed distance from an output named "
-                                          "shape (a 'color' output alone is not geometry)."}};
-                  }
+                      // lib3mf reports a default 'shape' port for every function, so the Gladius
+                      // function is the only place that can say whether the snippet actually
+                      // returned one. Checking it here keeps the failure from arriving half
+                      // applied, after the level set already exists.
+                      if (!functionReturnsShape(*ctx.document->getAssembly(), functionId))
+                      {
+                          return fail(
+                            "Function " + std::to_string(functionId)
+                            + " has no scalar 'shape' output, so nothing can be sampled from it. "
+                              "Return the signed distance from an output named shape (a 'color' "
+                              "output alone is not geometry).");
+                      }
 
-                  auto const scaffold = io::reconcileVolumetricOutputChain(model,
-                                                                           function,
-                                                                           minPoint,
-                                                                           maxPoint,
-                                                                           ctx.document->getSharedLogger());
+                      return io::reconcileVolumetricOutputChain(model,
+                                                                function,
+                                                                minPoint,
+                                                                maxPoint,
+                                                                ctx.document->getSharedLogger());
+                  }();
                   if (!scaffold.success)
                   {
                       return {{"success", false}, {"error", scaffold.error}};
@@ -1058,8 +1092,12 @@ namespace gladius::design
                   return {{"success", false}, {"error", "No active document"}};
               }
               auto const assembly = ctx.document->getAssembly();
-              std::string const snippet =
-                ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+              std::string snippet;
+              {
+                  // Token: the listing conversion traverses every function graph.
+                  auto const assemblyToken = ctx.document->waitForAssemblyToken();
+                  snippet = ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+              }
               std::vector<std::string> wanted;
               if (args.contains("functions") && args["functions"].is_array())
               {
@@ -1491,6 +1529,7 @@ namespace gladius::design
                   std::string importedSnippet;
                   if (auto const assembly = ctx.document->getAssembly())
                   {
+                      auto const assemblyToken = ctx.document->waitForAssemblyToken();
                       if (auto const it = assembly->getFunctions().find(match.id);
                           it != assembly->getFunctions().end() && it->second)
                       {
@@ -1626,7 +1665,14 @@ namespace gladius::design
               }
 
               auto const assembly = ctx.document->getAssembly();
-              if (assembly->getFunctions().find(functionId) == assembly->getFunctions().end())
+              bool functionExists = false;
+              {
+                  // Token: the lookup must not race with function-map mutations.
+                  auto const assemblyToken = ctx.document->waitForAssemblyToken();
+                  functionExists =
+                    assembly->getFunctions().find(functionId) != assembly->getFunctions().end();
+              }
+              if (!functionExists)
               {
                   return {{"success", false},
                           {"error", "Function ID not found in active document"}};

@@ -302,13 +302,15 @@ namespace gladius
                 // Track the created resource for potential rollback
                 uint32_t const newFunctionId = model.getResourceId();
 
-                // Set the display name for the function
-                model.setDisplayName(name);
-
-                // Convert expression to node graph (guarded for rollback on exceptions)
+                // Convert expression to node graph (guarded for rollback on exceptions).
+                // The assembly token serializes this against UI-thread traversal and
+                // background workers. deleteFunction()/update3mfModel() lock the same
+                // mutex themselves and must run after the token is released.
                 uint32_t resultNodeId = 0;
                 try
                 {
+                    auto const assemblyToken = document->waitForAssemblyToken();
+                    model.setDisplayName(name);
                     resultNodeId = ExpressionToGraphConverter::convertExpressionToGraph(
                       transformedExpression, model, parser, arguments, output);
                 }
@@ -476,11 +478,14 @@ namespace gladius
 
                 auto & model = document->createNewFunction();
                 uint32_t const newFunctionId = model.getResourceId();
-                model.setDisplayName(name);
 
+                // Token: graph conversion mutates the shared assembly. Released before
+                // any self-locking Document call in the catch/rollback paths.
                 uint32_t resultNodeId = 0;
                 try
                 {
+                    auto const assemblyToken = document->waitForAssemblyToken();
+                    model.setDisplayName(name);
                     resultNodeId = ExpressionToGraphConverter::convertSnippetToGraph(
                       snippet, model, parser, arguments, output, assembly.get());
                 }
@@ -819,6 +824,9 @@ namespace gladius
                     return functions;
                 }
 
+                // Read snapshot of the function list, serialized against graph writers.
+                auto const assemblyToken = document->waitForAssemblyToken();
+
                 // Get all models from the assembly
                 for (const auto & [id, model] : assembly->getFunctions())
                 {
@@ -877,6 +885,10 @@ namespace gladius
                     out["error"] = "No assembly available";
                     return out;
                 }
+
+                // Serialize node/parameter lookup and mutation against UI-thread and
+                // background-worker access to the graph.
+                auto const assemblyToken = document->waitForAssemblyToken();
 
                 auto model = assembly->findModel(functionId);
                 if (!model)
@@ -1094,6 +1106,9 @@ namespace gladius
                     return out;
                 }
 
+                // Read snapshot of every function's constants, serialized against writers.
+                auto const assemblyToken = document->waitForAssemblyToken();
+
                 json changeableParams = json::array();
                 uint32_t totalParams = 0;
 
@@ -1263,6 +1278,9 @@ namespace gladius
                     return out;
                 }
 
+                // Read snapshot of the function graph, serialized against writers.
+                auto const assemblyToken = document->waitForAssemblyToken();
+
                 auto model = assembly->findModel(functionId);
                 if (!model)
                 {
@@ -1430,117 +1448,137 @@ namespace gladius
                     return out;
                 }
 
-                auto model = assembly->findModel(functionId);
-                if (!model && functionId == assembly->getAssemblyModelId())
+                // The token serializes model lookup, snippet validation and the in-place
+                // graph replacement against UI-thread traversal and background workers.
+                // It is released at scope exit, before update3mfModel(), which locks the
+                // same mutex itself.
+                std::vector<FunctionArgument> effectiveArgs;
+                std::string normalized;
+                bool const committed = [&]() -> bool
                 {
-                    model = assembly->assemblyModel();
-                }
-                if (!model)
-                {
-                    out["success"] = false;
-                    out["error"] = "Function not found: " + std::to_string(functionId);
-                    return out;
-                }
+                    auto const assemblyToken = document->waitForAssemblyToken();
 
-                // Extract existing connected outputs from the model's End node so we
-                // preserve arbitrary output names (e.g. "shape", "color", custom names).
-                std::vector<FunctionOutput> outputs;
-                auto * existingEnd = model->getEndNode();
-                if (existingEnd)
-                {
-                    for (auto const & [name, param] : existingEnd->constParameter())
+                    auto model = assembly->findModel(functionId);
+                    if (!model && functionId == assembly->getAssemblyModelId())
                     {
-                        if (param.getConstSource().has_value())
+                        model = assembly->assemblyModel();
+                    }
+                    if (!model)
+                    {
+                        out["success"] = false;
+                        out["error"] = "Function not found: " + std::to_string(functionId);
+                        return false;
+                    }
+
+                    // Extract existing connected outputs from the model's End node so we
+                    // preserve arbitrary output names (e.g. "shape", "color", custom names).
+                    std::vector<FunctionOutput> outputs;
+                    auto * existingEnd = model->getEndNode();
+                    if (existingEnd)
+                    {
+                        for (auto const & [name, param] : existingEnd->constParameter())
                         {
-                            auto typeIdx = param.getConstSource()->type;
-                            ArgumentType argType = ArgumentType::Scalar;
-                            if (typeIdx == nodes::ParameterTypeIndex::Float3)
-                                argType = ArgumentType::Vector;
-                            else if (typeIdx == nodes::ParameterTypeIndex::Matrix4)
-                                argType = ArgumentType::Matrix;
-                            outputs.emplace_back(name, argType);
+                            if (param.getConstSource().has_value())
+                            {
+                                auto typeIdx = param.getConstSource()->type;
+                                ArgumentType argType = ArgumentType::Scalar;
+                                if (typeIdx == nodes::ParameterTypeIndex::Float3)
+                                    argType = ArgumentType::Vector;
+                                else if (typeIdx == nodes::ParameterTypeIndex::Matrix4)
+                                    argType = ArgumentType::Matrix;
+                                outputs.emplace_back(name, argType);
+                            }
                         }
                     }
-                }
-                if (outputs.empty())
-                {
-                    FunctionOutput output;
-                    output.name = "shape";
-                    output.type =
-                      (outputType == "vec3" || outputType == "vector" || outputType == "float3")
-                        ? ArgumentType::Vector
-                        : ArgumentType::Scalar;
-                    outputs.push_back(output);
-                }
-
-                // Extract existing arguments from the model's Begin node if none provided
-                std::vector<FunctionArgument> effectiveArgs = arguments;
-                if (effectiveArgs.empty())
-                {
-                    auto * existingBegin = model->getBeginNode();
-                    if (existingBegin)
+                    if (outputs.empty())
                     {
-                        for (auto const & [name, paramPtr] : existingBegin->getArguments())
-                        {
-                            if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float3)
-                            {
-                                effectiveArgs.emplace_back(name, ArgumentType::Vector);
-                            }
-                            else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float)
-                            {
-                                effectiveArgs.emplace_back(name, ArgumentType::Scalar);
-                            }
-                        }
+                        FunctionOutput output;
+                        output.name = "shape";
+                        output.type =
+                          (outputType == "vec3" || outputType == "vector" || outputType == "float3")
+                            ? ArgumentType::Vector
+                            : ArgumentType::Scalar;
+                        outputs.push_back(output);
+                    }
 
-                        // Fallback: if getArguments() returned nothing (e.g. legacy model
-                        // with output ports but no parameter entries), infer from outputs
-                        if (effectiveArgs.empty())
+                    // Extract existing arguments from the model's Begin node if none provided
+                    effectiveArgs = arguments;
+                    if (effectiveArgs.empty())
+                    {
+                        auto * existingBegin = model->getBeginNode();
+                        if (existingBegin)
                         {
-                            for (auto const & [name, port] : existingBegin->getOutputs())
+                            for (auto const & [name, paramPtr] : existingBegin->getArguments())
                             {
-                                if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                                if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float3)
                                 {
                                     effectiveArgs.emplace_back(name, ArgumentType::Vector);
                                 }
-                                else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                                else if (paramPtr->getTypeIndex() == nodes::ParameterTypeIndex::Float)
                                 {
                                     effectiveArgs.emplace_back(name, ArgumentType::Scalar);
                                 }
                             }
+
+                            // Fallback: if getArguments() returned nothing (e.g. legacy model
+                            // with output ports but no parameter entries), infer from outputs
+                            if (effectiveArgs.empty())
+                            {
+                                for (auto const & [name, port] : existingBegin->getOutputs())
+                                {
+                                    if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float3)
+                                    {
+                                        effectiveArgs.emplace_back(name, ArgumentType::Vector);
+                                    }
+                                    else if (port.getTypeIndex() == nodes::ParameterTypeIndex::Float)
+                                    {
+                                        effectiveArgs.emplace_back(name, ArgumentType::Scalar);
+                                    }
+                                }
+                            }
                         }
                     }
-                }
 
-                // Validate by parsing into a temporary model first
-                ExpressionParser parser;
-                nodes::Model tempModel;
-                tempModel.createBeginEnd();
+                    // Validate by parsing into a temporary model first
+                    ExpressionParser parser;
+                    nodes::Model tempModel;
+                    tempModel.createBeginEnd();
 
-                auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
-                  snippet, tempModel, parser, effectiveArgs, outputs, assembly.get());
-                if (nodeId == 0)
+                    auto nodeId = ExpressionToGraphConverter::convertSnippetToGraph(
+                      snippet, tempModel, parser, effectiveArgs, outputs, assembly.get());
+                    if (nodeId == 0)
+                    {
+                        out["success"] = false;
+                        out["error"] = "Failed to parse snippet. Graph unchanged.";
+                        return false;
+                    }
+
+                    // Success: move validated graph into the real model, preserving identity
+                    auto savedName = model->getModelName();
+                    auto savedDisplayName = model->getDisplayName();
+                    auto savedResourceId = model->getResourceId();
+                    auto savedManaged = model->isManaged();
+
+                    *model = std::move(tempModel);
+
+                    model->setModelName(savedName);
+                    if (savedDisplayName.has_value())
+                    {
+                        model->setDisplayName(*savedDisplayName);
+                    }
+                    model->setResourceId(savedResourceId);
+                    model->setManaged(savedManaged);
+                    model->updateGraphAndOrderIfNeeded();
+
+                    normalized = ExpressionToGraphConverter::convertGraphToSnippet(
+                      *model, effectiveArgs, outputs, assembly.get());
+                    return true;
+                }();
+
+                if (!committed)
                 {
-                    out["success"] = false;
-                    out["error"] = "Failed to parse snippet. Graph unchanged.";
                     return out;
                 }
-
-                // Success: move validated graph into the real model, preserving identity
-                auto savedName = model->getModelName();
-                auto savedDisplayName = model->getDisplayName();
-                auto savedResourceId = model->getResourceId();
-                auto savedManaged = model->isManaged();
-
-                *model = std::move(tempModel);
-
-                model->setModelName(savedName);
-                if (savedDisplayName.has_value())
-                {
-                    model->setDisplayName(*savedDisplayName);
-                }
-                model->setResourceId(savedResourceId);
-                model->setManaged(savedManaged);
-                model->updateGraphAndOrderIfNeeded();
 
                 // Sync changes to 3MF model so flattening/compilation works
                 document->update3mfModel();
@@ -1548,9 +1586,6 @@ namespace gladius
                 // Rebuild resource dependency graph to reflect any changed function references
                 document->rebuildResourceDependencyGraph();
 
-                // Return the normalized snippet
-                auto normalized = ExpressionToGraphConverter::convertGraphToSnippet(
-                  *model, effectiveArgs, outputs, assembly.get());
                 out["success"] = true;
                 out["snippet"] = normalized.empty() ? snippet : normalized;
             }
@@ -1593,10 +1628,13 @@ namespace gladius
                     return out;
                 }
 
+                // Read snapshot of the whole program, serialized against writers.
+                auto const assemblyToken = document->waitForAssemblyToken();
+
                 auto snippet =
                   ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
 
-                auto const & functions = assembly->getFunctions();
+                auto functions = assembly->getFunctions();
 
                 // Resolve build items → function resource IDs (root functions)
                 std::set<nodes::ResourceId> rootFunctionIds;
@@ -1706,7 +1744,59 @@ namespace gladius
 
                 auto const compileStart = std::chrono::steady_clock::now();
                 ExpressionParser parser;
-                auto const report = ProgramSnippetApplier::apply(snippet, *assembly, parser);
+
+                // The token serializes apply() and the optimizer against UI-thread
+                // traversal and background workers. It is released at scope exit, before
+                // update3mfModel(), which locks the same mutex itself.
+                ProgramSnippetApplyReport report;
+                std::size_t totalDeduplicated = 0u;
+                std::size_t totalPrunedDead = 0u;
+                std::size_t totalPeephole = 0u;
+                std::size_t mainGraphNodes = 0u;
+                std::size_t subgraphCount = 0u;
+                std::size_t functionCount = 0u;
+                nlohmann::json warnings = nlohmann::json::array();
+                constexpr std::size_t kModularityWarningThreshold = 150u;
+
+                {
+                    auto const assemblyToken = document->waitForAssemblyToken();
+                    report = ProgramSnippetApplier::apply(snippet, *assembly, parser);
+
+                    auto const assemblyModelId = assembly->getAssemblyModelId();
+                    for (auto & [funcId, funcModel] : assembly->getFunctions())
+                    {
+                        if (!funcModel)
+                        {
+                            continue;
+                        }
+                        auto const optStats = nodes::GraphOptimizer::optimize(*funcModel);
+                        totalDeduplicated += optStats.deduplicatedNodes;
+                        totalPrunedDead += optStats.prunedDeadNodes;
+                        totalPeephole += optStats.peepholeRewrites;
+
+                        auto const nodeCount = funcModel->getSize();
+                        if (funcId == assemblyModelId)
+                        {
+                            mainGraphNodes = nodeCount;
+                        }
+                        else
+                        {
+                            ++subgraphCount;
+                        }
+                        if (nodeCount > kModularityWarningThreshold)
+                        {
+                            warnings.push_back(fmt::format(
+                              "Function '{}' (ID: {}) exceeds {} nodes (currently {}). "
+                              "Extract repeated SDF primitives into helper functions to keep the"
+                              " 3MF function graph modular and shader compilation fast.",
+                              funcModel->getDisplayName().value_or("unnamed"),
+                              funcId,
+                              kModularityWarningThreshold,
+                              nodeCount));
+                        }
+                    }
+                    functionCount = assembly->getFunctions().size();
+                }
 
                 if (!report.failed.empty())
                 {
@@ -1720,48 +1810,6 @@ namespace gladius
                     return out;
                 }
 
-                std::size_t totalDeduplicated = 0u;
-                std::size_t totalPrunedDead = 0u;
-                std::size_t totalPeephole = 0u;
-                std::size_t mainGraphNodes = 0u;
-                std::size_t subgraphCount = 0u;
-                nlohmann::json warnings = nlohmann::json::array();
-                constexpr std::size_t kModularityWarningThreshold = 150u;
-
-                auto const assemblyModelId = assembly->getAssemblyModelId();
-                for (auto & [funcId, funcModel] : assembly->getFunctions())
-                {
-                    if (!funcModel)
-                    {
-                        continue;
-                    }
-                    auto const optStats = nodes::GraphOptimizer::optimize(*funcModel);
-                    totalDeduplicated += optStats.deduplicatedNodes;
-                    totalPrunedDead += optStats.prunedDeadNodes;
-                    totalPeephole += optStats.peepholeRewrites;
-
-                    auto const nodeCount = funcModel->getSize();
-                    if (funcId == assemblyModelId)
-                    {
-                        mainGraphNodes = nodeCount;
-                    }
-                    else
-                    {
-                        ++subgraphCount;
-                    }
-                    if (nodeCount > kModularityWarningThreshold)
-                    {
-                        warnings.push_back(fmt::format(
-                          "Function '{}' (ID: {}) exceeds {} nodes (currently {}). "
-                          "Extract repeated SDF primitives into helper functions to keep the 3MF "
-                          "function graph modular and shader compilation fast.",
-                          funcModel->getDisplayName().value_or("unnamed"),
-                          funcId,
-                          kModularityWarningThreshold,
-                          nodeCount));
-                    }
-                }
-
                 // Sync changes to 3MF model so flattening/compilation works
                 document->update3mfModel();
 
@@ -1772,12 +1820,14 @@ namespace gladius
                                          .count();
 
                 // Return the normalized program
-                auto normalized =
-                  ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
-                auto const & functions = assembly->getFunctions();
+                std::string normalized;
+                {
+                    auto const normalizedToken = document->waitForAssemblyToken();
+                    normalized = ExpressionToGraphConverter::convertProgramToSnippet(*assembly);
+                }
                 out["success"] = true;
                 out["snippet"] = normalized;
-                out["function_count"] = functions.size();
+                out["function_count"] = functionCount;
                 out["stats"] = {{"main_graph_nodes", mainGraphNodes},
                                 {"subgraph_count", subgraphCount},
                                 {"deduplicated_nodes", totalDeduplicated},
