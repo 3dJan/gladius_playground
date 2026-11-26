@@ -111,7 +111,13 @@ namespace gladius::webgpu
         {
             return {.ok = false, .message = getErrorMessage()};
         }
-
+#ifdef __EMSCRIPTEN__
+        // Popping a validation error scope needs the host event loop, which this synchronous
+        // entry point cannot pump. The browser build compiles shaders as part of rendering.
+        (void)shaderSource;
+        return {.ok = false,
+                .message = "Blocking WebGPU program validation is not available in the browser build."};
+#else
         WebGPUComputeContext::DeviceLock const lock(*m_context);
         if (!m_context->isValid())
         {
@@ -187,5 +193,6 @@ namespace gladius::webgpu
                                                       : std::move(state->message)};
         }
         return {.ok = true};
+#endif
     }
 }

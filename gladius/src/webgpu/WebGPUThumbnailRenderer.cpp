@@ -5,6 +5,7 @@
 #include "compute/RenderBackendSession.h"
 #include "kernel/types.h"
 #include "nodes/Assembly.h"
+#include "webgpu/WebGPUBrowserGuard.h"
 #include "ui/OrbitalCamera.h"
 #include "webgpu/WebGPUComputeContext.h"
 #include "webgpu/WebGPUComputeRenderer.h"
@@ -209,6 +210,15 @@ namespace gladius::webgpu
       std::uint32_t const height,
       std::function<bool()> shouldCancel)
     {
+#ifdef __EMSCRIPTEN__
+        (void)context;
+        (void)sceneSnapshot;
+        (void)modelBounds;
+        (void)width;
+        (void)height;
+        (void)shouldCancel;
+        throw makeBrowserBlockingUnavailableError("WebGPU thumbnail rendering");
+#else
         auto const pumpEvents = [&context]()
         {
             if (context && context->isValid())
@@ -224,6 +234,7 @@ namespace gladius::webgpu
                                    {},
                                    std::move(shouldCancel));
         return compute::runBlocking(std::move(task), pumpEvents);
+#endif
     }
 
     compute::AsyncTask<PlainImage> WebGPUThumbnailRenderer::renderPngAsync(

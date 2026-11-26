@@ -86,6 +86,53 @@ namespace gladius::tests
         EXPECT_EQ(sinkCalls, 0);
     }
 
+    TEST(WebGPUSdfEvaluator, EvaluateGeneratedAsync_InvalidShader_SuspendsInsteadOfSpinning)
+    {
+        if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)
+        {
+            GTEST_SKIP() << "WebGPU tests disabled; set GLADIUS_RUN_WEBGPU_TESTS=1 to enable";
+        }
+
+        auto context = std::make_shared<webgpu::WebGPUComputeContext>();
+        if (!context->isValid())
+        {
+            GTEST_SKIP() << "WebGPU device unavailable: " << context->getErrorMessage();
+        }
+
+        webgpu::WebGPUSdfEvaluator evaluator{context};
+        compute::SdfEvaluationRequest request;
+        request.shaderSource = webgpu::WebGPUSdfShaderComposer::compose(R"(
+fn evaluateModel(position: vec3<f32>) -> vec4<f32> {
+    return vec4<f32>(vec3<f32>(0.0), undefined_symbol_here);
+}
+)");
+        auto task = evaluator.evaluateGeneratedAsync(
+          std::move(request),
+          1u,
+          [](std::size_t, std::size_t, std::vector<std::array<float, 3>> & positions)
+          { positions.push_back({0.0f, 0.0f, 0.0f}); },
+          [](std::size_t, std::vector<float> &&) {});
+
+        // The first step submits the shader and the validation error scope. Returning here proves
+        // the scope result is awaited as a suspension; a synchronous wait could not return.
+        task.step();
+        ASSERT_FALSE(task.done());
+
+        int steps = 0;
+        while (!task.done() && steps < 200)
+        {
+            ++steps;
+            task.step();
+            if (!task.done())
+            {
+                context->processEvents();
+            }
+        }
+
+        ASSERT_TRUE(task.done()) << "Task never completed after " << steps << " steps";
+        EXPECT_THROW(task.take(), std::exception);
+    }
+
     TEST(WebGPUSdfEvaluator, ReturnsRawFloatValuesForNonMultiplePointCount)
     {
         if (std::getenv("GLADIUS_RUN_WEBGPU_TESTS") == nullptr)

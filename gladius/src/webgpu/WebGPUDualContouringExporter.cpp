@@ -4,6 +4,7 @@
 #include "io/IndexedTriangleMeshWriter.h"
 #include "io/MeshExportJob.h"
 #include "io/3mf/IndexedTriangleMesh3mfWriter.h"
+#include "webgpu/WebGPUBrowserGuard.h"
 #include "webgpu/WebGPUThumbnailRenderer.h"
 
 #include <exception>
@@ -86,6 +87,14 @@ namespace gladius::webgpu
       io::DualContouringOptions const & options,
       WebGPUSdfEvaluator::CancellationPredicate shouldCancel)
     {
+#ifdef __EMSCRIPTEN__
+        (void)context;
+        (void)snapshot;
+        (void)bounds;
+        (void)options;
+        (void)shouldCancel;
+        throw makeBrowserBlockingUnavailableError("WebGPU mesh export");
+#else
         auto pumpContext = context;
         return compute::runBlocking(generateMeshAsync(std::move(context),
                                                       snapshot,
@@ -93,6 +102,7 @@ namespace gladius::webgpu
                                                       options,
                                                       std::move(shouldCancel)),
                                     [pumpContext] { pumpContext->processEvents(); });
+#endif
     }
 
     compute::AsyncTask<io::IndexedTriangleMesh> WebGPUDualContouringExporter::generateMeshAsync(

@@ -84,6 +84,7 @@ if(GLADIUS_ENABLE_OPENCL OR GLADIUS_ENABLE_WEBGPU)
   target_compile_definitions(${BINARY} PRIVATE GLADIUS_ENABLE_MCP)
 endif()
 target_compile_definitions(${BINARY} PRIVATE GLADIUS_KERNEL_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src/kernel")
+target_compile_definitions(${BINARY} PRIVATE GLADIUS_WEBGPU_SOURCE_DIR="${CMAKE_SOURCE_DIR}/src/webgpu")
 
 if(MSVC)
  target_compile_options(${BINARY} PRIVATE  /W3 /WX /D_USE_MATH_DEFINES)

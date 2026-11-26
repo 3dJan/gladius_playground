@@ -1,6 +1,7 @@
 #include "webgpu/WebGPUMeshColorSampler.h"
 
 #include "io/3mf/FaceColorSampler.h"
+#include "webgpu/WebGPUBrowserGuard.h"
 #include "webgpu/WebGPUSdfEvaluationRequest.h"
 #include "webgpu/WebGPUSdfEvaluator.h"
 
@@ -134,6 +135,15 @@ namespace gladius::webgpu
       io::MeshExportCancellationPredicate shouldCancel,
       ProgressCallback reportProgress)
     {
+#ifdef __EMSCRIPTEN__
+        (void)context;
+        (void)snapshot;
+        (void)mesh;
+        (void)convertToSrgb;
+        (void)shouldCancel;
+        (void)reportProgress;
+        throw makeBrowserBlockingUnavailableError("WebGPU colour sampling");
+#else
         auto pumpContext = context;
         return compute::runBlocking(sampleFaceColorsAsync(std::move(context),
                                                           snapshot,
@@ -142,6 +152,7 @@ namespace gladius::webgpu
                                                           std::move(shouldCancel),
                                                           std::move(reportProgress)),
                                     [pumpContext] { pumpContext->processEvents(); });
+#endif
     }
 
     compute::AsyncTask<io::FaceColors> WebGPUMeshColorSampler::sampleFaceColorsAsync(
@@ -170,6 +181,15 @@ namespace gladius::webgpu
       io::MeshExportCancellationPredicate shouldCancel,
       ProgressCallback reportProgress)
     {
+#ifdef __EMSCRIPTEN__
+        (void)context;
+        (void)snapshot;
+        (void)mesh;
+        (void)convertToSrgb;
+        (void)shouldCancel;
+        (void)reportProgress;
+        throw makeBrowserBlockingUnavailableError("WebGPU colour sampling");
+#else
         auto pumpContext = context;
         return compute::runBlocking(sampleFaceColorsMultipointAsync(std::move(context),
                                                                     snapshot,
@@ -178,6 +198,7 @@ namespace gladius::webgpu
                                                                     std::move(shouldCancel),
                                                                     std::move(reportProgress)),
                                     [pumpContext] { pumpContext->processEvents(); });
+#endif
     }
 
     compute::AsyncTask<std::vector<io::FaceColors>> WebGPUMeshColorSampler::sampleFaceColorsMultipointAsync(

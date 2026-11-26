@@ -1,4 +1,5 @@
 #include "webgpu/WebGPUSdfEvaluator.h"
+#include "webgpu/WebGPUBrowserGuard.h"
 #include "webgpu/WebGPUSdfDispatch.h"
 
 #include <webgpu/webgpu_cpp.h>
@@ -551,12 +552,21 @@ namespace gladius::webgpu
                                                ValueBatchSink valueSink,
                                                CancellationPredicate shouldCancel) const
     {
+#ifdef __EMSCRIPTEN__
+        (void)request;
+        (void)pointCount;
+        (void)positionSource;
+        (void)valueSink;
+        (void)shouldCancel;
+        throw makeBrowserBlockingUnavailableError("WebGPU evaluation");
+#else
         return compute::runBlocking(evaluateGeneratedAsync(request,
                                                            pointCount,
                                                            std::move(positionSource),
                                                            std::move(valueSink),
                                                            std::move(shouldCancel)),
                                     [this] { m_context->processEvents(); });
+#endif
     }
 
     compute::AsyncTask<bool> WebGPUSdfEvaluator::evaluateGeneratedAsync(
@@ -585,12 +595,21 @@ namespace gladius::webgpu
       ColorBatchSink colorSink,
       CancellationPredicate shouldCancel) const
     {
+#ifdef __EMSCRIPTEN__
+        (void)request;
+        (void)pointCount;
+        (void)positionSource;
+        (void)colorSink;
+        (void)shouldCancel;
+        throw makeBrowserBlockingUnavailableError("WebGPU evaluation");
+#else
         return compute::runBlocking(evaluateColorsGeneratedAsync(request,
                                                                  pointCount,
                                                                  std::move(positionSource),
                                                                  std::move(colorSink),
                                                                  std::move(shouldCancel)),
                                     [this] { m_context->processEvents(); });
+#endif
     }
 
     compute::AsyncTask<bool> WebGPUSdfEvaluator::evaluateColorsGeneratedAsync(
@@ -673,10 +692,15 @@ namespace gladius::webgpu
                         result.values.begin() + first);
           },
           {});
+#ifdef __EMSCRIPTEN__
+        (void)task;
+        throw makeBrowserBlockingUnavailableError("WebGPU evaluation");
+#else
         if (!compute::runBlocking(std::move(task), [this] { m_context->processEvents(); }))
         {
             throw std::runtime_error("WebGPU function evaluation was cancelled");
         }
+#endif
         return result;
     }
 
@@ -788,6 +812,14 @@ namespace gladius::webgpu
         {
             co_return false;
         }
+        struct ValidationScopeState
+        {
+            std::atomic<bool> done{false};
+            wgpu::ErrorType type{wgpu::ErrorType::NoError};
+            std::string message;
+        };
+        auto validationState = std::make_shared<ValidationScopeState>();
+        wgpu::ShaderModule shader{};
         // Setup is one synchronous device transaction; no lock survives into batching.
         auto const prepareDevice = [&]
         {
@@ -841,7 +873,7 @@ namespace gladius::webgpu
             wgsl.code = {request.shaderSource.data(), request.shaderSource.size()};
             wgpu::ShaderModuleDescriptor shaderDescriptor;
             shaderDescriptor.nextInChain = &wgsl;
-            auto const shader = device.CreateShaderModule(&shaderDescriptor);
+            shader = device.CreateShaderModule(&shaderDescriptor);
 
             wgpu::BindGroupLayoutEntry bindings[4]{};
             bindings[0].binding = 0u;
@@ -937,55 +969,7 @@ namespace gladius::webgpu
             pipelineDescriptor.compute.entryPoint = "main";
             resources.pipeline = device.CreateComputePipeline(&pipelineDescriptor);
 
-            struct ValidationScopeState
-            {
-                std::atomic<bool> done{false};
-                wgpu::ErrorType type{wgpu::ErrorType::NoError};
-                std::string message;
-            };
-            auto validationState = std::make_shared<ValidationScopeState>();
-            device.PopErrorScope(
-#ifdef __EMSCRIPTEN__
-              wgpu::CallbackMode::AllowSpontaneous,
-#else
-              wgpu::CallbackMode::AllowProcessEvents,
-#endif
-              [validationState](wgpu::PopErrorScopeStatus const status,
-                                wgpu::ErrorType const type,
-                                wgpu::StringView const message)
-              {
-                  if (status != wgpu::PopErrorScopeStatus::Success)
-                  {
-                      validationState->type = wgpu::ErrorType::Unknown;
-                      validationState->message = "Failed to pop WebGPU validation error scope";
-                  }
-                  else
-                  {
-                      validationState->type = type;
-                      if (message.data != nullptr)
-                      {
-                          validationState->message =
-                            message.length == wgpu::kStrlen
-                              ? std::string(message.data)
-                              : std::string(message.data, message.length);
-                      }
-                  }
-                  validationState->done.store(true, std::memory_order_release);
-              });
-
-            while (!validationState->done.load(std::memory_order_acquire) && m_context->isValid())
-            {
-                m_context->processEvents();
-            }
-
-            if (validationState->type != wgpu::ErrorType::NoError || !shader || !resources.pipeline)
-            {
-                throw std::runtime_error(
-                  validationState->message.empty()
-                    ? "WebGPU shader or compute pipeline creation failed"
-                    : validationState->message);
-            }
-
+            // Bind group creation completes the submission that closes the error scope.
             wgpu::BindGroupEntry bindGroupEntries[4]{};
             bindGroupEntries[0].binding = 0u;
             bindGroupEntries[0].buffer = buffers.uniform();
@@ -1052,8 +1036,51 @@ namespace gladius::webgpu
             bindGroupDescriptor.entryCount = static_cast<std::uint32_t>(allEntries.size());
             bindGroupDescriptor.entries = allEntries.data();
             resources.bindGroup = m_context->getDevice().CreateBindGroup(&bindGroupDescriptor);
+
+            device.PopErrorScope(
+#ifdef __EMSCRIPTEN__
+              wgpu::CallbackMode::AllowSpontaneous,
+#else
+              wgpu::CallbackMode::AllowProcessEvents,
+#endif
+              [validationState](wgpu::PopErrorScopeStatus const status,
+                                wgpu::ErrorType const type,
+                                wgpu::StringView const message)
+              {
+                  if (status != wgpu::PopErrorScopeStatus::Success)
+                  {
+                      validationState->type = wgpu::ErrorType::Unknown;
+                      validationState->message = "Failed to pop WebGPU validation error scope";
+                  }
+                  else
+                  {
+                      validationState->type = type;
+                      if (message.data != nullptr)
+                      {
+                          validationState->message =
+                            message.length == wgpu::kStrlen
+                              ? std::string(message.data)
+                              : std::string(message.data, message.length);
+                      }
+                  }
+                  validationState->done.store(true, std::memory_order_release);
+              });
         };
         prepareDevice();
+
+        // The pop callback only runs from the host event loop; never spin waiting for it.
+        co_await compute::WaitUntil([validationState, context = m_context]
+        {
+            return validationState->done.load(std::memory_order_acquire) || !context->isValid();
+        });
+
+        if (validationState->type != wgpu::ErrorType::NoError || !shader || !resources.pipeline)
+        {
+            throw std::runtime_error(
+              validationState->message.empty()
+                ? "WebGPU shader or compute pipeline creation failed"
+                : validationState->message);
+        }
 
         for (std::size_t valueOffset = 0u; valueOffset < pointCount;)
         {

@@ -3,6 +3,7 @@
 #include "io/IndexedTriangleMeshRepair.h"
 #include "io/MeshExportJob.h"
 #include "io/WindingRepair.h"
+#include "webgpu/WebGPUBrowserGuard.h"
 #include "webgpu/WebGPUSdfEvaluationRequest.h"
 
 #include <Eigen/Core>
@@ -314,6 +315,15 @@ namespace gladius::webgpu
       io::MeshExportCancellationPredicate shouldCancel,
       ProgressCallback reportProgress)
     {
+#ifdef __EMSCRIPTEN__
+        (void)context;
+        (void)snapshot;
+        (void)bounds;
+        (void)qualityLevel;
+        (void)shouldCancel;
+        (void)reportProgress;
+        throw makeBrowserBlockingUnavailableError("WebGPU mesh export");
+#else
         auto pumpContext = context;
         return compute::runBlocking(generateMeshAsync(std::move(context),
                                                       snapshot,
@@ -322,6 +332,7 @@ namespace gladius::webgpu
                                                       std::move(shouldCancel),
                                                       std::move(reportProgress)),
                                     [pumpContext] { pumpContext->processEvents(); });
+#endif
     }
 
     compute::AsyncTask<io::IndexedTriangleMesh> WebGPULayeredMarchingCubesExporter::generateMeshAsync(
