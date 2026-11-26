@@ -94,9 +94,8 @@ namespace gladius::ui
         /// @brief Save/load agent state associated with the given .3mf document (sidecar/session)
         void saveSessionState();
         void loadSessionState();
-        /// @param documentSeeded True when the caller already replaced the document with a fresh
-        ///        volumetric template, so the run must not seed it a second time.
-        void onNewDocument(bool documentSeeded = false);
+        /// @brief Clears the design state for a document that was just replaced
+        void onNewDocument();
         void onDocumentSaved(std::filesystem::path const & docPath);
         void onDocumentOpened(std::filesystem::path const & docPath);
 
@@ -130,9 +129,9 @@ namespace gladius::ui
 
         void drainEvents();
         void startRun(std::string const & userPrompt);
+        /// @brief True when at least one configured provider/model can be called right now
+        [[nodiscard]] bool hasUsableModel() const;
         void stopRun();
-        /// @brief Replaces the session document with the volumetric project template
-        void seedVolumetricTemplate();
         [[nodiscard]] agent::DesignContextSnapshot buildContextSnapshot(
           std::string const & knowledgeQuery);
         void loadSettings();
@@ -158,6 +157,10 @@ namespace gladius::ui
             float statusLineHeight = 0.f;
             float controlRowsHeight = 0.f;
             float confirmationHeight = 0.f;
+            /// @brief Space for the pinned agent reply card, 0 while nothing awaits a reply
+            float replyCardHeight = 0.f;
+            /// @brief Space for the provider error line, 0 while nothing failed
+            float errorLineHeight = 0.f;
             float totalHeight = 0.f;
             std::size_t controlRows = 1u;
         };
@@ -176,6 +179,18 @@ namespace gladius::ui
         [[nodiscard]] bool iconButton(char const * icon, char const * tooltip);
         void clearSession();
         void renderConfirmation();
+        /// @brief Pinned card with the agent's last reply when it is waiting on the user
+        void renderReplyCard();
+        /// @brief Height the reply card needs, 0 when nothing awaits a reply
+        [[nodiscard]] float measureReplyCard() const;
+        /// @brief One-line provider failure with a settings shortcut, 0 height when nothing failed
+        void renderErrorLine();
+        /// @brief The provider failure in user terms, empty when nothing failed
+        [[nodiscard]] std::string errorSummary() const;
+        /// @brief Right-aligned autonomy chip: shows the mode and switches it
+        void renderModeChip();
+        /// @brief Continues a run that stopped on a question, optionally after a mode change
+        void continueAfterReply();
         void renderComposer(PromptInput::CardMetrics const & metrics);
         void renderComposerToolbar(PromptInput::ToolbarLayout const & layout, int row);
         void renderImageControls(float buttonSize);
@@ -242,8 +257,6 @@ namespace gladius::ui
         bool m_diagnosticsExpanded = false;
         std::size_t m_lastActivePhaseIndex = kWorkflowPhaseCount;
 
-        bool m_startFresh = true;
-        bool m_documentSeededByCaller = false;
         bool m_followUpRequest = false;
         int m_inspectedImageIndex = -1;
 
@@ -279,6 +292,13 @@ namespace gladius::ui
         std::vector<PendingImageAttachment> m_pendingImages;
         std::unordered_map<std::string, CachedTexture> m_previewTextures;
         std::string m_lastError;
+        /// @brief Classified m_lastError, shown in the footer with a settings shortcut
+        agent::ProviderError m_lastProviderError;
+        /// @brief Last assistant text of a run that stopped without finishing the design
+        std::string m_lastAgentMessage;
+        /// @brief True while the agent's last reply expects an answer from the user
+        bool m_awaitingUserReply = false;
+        bool m_replyExpanded = false;
 
         std::atomic<bool> m_running{false};
         std::thread m_workerThread;

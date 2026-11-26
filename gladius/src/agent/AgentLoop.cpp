@@ -3,11 +3,49 @@
 #include "trace/AgentTrace.h"
 
 #include <algorithm>
+#include <cctype>
 
 namespace gladius::agent
 {
     namespace
     {
+        /**
+         * @brief True when a text-only reply reads as a question to the user.
+         * @details A reply with no tool call is only the end of a run because the model wants
+         *          something from the user. Statements that merely close out the turn are not
+         *          questions, and the panel should not claim the agent is waiting for those.
+         */
+        [[nodiscard]] bool isRequestForUserInput(std::string const & text)
+        {
+            if (text.find('?') != std::string::npos)
+            {
+                return true;
+            }
+            std::string lower;
+            lower.reserve(text.size());
+            for (char c : text)
+            {
+                lower.push_back(
+                  static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            }
+            static constexpr char const * kWaitPhrases[] = {"please confirm",
+                                                            "please tell me",
+                                                            "let me know",
+                                                            "would you like",
+                                                            "do you want",
+                                                            "should i",
+                                                            "which option",
+                                                            "waiting for your"};
+            for (auto const * phrase : kWaitPhrases)
+            {
+                if (lower.find(phrase) != std::string::npos)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         /// @brief Keeps trace error strings short so one failure cannot bloat every later line
         [[nodiscard]] std::string trimForTrace(std::string const & text)
         {
@@ -119,6 +157,12 @@ namespace gladius::agent
                                               AgentRunControl * runControl)
     {
         AgentRunResult result;
+        // Failures reach the UI in both forms: the raw text for diagnostics and a classified
+        // message the panel can put in the status line.
+        auto pushFailure = [&](std::string const & error, bool cancelled = false) {
+            eventQueue.push(
+              AgentFailedEvent{error, classifyErrorText(error, false, cancelled)});
+        };
         auto const startTime = std::chrono::steady_clock::now();
         std::size_t autonomousNudges = 0;
         constexpr std::size_t kMaxAutonomousNudges = 3;
@@ -147,7 +191,7 @@ namespace gladius::agent
             {
                 result.cancelled = true;
                 result.error = "Agent run cancelled";
-                eventQueue.push(AgentFailedEvent{result.error});
+                pushFailure(result.error, true);
                 co_return result;
             }
 
@@ -155,7 +199,7 @@ namespace gladius::agent
                 && std::chrono::steady_clock::now() - startTime > limits.maxWallTime)
             {
                 result.error = "Agent wall-time limit reached";
-                eventQueue.push(AgentFailedEvent{result.error});
+                pushFailure(result.error);
                 co_return result;
             }
 
@@ -206,14 +250,18 @@ namespace gladius::agent
             {
                 result.cancelled = true;
                 result.error = "Agent run cancelled";
-                eventQueue.push(AgentFailedEvent{result.error});
+                pushFailure(result.error, true);
                 co_return result;
             }
 
             if (!response.success)
             {
                 result.error = response.error.empty() ? "Provider completion failed" : response.error;
-                eventQueue.push(AgentFailedEvent{result.error});
+                eventQueue.push(AgentFailedEvent{
+                  result.error,
+                  response.errorInfo.isSet()
+                    ? response.errorInfo
+                    : classifyErrorText(result.error, false, false, response.providerName)});
                 co_return result;
             }
 
@@ -222,8 +270,13 @@ namespace gladius::agent
 
             if (response.toolCalls.empty())
             {
-                if (policy.autonomy() == AutonomyLevel::WorkAutonomously && isDesignComplete
-                    && !becameDesignComplete() && autonomousNudges < kMaxAutonomousNudges)
+                // In autonomous mode a question is never a stopping point: either the model asked
+                // something or the design is still unfinished, and both mean "decide and continue".
+                bool const asksSomething = isRequestForUserInput(result.finalMessage);
+                bool const designPending = isDesignComplete != nullptr && !initiallyComplete;
+                if (policy.autonomy() == AutonomyLevel::WorkAutonomously
+                    && !becameDesignComplete() && autonomousNudges < kMaxAutonomousNudges
+                    && (asksSomething || designPending))
                 {
                     ++autonomousNudges;
                     if (traceRecorder != nullptr)
@@ -239,7 +292,17 @@ namespace gladius::agent
                     continue;
                 }
                 result.completed = true;
-                eventQueue.push(AgentCompletedEvent{result.finalMessage});
+                // A text-only answer that asks something is the agent waiting on the user: the run
+                // is over and nothing moves until they answer, so the UI has to show the question.
+                bool const awaitingUserReply =
+                  asksSomething && policy.autonomy() != AutonomyLevel::WorkAutonomously
+                  && !becameDesignComplete();
+                if (awaitingUserReply && traceRecorder != nullptr)
+                {
+                    traceRecorder->recordNote("awaiting_user_reply",
+                                              {{"turnIndex", result.modelTurns}});
+                }
+                eventQueue.push(AgentCompletedEvent{result.finalMessage, awaitingUserReply});
                 co_return result;
             }
             autonomousNudges = 0;
@@ -255,14 +318,14 @@ namespace gladius::agent
                 {
                     result.cancelled = true;
                     result.error = "Agent run cancelled";
-                    eventQueue.push(AgentFailedEvent{result.error});
+                    pushFailure(result.error, true);
                     co_return result;
                 }
 
                 if (result.toolCalls >= limits.maxToolCalls)
                 {
                     result.error = "Maximum tool-call limit reached";
-                    eventQueue.push(AgentFailedEvent{result.error});
+                    pushFailure(result.error);
                     co_return result;
                 }
 
@@ -385,7 +448,7 @@ namespace gladius::agent
         }
 
         result.error = "Maximum model turn limit reached";
-        eventQueue.push(AgentFailedEvent{result.error});
+        pushFailure(result.error);
         co_return result;
     }
 } // namespace gladius::agent

@@ -32,6 +32,7 @@ namespace gladius::ui
         signals.running = m_running.load();
         signals.agentFailed = !m_lastError.empty();
         signals.planningBlocked = hasBlockedPlanning(m_todos);
+        signals.awaitingUserReply = m_awaitingUserReply && !m_running.load();
         std::size_t passed = 0;
         countDeterministicResults(m_graph, passed, signals.deterministicWarnings);
         return signals;
@@ -141,7 +142,7 @@ namespace gladius::ui
             return;
         }
 
-        auto const headerCommands = m_header.render(m_graph.goal(), m_startFresh);
+        auto const headerCommands = m_header.render(m_graph.goal());
         if (headerCommands.goalCommitRequested)
         {
             m_graph.setGoal(headerCommands.goalDraft);

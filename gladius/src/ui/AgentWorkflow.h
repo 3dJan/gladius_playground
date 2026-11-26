@@ -43,6 +43,8 @@ namespace gladius::ui
         bool running = false;
         bool agentFailed = false;
         bool planningBlocked = false;
+        /// @brief The agent's last reply stopped on a question the user has not answered
+        bool awaitingUserReply = false;
         std::size_t deterministicWarnings = 0;
     };
 

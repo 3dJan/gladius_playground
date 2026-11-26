@@ -1,6 +1,7 @@
 #include "OpenAiProvider.h"
 
 #include "CompletionStopwatch.h"
+#include "ProviderError.h"
 
 #include <map>
 
@@ -14,6 +15,17 @@ namespace gladius::agent
             std::string name;
             std::string argumentsJson;
         };
+
+        /// @brief Fills `errorInfo` when a path produced only a raw provider string
+        void classifyFailure(CompletionResponse & resp,
+                             bool apiKeyEmpty,
+                             std::string const & model)
+        {
+            if (!resp.errorInfo.isSet())
+            {
+                resp.errorInfo = classifyErrorText(resp.error, apiKeyEmpty, false, model);
+            }
+        }
 
         std::string resolveOpenAiUrl(std::string endpoint)
         {
@@ -207,12 +219,14 @@ namespace gladius::agent
         {
             resp.success = false;
             resp.error = body["error"].value("message", body["error"].dump());
+            resp.errorInfo = classifyErrorText(resp.error, false);
             return resp;
         }
         if (!body.contains("choices") || !body["choices"].is_array() || body["choices"].empty())
         {
             resp.success = false;
             resp.error = "Missing choices in OpenAI response";
+            resp.errorInfo = classifyErrorText(resp.error, false);
             return resp;
         }
 
@@ -280,15 +294,23 @@ namespace gladius::agent
         {
             watch.restart();
             HttpResponse const httpRes = co_await m_transport->postJsonAsync(httpReq, cancellation);
+            bool const keyMissing = m_config.apiKey.empty();
             if (httpRes.cancelled || !httpRes.error.empty())
             {
-                co_return CompletionResponse{{}, {}, "", false, httpRes.error};
+                CompletionResponse cancelledResp{{}, {}, "", false, httpRes.error};
+                cancelledResp.errorInfo
+                  = classifyErrorText(httpRes.error, keyMissing, httpRes.cancelled, m_config.model);
+                co_return cancelledResp;
             }
             if (httpRes.statusCode < 200 || httpRes.statusCode >= 300)
             {
-                co_return CompletionResponse{
-                    {}, {}, "", false,
-                    "HTTP " + std::to_string(httpRes.statusCode) + ": " + httpRes.body};
+                CompletionResponse httpResp{
+                  {}, {}, "", false,
+                  "HTTP " + std::to_string(httpRes.statusCode) + ": "
+                    + trimProviderBody(httpRes.body)};
+                httpResp.errorInfo = classifyHttpError(
+                  httpRes.statusCode, httpRes.body, keyMissing, m_config.model);
+                co_return httpResp;
             }
             auto parsed = nlohmann::json::parse(httpRes.body, nullptr, false);
             if (parsed.is_discarded())
@@ -296,6 +318,7 @@ namespace gladius::agent
                 co_return CompletionResponse{{}, {}, "", false, "Invalid JSON from OpenAI endpoint"};
             }
             CompletionResponse resp = parseResponseJson(parsed);
+            classifyFailure(resp, keyMissing, m_config.model);
             // A non-streaming reply has no per-event phases: everything arrived at once.
             watch.onFinish(resp.timing);
             resp.timing.ttftMs = resp.timing.totalMs;
@@ -330,6 +353,8 @@ namespace gladius::agent
               {
                   resp.success = false;
                   resp.error = chunk["error"].value("message", chunk["error"].dump());
+                  resp.errorInfo = classifyErrorText(
+                    resp.error, m_config.apiKey.empty(), false, m_config.model);
                   return;
               }
               // The final usage chunk carries an empty `choices` array, so read it before the early return.
@@ -400,12 +425,18 @@ namespace gladius::agent
         {
             resp.success = false;
             resp.error = httpRes.error;
+            resp.errorInfo
+              = classifyErrorText(httpRes.error, m_config.apiKey.empty(), httpRes.cancelled,
+                                  m_config.model);
             co_return resp;
         }
         if (httpRes.statusCode != 0 && (httpRes.statusCode < 200 || httpRes.statusCode >= 300))
         {
             resp.success = false;
-            resp.error = "HTTP " + std::to_string(httpRes.statusCode) + ": " + httpRes.body;
+            resp.error = "HTTP " + std::to_string(httpRes.statusCode) + ": "
+                  + trimProviderBody(httpRes.body);
+            resp.errorInfo = classifyHttpError(
+              httpRes.statusCode, httpRes.body, m_config.apiKey.empty(), m_config.model);
             co_return resp;
         }
 

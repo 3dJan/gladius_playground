@@ -638,6 +638,136 @@ namespace gladius::agent::tests
         EXPECT_FALSE(provider.capturedRequests.empty());
     }
 
+    TEST(AgentLoop, Run_TextOnlyQuestion_AnnouncesAwaitingUserReply)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(
+          CompletionResponse{"Should I use a hollow shell or a solid core?", {}, "stop", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Design a housing");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(
+          loop.run(conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel));
+
+        // Assert: the question is the last thing the user must see, not a collapsed log line
+        EXPECT_TRUE(res.completed);
+        auto events = queue.drain();
+        auto const * completed = std::get_if<AgentCompletedEvent>(&events.back());
+        ASSERT_NE(completed, nullptr);
+        EXPECT_TRUE(completed->awaitingUserReply);
+    }
+
+    TEST(AgentLoop, Run_TextOnlyStatement_ClosesRunWithoutWaiting)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(
+          CompletionResponse{"The bracket is validated and finished.", {}, "stop", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Finish the bracket");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(
+          loop.run(conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel));
+
+        // Assert
+        EXPECT_TRUE(res.completed);
+        auto events = queue.drain();
+        auto const * completed = std::get_if<AgentCompletedEvent>(&events.back());
+        ASSERT_NE(completed, nullptr);
+        EXPECT_FALSE(completed->awaitingUserReply);
+    }
+
+    TEST(AgentLoop, Run_QuestionWhileAutonomous_KeepsNudgingInsteadOfWaiting)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        registry.registerSyncTool(
+          {"finish_design", "Finish", {{"type", "object"}}, tools::ToolPolicy::DesignGraphModification},
+          [](nlohmann::json const &) { return nlohmann::json{{"success", true}}; });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(
+          CompletionResponse{"Should I use a hollow shell or a solid core?", {}, "stop", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Design a housing");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy(AutonomyLevel::WorkAutonomously, PrivacySettings{});
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(
+          loop.run(conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel));
+
+        // Assert: the nudge keeps the run going instead of ending on a question
+        EXPECT_GT(res.modelTurns, 1u);
+        for (auto const & ev : queue.drain())
+        {
+            if (auto const * completed = std::get_if<AgentCompletedEvent>(&ev))
+            {
+                EXPECT_FALSE(completed->awaitingUserReply);
+            }
+        }
+    }
+
+    TEST(AgentLoop, Run_ProviderFails_ClassifiesErrorForThePanel)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        CompletionResponse failed{"", {}, "", false, "HTTP 401: Invalid API key"};
+        provider.responses.push(failed);
+
+        Conversation conv;
+        conv.appendUserText("Design a housing");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(
+          loop.run(conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel));
+
+        // Assert
+        EXPECT_FALSE(res.completed);
+        auto events = queue.drain();
+        auto const * failedEvent = std::get_if<AgentFailedEvent>(&events.back());
+        ASSERT_NE(failedEvent, nullptr);
+        EXPECT_EQ(failedEvent->errorInfo.kind, ProviderErrorKind::InvalidApiKey);
+    }
+
     TEST(SkillLoader, BuiltInSkills_ContainsModelingAndLibraryReuse)
     {
         SkillLoader loader;

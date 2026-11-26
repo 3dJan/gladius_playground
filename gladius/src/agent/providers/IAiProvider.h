@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Conversation.h"
+#include "ProviderError.h"
 #include "../../io/CancellationToken.h"
 #include "../../tools/ToolDefinition.h"
 
@@ -122,6 +123,8 @@ namespace gladius::agent
         std::string stopReason;
         bool success = true;
         std::string error;
+        /// @brief Classified `error`; empty when the provider could not classify it
+        ProviderError errorInfo;
         /// @brief Empty (`isReported() == false`) when the endpoint reports no usage
         TokenUsage usage;
         /// @brief Provider that produced the response; set by FallbackProvider routing

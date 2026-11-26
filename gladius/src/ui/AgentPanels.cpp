@@ -12,7 +12,6 @@
 #include "../agent/trace/AgentTrace.h"
 #include "../agent/trace/AgentTraceProfile.h"
 #include "../design/Renderability.h"
-#include "../design/TemplateSeed.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "../compute/ComputeCore.h"
 #endif
@@ -366,7 +365,6 @@ namespace gladius::ui
             }
             nlohmann::json state;
             state["version"] = 1;
-            state["startFresh"] = m_startFresh;
             state["designGraph"] = m_graph.toJson();
             state["conversation"] = m_conversation.toJson();
             state["todos"] = m_todos.toJson();
@@ -390,7 +388,7 @@ namespace gladius::ui
         }
     }
 
-    void AgentPanels::onNewDocument(bool documentSeeded)
+    void AgentPanels::onNewDocument()
     {
         m_graph.clear();
         m_conversation.clear();
@@ -398,9 +396,11 @@ namespace gladius::ui
         m_checkpoints.clear();
         m_activityLog.clear();
         m_lastError.clear();
+        m_lastProviderError = {};
+        m_lastAgentMessage.clear();
+        m_awaitingUserReply = false;
+        m_replyExpanded = false;
         m_streamingBuffer.clear();
-        m_startFresh = true;
-        m_documentSeededByCaller = documentSeeded;
     }
 
     void AgentPanels::loadSessionState()
@@ -449,7 +449,6 @@ namespace gladius::ui
             {
                 (void) m_todos.fromJson(state["todos"]);
             }
-            m_startFresh = state.value("startFresh", m_conversation.empty());
         }
         catch (...)
         {
@@ -466,7 +465,6 @@ namespace gladius::ui
         {
             nlohmann::json state = {
               {"version", 1},
-              {"startFresh", m_startFresh},
               {"designGraph", m_graph.toJson()},
               {"conversation", m_conversation.toJson()},
               {"todos", m_todos.toJson()}};
@@ -511,7 +509,6 @@ namespace gladius::ui
                     {
                         (void) m_todos.fromJson(state["todos"]);
                     }
-                    m_startFresh = state.value("startFresh", false);
                     return;
                 }
             }
@@ -539,7 +536,6 @@ namespace gladius::ui
                         {
                             (void) m_todos.fromJson(state["todos"]);
                         }
-                        m_startFresh = state.value("startFresh", m_conversation.empty());
                     }
                 }
             }
@@ -678,33 +674,8 @@ namespace gladius::ui
                   std::move(migratedModels),
                   std::string(m_apiKeyBuf)});
             }
-
-            // Always provide an OpenRouter profile (supports free models without API key)
-            bool hasOpenRouter = false;
-            for (auto const & p : m_providerProfiles)
-            {
-                if (agent::isOpenRouterEndpoint(p.endpoint))
-                {
-                    hasOpenRouter = true;
-                    break;
-                }
-            }
-            if (!hasOpenRouter)
-            {
-                agent::ProviderProfile openRouterProf{
-                  "openrouter_default",
-                  "OpenRouter",
-                  agent::ApiType::OpenAiCompatible,
-                  "https://openrouter.ai/api/v1",
-                  {},
-                  ""};
-                if (auto k =
-                      m_credentialStore.loadSecret(kCredentialService, "profile_openrouter_default"))
-                {
-                    openRouterProf.apiKey = *k;
-                }
-                m_providerProfiles.push_back(std::move(openRouterProf));
-            }
+            // No provider is seeded by default: every provider needs an API key anyway, so an empty
+            // list is an honest state. The composer offers "Configure providers" to fill it.
         }
 
         auto const primStr = m_configManager->getValue<std::string>("Agent", "primarySelection", "");
@@ -734,17 +705,6 @@ namespace gladius::ui
             if (hasAnyAvailableModel && !m_primarySelection.profileId.empty())
             {
                 break;
-            }
-        }
-        if (!hasAnyAvailableModel)
-        {
-            for (auto const & p : m_providerProfiles)
-            {
-                if (agent::isOpenRouterEndpoint(p.endpoint))
-                {
-                    startModelFetch(p.id, true, true);
-                    break;
-                }
             }
         }
 
@@ -1025,16 +985,19 @@ namespace gladius::ui
                 m_awaitingConfirmation = true;
                 m_confirmationResolved = false;
             }
-            else if (std::holds_alternative<agent::AgentCompletedEvent>(ev))
+            else if (auto const * ac = std::get_if<agent::AgentCompletedEvent>(&ev))
             {
                 m_activeToolName.clear();
                 m_streamingBuffer.clear();
+                m_lastAgentMessage = ac->summary;
+                m_awaitingUserReply = ac->awaitingUserReply;
                 saveSessionState();
             }
             else if (auto const * af = std::get_if<agent::AgentFailedEvent>(&ev))
             {
                 m_activeToolName.clear();
                 m_lastError = af->error;
+                m_lastProviderError = af->errorInfo;
                 m_streamingBuffer.clear();
                 saveSessionState();
             }
@@ -1090,16 +1053,25 @@ namespace gladius::ui
         return snap;
     }
 
-    void AgentPanels::seedVolumetricTemplate()
+    bool AgentPanels::hasUsableModel() const
     {
-        auto const seed = design::seedVolumetricTemplate(m_document);
-        if (seed.success)
+        // The legacy single-provider config still counts: a run falls back to it when the profile
+        // list has nothing usable.
+        if (m_modelBuf[0] != '\0')
         {
-            return;
+            return true;
         }
-
-        m_lastError = "Could not seed the volumetric template: " + seed.error;
-        m_document->newModel();
+        for (auto const & prof : m_providerProfiles)
+        {
+            for (auto const & model : prof.models)
+            {
+                if (prof.isModelAvailable(model))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     void AgentPanels::startRun(std::string const & userPrompt)
@@ -1118,27 +1090,21 @@ namespace gladius::ui
         m_webRunTask.reset();
 #endif
 
-        m_lastError.clear();
-
-        if (m_startFresh)
+        // Refuse before anything is consumed when no provider can answer: the prompt stays in the
+        // field and the panel shows why nothing started.
+        if (!hasUsableModel())
         {
-            m_graph.clear();
-            m_conversation.clear();
-            m_checkpoints.clear();
-            m_todos.clear();
-            m_activityLog.clear();
-            if (m_document != nullptr && !m_documentSeededByCaller)
-            {
-                seedVolumetricTemplate();
-                if (m_onDocumentModified)
-                {
-                    m_onDocumentModified();
-                }
-            }
-            m_startFresh = false;
-            m_documentSeededByCaller = false;
+            std::string const text = "No provider or model is ready to answer";
+            m_lastError = text;
+            m_lastProviderError = agent::classifyErrorText(text, true);
+            return;
         }
 
+        m_lastError.clear();
+        m_lastProviderError = {};
+        m_lastAgentMessage.clear();
+        m_awaitingUserReply = false;
+        m_replyExpanded = false;
         m_streamingBuffer.clear();
         m_activeToolName.clear();
         m_runStartTime = std::chrono::steady_clock::now();

@@ -23,7 +23,9 @@ namespace gladius::agent
     {
         if (m_candidates.empty())
         {
-            co_return CompletionResponse{{}, {}, "", false, "No AI providers configured"};
+            std::string const text = "No AI providers configured";
+            co_return CompletionResponse{
+              {}, {}, "", false, text, classifyErrorText(text, false)};
         }
 
         std::string combinedErrors;
@@ -59,6 +61,10 @@ namespace gladius::agent
             {
                 co_return resp;
             }
+            if (!resp.errorInfo.isSet())
+            {
+                resp.errorInfo = classifyErrorText(resp.error, false, false, cand.label);
+            }
 
             if (!combinedErrors.empty())
             {
@@ -72,6 +78,7 @@ namespace gladius::agent
             }
         }
 
-        co_return CompletionResponse{{}, {}, "", false, combinedErrors};
+        co_return CompletionResponse{
+          {}, {}, "", false, combinedErrors, classifyErrorText(combinedErrors, false)};
     }
 } // namespace gladius::agent

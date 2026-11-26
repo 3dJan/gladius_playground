@@ -48,7 +48,7 @@ namespace gladius::agent::bench::tests
                 m_lastToolCount = request.tools.size();
                 if (turns.empty())
                 {
-                    co_return CompletionResponse{"Done", {}, "stop", true, "", scriptedUsage, m_label};
+                    co_return CompletionResponse{"Done", {}, "stop", true, "", {}, scriptedUsage, m_label};
                 }
                 auto resp = std::move(turns.front());
                 turns.pop();
@@ -97,7 +97,8 @@ namespace gladius::agent::bench::tests
                         }
                     }
                 }
-                co_return CompletionResponse{m_answer, {}, "stop", m_success, "", TokenUsage{11, 7, 0, 0}, "scripted_judge"};
+                co_return CompletionResponse{
+                    m_answer, {}, "stop", m_success, "", {}, TokenUsage{11, 7, 0, 0}, "scripted_judge"};
             }
 
             std::size_t seenTools = 0;

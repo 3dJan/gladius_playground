@@ -7,6 +7,13 @@ namespace gladius::agent
 {
     namespace
     {
+        /// @brief Builds a friendly failure for a local (non-HTTP) discovery problem
+        [[nodiscard]] ProviderError
+        makeError(ProviderErrorKind kind, char const * message, char const * hint = "")
+        {
+            return ProviderError{kind, message, hint, ""};
+        }
+
         std::string trimTrailingSlash(std::string url)
         {
             while (!url.empty() && url.back() == '/')
@@ -161,33 +168,46 @@ namespace gladius::agent
                                                  std::size_t maxFreeModels)
         {
             ModelDiscoveryResult result;
+            auto fail = [&](std::string text, ProviderError info) {
+                result.error = std::move(text);
+                result.errorInfo = std::move(info);
+                return result;
+            };
+            bool const keyMissing = profile.apiKey.empty();
             if (httpRes.cancelled)
             {
-                result.error = "Cancelled";
-                return result;
+                return fail("Cancelled",
+                            makeError(ProviderErrorKind::Cancelled, "The query was cancelled."));
             }
             if (!httpRes.error.empty())
             {
-                result.error = httpRes.error;
-                return result;
+                return fail(httpRes.error,
+                            classifyErrorText(httpRes.error, keyMissing, false, profile.name));
             }
             if (httpRes.statusCode < 200 || httpRes.statusCode >= 300)
             {
-                result.error = "HTTP " + std::to_string(httpRes.statusCode);
-                return result;
+                std::string const raw = "HTTP " + std::to_string(httpRes.statusCode) + ": "
+                                      + trimProviderBody(httpRes.body);
+                return fail(raw,
+                            classifyHttpError(
+                              httpRes.statusCode, httpRes.body, keyMissing, profile.name));
             }
 
             auto parsed = nlohmann::json::parse(httpRes.body, nullptr, false);
             if (parsed.is_discarded() || !parsed.is_object())
             {
-                result.error = "Invalid JSON response from models endpoint";
-                return result;
+                return fail("Invalid JSON response from models endpoint",
+                            makeError(ProviderErrorKind::MalformedResponse,
+                                      "The model list came back unreadable.",
+                                      "Check that the endpoint is the API root, ending in /v1."));
             }
 
             if (!parsed.contains("data") || !parsed["data"].is_array())
             {
-                result.error = "Response missing 'data' array";
-                return result;
+                return fail("Response missing 'data' array",
+                            makeError(ProviderErrorKind::MalformedResponse,
+                                      "The endpoint answered without a model list.",
+                                      "Check that the endpoint is the API root, ending in /v1."));
             }
 
             bool const localEndpoint = isLocalEndpoint(base);
@@ -234,6 +254,8 @@ namespace gladius::agent
         {
             ModelDiscoveryResult result;
             result.error = std::move(err);
+            result.errorInfo
+              = classifyErrorText(result.error, profile.apiKey.empty(), false, profile.name);
             return result;
         }
         HttpResponse const httpRes = transport.getJson(req, cancellation);
@@ -254,6 +276,8 @@ namespace gladius::agent
         {
             ModelDiscoveryResult result;
             result.error = std::move(err);
+            result.errorInfo
+              = classifyErrorText(result.error, profile.apiKey.empty(), false, profile.name);
             co_return result;
         }
         HttpResponse const httpRes = co_await transport.getJsonAsync(req, cancellation);

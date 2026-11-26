@@ -20,7 +20,6 @@ namespace gladius::ui
             bool hideRequested = false;
             bool settingsRequested = false;
             bool clearSessionRequested = false;
-            bool startFreshToggled = false;
             /// @brief True when goalDraft must be written back as the design goal
             bool goalCommitRequested = false;
             std::string goalDraft;
@@ -29,9 +28,8 @@ namespace gladius::ui
         /**
          * @brief Renders the header into the current window and advances the layout cursor.
          * @param goal Current one-line design goal; empty while nothing was described yet
-         * @param startFresh Toggled in place when the menu offers it
          */
-        Commands render(std::string const & goal, bool & startFresh);
+        Commands render(std::string const & goal);
 
         /// @brief Header height for the current font, matching what render() consumes
         [[nodiscard]] static float height();

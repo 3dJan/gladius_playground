@@ -30,6 +30,12 @@ namespace gladius::ui
         }
         if (allChoices.empty())
         {
+            // Nothing is seeded any more, so the empty state has to say what to do about it.
+            bool const anyProfile = !m_providerProfiles.empty();
+            ImGui::TextDisabled("%s %s",
+                                ICON_FA_INFO_CIRCLE,
+                                anyProfile ? "No model added to the configured providers"
+                                           : "No provider configured yet");
             if (ImGui::Button(reinterpret_cast<char const *>(ICON_FA_EXCLAMATION_TRIANGLE
                                                             " Configure providers"),
                               ImVec2(layout.hostWidth, layout.rowHeight)))
@@ -38,7 +44,12 @@ namespace gladius::ui
             }
             if (ImGui::IsItemHovered())
             {
-                ImGui::SetTooltip("No model is available for the configured providers");
+                ImGui::SetTooltip("%s",
+                                  anyProfile
+                                    ? "Fetch the model list in Settings and add a model, with the "
+                                      "API key if the provider needs one"
+                                    : "Add a provider and its API key in Settings, then pick a "
+                                      "model here");
             }
             return;
         }

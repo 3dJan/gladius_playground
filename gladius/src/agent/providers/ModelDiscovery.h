@@ -1,6 +1,7 @@
 #pragma once
 
 #include "HttpClient.h"
+#include "ProviderError.h"
 #include "ProviderProfile.h"
 
 #include <coro/coro.hpp>
@@ -15,7 +16,10 @@ namespace gladius::agent
         bool success = false;
         std::vector<std::string> models;
         std::vector<ModelMetadata> metadata;
+        /// @brief Raw provider text, kept for diagnostics
         std::string error;
+        /// @brief The same failure in terms the user can act on
+        ProviderError errorInfo;
     };
 
     /// @brief Queries available models from OpenRouter, OpenAI-compatible, Ollama, or Anthropic endpoints

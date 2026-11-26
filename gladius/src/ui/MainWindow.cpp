@@ -2116,7 +2116,7 @@ namespace gladius::ui
         m_currentAssemblyFileName.reset();
     m_asyncLoadState = AsyncLoadState::LoadingWithReset;
     m_doc->newFromTemplate();
-    m_agentPanels.onNewDocument(true);
+    m_agentPanels.onNewDocument();
     }
 
     void MainWindow::renderWindow()

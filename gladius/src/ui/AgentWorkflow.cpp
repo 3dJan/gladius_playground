@@ -96,6 +96,11 @@ namespace gladius::ui
         {
             states[developIdx] = PhaseState::Attention;
         }
+        // An unanswered question is why nothing is moving: mark the phase that stalled.
+        if (signals.awaitingUserReply)
+        {
+            states[activeIdx] = PhaseState::Attention;
+        }
         if (signals.deterministicWarnings > 0 && activeIdx <= validateIdx)
         {
             states[validateIdx] = PhaseState::Attention;

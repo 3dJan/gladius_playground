@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Conversation.h"
+#include "providers/ProviderError.h"
 #include "../tools/ToolDefinition.h"
 
 #include <mutex>
@@ -60,11 +61,19 @@ namespace gladius::agent
     struct AgentCompletedEvent
     {
         std::string summary;
+        /**
+         * @brief True when the run ended on a question rather than on finished work.
+         * @details A model answer with no tool call is just text: at non-autonomous autonomy that
+         *          is the agent waiting for the user, which the panel has to make visible.
+         */
+        bool awaitingUserReply = false;
     };
 
     struct AgentFailedEvent
     {
         std::string error;
+        /// @brief The failure in terms the user can act on; raw text stays in `error`
+        ProviderError errorInfo;
     };
 
     using AgentEvent = std::variant<TextDeltaEvent,

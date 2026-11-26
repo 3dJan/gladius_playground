@@ -1,7 +1,9 @@
 #include "agent/CredentialStore.h"
 #include "agent/providers/AnthropicProvider.h"
 #include "agent/providers/ModelDiscovery.h"
+#include "agent/providers/FallbackProvider.h"
 #include "agent/providers/OpenAiProvider.h"
+#include "agent/providers/ProviderError.h"
 #include "agent/providers/ProviderProfile.h"
 
 #include <gtest/gtest.h>
@@ -286,6 +288,82 @@ namespace gladius::agent::tests
         EXPECT_NEAR(allRes.metadata[0].promptPricePerMillion, 2.5, 1e-6);
         EXPECT_NEAR(allRes.metadata[0].completionPricePerMillion, 10.0, 1e-6);
         EXPECT_TRUE(allRes.metadata[0].supportsVision);
+    }
+
+    TEST(ModelDiscovery, FetchModels_EndpointRejected401_CarriesFriendlyError)
+    {
+        // Arrange
+        MockHttpTransport mock;
+        mock.nextResponse = HttpResponse{
+          401, R"({"error":{"message":"No valid provider available for the requested model"}})", "", false};
+
+        ProviderProfile prof{
+          "or", "OpenRouter", ApiType::OpenAiCompatible, "https://openrouter.ai/api/v1", {}, ""};
+        io::CancellationToken cancel;
+
+        // Act
+        auto const res = ModelDiscovery::fetchModels(prof, mock, cancel);
+
+        // Assert: the raw body stays for diagnostics, the user gets an actionable line
+        EXPECT_FALSE(res.success);
+        EXPECT_EQ(res.errorInfo.kind, ProviderErrorKind::MissingApiKey);
+        EXPECT_NE(res.errorInfo.message.find("API key"), std::string::npos);
+        EXPECT_TRUE(res.errorInfo.isSettingsFixable());
+    }
+
+    TEST(ModelDiscovery, FetchModels_EmptyEndpoint_ReportsNotConfigured)
+    {
+        // Arrange
+        MockHttpTransport mock;
+        ProviderProfile prof{"p", "Local", ApiType::OpenAiCompatible, "", {}, ""};
+        io::CancellationToken cancel;
+
+        // Act
+        auto const res = ModelDiscovery::fetchModels(prof, mock, cancel);
+
+        // Assert
+        EXPECT_FALSE(res.success);
+        EXPECT_EQ(res.errorInfo.kind, ProviderErrorKind::NotConfigured);
+    }
+
+    TEST(OpenAiProvider, Complete_Http401WithoutKey_ClassifiesMissingApiKey)
+    {
+        // Arrange
+        auto mock = std::make_shared<MockHttpTransport>();
+        mock->nextResponse = HttpResponse{
+          401, R"({"error":{"message":"You didn't provide an API key."}})", "", false};
+
+        ProviderConfig cfg;
+        cfg.endpoint = "https://api.openai.com/v1";
+        cfg.model = "gpt-test";
+        cfg.stream = false;
+        OpenAiProvider provider(cfg, mock);
+
+        CompletionRequest req;
+        req.messages.push_back(Message{MessageRole::User, {TextContent{"Inspect"}}});
+        io::CancellationToken cancel;
+
+        // Act
+        auto const res = coro::sync_wait(provider.complete(req, nullptr, cancel));
+
+        // Assert
+        EXPECT_FALSE(res.success);
+        EXPECT_EQ(res.errorInfo.kind, ProviderErrorKind::MissingApiKey);
+    }
+
+    TEST(FallbackProvider, Complete_NoCandidates_ReportsNotConfigured)
+    {
+        // Arrange
+        FallbackProvider provider({});
+        CompletionRequest req;
+        io::CancellationToken cancel;
+
+        // Act
+        auto const res = coro::sync_wait(provider.complete(req, nullptr, cancel));
+
+        // Assert
+        EXPECT_FALSE(res.success);
+        EXPECT_EQ(res.errorInfo.kind, ProviderErrorKind::NotConfigured);
     }
 
     TEST(ProviderProfile, IsModelAvailable_LocalAndApiKeyAndFreeOpenRouter_FiltersCorrectly)

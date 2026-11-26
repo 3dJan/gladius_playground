@@ -30,7 +30,7 @@ namespace gladius::ui
     std::vector<float> AgentPanels::measureIdleButtonWidths() const
     {
         float const size = measureControlRowHeight();
-        return {size, size, size, size, size, size};
+        return {size, size, size, size, size};
     }
 
     std::size_t AgentPanels::measureControlRows()
@@ -99,11 +99,26 @@ namespace gladius::ui
             metrics.confirmationHeight = lines * ImGui::GetTextLineHeightWithSpacing()
                                        + ImGui::GetFrameHeight() + style.ItemSpacing.y * 2.f;
         }
+        metrics.errorLineHeight = m_lastError.empty()
+                                    ? 0.f
+                                    : std::max(
+                                        1.f,
+                                        std::ceil(ImGui::CalcTextSize(errorSummary().c_str(),
+                                                                      nullptr,
+                                                                      true)
+                                                    .x
+                                                  / std::max(
+                                                      1.f,
+                                                      ImGui::GetContentRegionAvail().x
+                                                        - ImGui::GetFontSize() * 8.f)))
+                                      * ImGui::GetTextLineHeightWithSpacing();
+        metrics.replyCardHeight = measureReplyCard();
 
         // The workflow keeps a minimum height; whatever is left belongs to the composer.
         constexpr float workflowMinHeight = 120.f;
         float const overhead = metrics.statusLineHeight + metrics.controlRowsHeight
-                             + metrics.confirmationHeight;
+                             + metrics.confirmationHeight + metrics.errorLineHeight
+                             + metrics.replyCardHeight;
         float const available = std::max(0.f, ImGui::GetContentRegionAvail().y - workflowMinHeight);
         metrics.composer = m_prompt.measureCard(std::max(0.f, available - overhead),
                                                 m_pendingImages.size());
@@ -161,6 +176,11 @@ namespace gladius::ui
             statusText = "Action required: approve or decline below";
             statusColor = colorWarn();
         }
+        else if (m_awaitingUserReply)
+        {
+            statusText = "Agent is waiting for your reply";
+            statusColor = colorWarn();
+        }
         else if (isDesignComplete(m_graph))
         {
             statusText = "Design complete";
@@ -210,6 +230,116 @@ namespace gladius::ui
                 stopRun();
             }
         }
+        else
+        {
+            // Nothing is running, so the mode is the other thing worth pinning here.
+            renderModeChip();
+        }
+    }
+
+    void AgentPanels::renderModeChip()
+    {
+        // The mode decides whether the agent can act without asking, so it has to be visible without
+        // opening Settings. The chip is the same control in both places, on the same setting.
+        char const * icon = ICON_FA_USER;
+        char const * label = "Ask at major decisions";
+        switch (m_policy.autonomy())
+        {
+        case agent::AutonomyLevel::AskFrequently:
+            icon = ICON_FA_QUESTION_CIRCLE;
+            label = "Ask often";
+            break;
+        case agent::AutonomyLevel::AskAtMajorDecisions:
+            icon = ICON_FA_USER_CIRCLE;
+            label = "Ask at major decisions";
+            break;
+        case agent::AutonomyLevel::WorkAutonomously:
+            icon = ICON_FA_BOLT;
+            label = "Autonomous";
+            break;
+        }
+
+        // The chip sits at the right edge of the status line, opposite the status text.
+        float const chipWidth = ImGui::CalcTextSize((std::string(icon) + " " + label).c_str()).x
+                              + ImGui::GetStyle().FramePadding.x;
+        float const chipX = ImGui::GetCursorPosX()
+                          + std::max(0.f, ImGui::GetContentRegionAvail().x - chipWidth);
+        ImGui::SameLine(chipX);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(agentWidgets::accent()));
+        ImGui::Text("%s %s", icon, label);
+        ImGui::PopStyleColor();
+        bool const chipClicked = ImGui::IsItemClicked();
+        if (ImGui::BeginPopup("agentModePopup"))
+        {
+            if (ImGui::Selectable("Ask often", m_policy.autonomy() == agent::AutonomyLevel::AskFrequently))
+            {
+                m_policy.setAutonomy(agent::AutonomyLevel::AskFrequently);
+                saveSettings();
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::Selectable("Ask at major decisions",
+                                  m_policy.autonomy()
+                                    == agent::AutonomyLevel::AskAtMajorDecisions))
+            {
+                m_policy.setAutonomy(agent::AutonomyLevel::AskAtMajorDecisions);
+                saveSettings();
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::Selectable("Work autonomously",
+                                  m_policy.autonomy()
+                                    == agent::AutonomyLevel::WorkAutonomously))
+            {
+                m_policy.setAutonomy(agent::AutonomyLevel::WorkAutonomously);
+                saveSettings();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        if (chipClicked)
+        {
+            ImGui::OpenPopup("agentModePopup");
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Agent mode - click to change.\n%s",
+                              m_policy.autonomy() == agent::AutonomyLevel::WorkAutonomously
+                                ? "The agent decides on its own and never waits for you."
+                                : (m_policy.autonomy() == agent::AutonomyLevel::AskFrequently
+                                     ? "The agent asks before changing the model."
+                                     : "The agent asks before big changes: commits, saves, exports."));
+        }
+    }
+
+    std::string AgentPanels::errorSummary() const
+    {
+        // Show what the user can act on; the raw provider text stays in Developer diagnostics.
+        return m_lastProviderError.isSet() ? m_lastProviderError.summarised()
+                                           : ("Last error: " + m_lastError);
+    }
+
+    void AgentPanels::renderErrorLine()
+    {
+        if (m_lastError.empty())
+        {
+            return;
+        }
+        // Show what the user can act on; the raw provider text stays in Developer diagnostics.
+        std::string const text = errorSummary();
+        ImGui::PushTextWrapPos(ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x);
+        ImGui::TextColored(colorError(), "%s", text.c_str());
+        ImGui::PopTextWrapPos();
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("%s", m_lastError.c_str());
+        }
+        if (m_lastProviderError.isSettingsFixable())
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Configure providers"))
+            {
+                m_showSettings = true;
+            }
+        }
     }
 
     void AgentPanels::clearSession()
@@ -217,6 +347,10 @@ namespace gladius::ui
         m_conversation.clear();
         m_activityLog.clear();
         m_lastError.clear();
+        m_lastProviderError = {};
+        m_lastAgentMessage.clear();
+        m_awaitingUserReply = false;
+        m_replyExpanded = false;
         m_streamingBuffer.clear();
         m_workflowAnimation.reset();
     }
@@ -239,23 +373,6 @@ namespace gladius::ui
                        "Insert a picked image as a document resource"))
         {
             insertClipboardOrFileImageIntoDocument();
-        }
-        ImGui::SameLine();
-        if (iconButton(ICON_FA_SYNC_ALT,
-                       "Clear current model & history on next prompt (auto-unchecks after first "
-                       "prompt)"))
-        {
-            m_startFresh = !m_startFresh;
-        }
-        if (m_startFresh)
-        {
-            // A filled corner dot marks the toggle as armed without taking horizontal space.
-            ImDrawList & drawList = *ImGui::GetWindowDrawList();
-            ImVec2 const max = ImGui::GetItemRectMax();
-            float const fontSize = ImGui::GetFontSize();
-            drawList.AddCircleFilled(ImVec2(max.x - fontSize * 0.30f, max.y - fontSize * 0.30f),
-                                     fontSize * 0.13f,
-                                     ImGui::GetColorU32(agentWidgets::accent()));
         }
         ImGui::SameLine();
         // Reference images attach to the next prompt. They live on this row so the composer card
@@ -347,8 +464,10 @@ namespace gladius::ui
         m_prompt.setLeadingToolbarWidth(leadingControlsWidth());
         FooterMetrics const metrics = measureFooter();
         renderStatusLine();
+        renderErrorLine();
         renderControlRow();
         renderConfirmation();
+        renderReplyCard();
         renderComposer(metrics.composer);
     }
 

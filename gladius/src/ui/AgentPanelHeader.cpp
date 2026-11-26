@@ -43,7 +43,7 @@ namespace gladius::ui
              + ImGui::GetTextLineHeight();
     }
 
-    AgentPanelHeader::Commands AgentPanelHeader::render(std::string const & goal, bool & startFresh)
+    AgentPanelHeader::Commands AgentPanelHeader::render(std::string const & goal)
     {
         using namespace agentMetrics;
         Commands commands;
@@ -172,11 +172,6 @@ namespace gladius::ui
             if (ImGui::MenuItem(ICON_FA_COG " Settings"))
             {
                 commands.settingsRequested = true;
-            }
-            if (ImGui::MenuItem(ICON_FA_SYNC_ALT " Start fresh"))
-            {
-                startFresh = !startFresh;
-                commands.startFreshToggled = true;
             }
             if (ImGui::MenuItem(ICON_FA_ERASER " Clear session"))
             {
