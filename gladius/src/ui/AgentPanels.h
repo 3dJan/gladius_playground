@@ -22,6 +22,7 @@
 #include "../tools/ToolRegistry.h"
 #include "../tools/TransactionManager.h"
 #include "PromptInput.h"
+#include "AgentPanelHeader.h"
 #include "AgentWorkflow.h"
 #include "AgentWorkflowAnimation.h"
 #include "AgentWorkflowView.h"
@@ -163,9 +164,17 @@ namespace gladius::ui
 
         [[nodiscard]] FooterMetrics measureFooter();
         [[nodiscard]] float measureStatusLineHeight();
+        /// @brief Derives the composer's font-relative layout from the current UI scale
+        void applyComposerMetrics();
         [[nodiscard]] std::size_t measureControlRows();
+        [[nodiscard]] float measureControlRowHeight() const;
+        /// @brief Widths of the compact idle buttons, in draw order
+        [[nodiscard]] std::vector<float> measureIdleButtonWidths() const;
         void renderStatusLine();
         void renderControlRow();
+        /// @brief Square icon button that matches the composer toolbar's buttons
+        [[nodiscard]] bool iconButton(char const * icon, char const * tooltip);
+        void clearSession();
         void renderConfirmation();
         void renderComposer(PromptInput::CardMetrics const & metrics);
         void renderComposerToolbar(PromptInput::ToolbarLayout const & layout, int row);
@@ -225,8 +234,12 @@ namespace gladius::ui
         // Workflow rail presentation (never holds authoritative state)
         AgentWorkflowView m_workflowView;
         AgentWorkflowAnimationState m_workflowAnimation;
+        AgentPanelHeader m_header;
         WorkflowArtifacts m_artifacts;
         std::array<bool, kWorkflowPhaseCount> m_phaseExpanded{};
+        bool m_conversationExpanded = false;
+        bool m_activityLogExpanded = false;
+        bool m_diagnosticsExpanded = false;
         std::size_t m_lastActivePhaseIndex = kWorkflowPhaseCount;
 
         bool m_startFresh = true;

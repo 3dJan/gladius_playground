@@ -21,6 +21,14 @@ namespace gladius::ui
             color.w = 0.f;
             return color;
         }
+
+        /// @brief Soft fill for the submit button; alpha keeps it subordinate to the field
+        ImVec4 accentTint(float alpha = 0.16f)
+        {
+            ImVec4 color = ImGui::GetStyleColorVec4(ImGuiCol_SliderGrab);
+            color.w = alpha;
+            return color;
+        }
     } // namespace
 
     PromptInput::PromptInput(Config config)
@@ -197,8 +205,18 @@ namespace gladius::ui
 
                 ImGui::SameLine();
                 ImGui::BeginDisabled(!sendEnabled);
+                // The submit button is the one accent-coloured control of the footer: it marks the
+                // primary action without needing a text label.
+                ImGui::PushStyleColor(ImGuiCol_Button, transparent(accentTint()));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, accentTint());
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, accentTint(0.95f));
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                                      m_lastInlineFocused
+                                        ? style.Colors[ImGuiCol_SliderGrab]
+                                        : style.Colors[ImGuiCol_Text]);
                 bool const sendClicked
                   = ImGui::Button(ICON_FA_PAPER_PLANE, ImVec2(m_config.iconButtonSize, rowHeight));
+                ImGui::PopStyleColor(4);
                 if (ImGui::IsItemHovered())
                 {
                     ImGui::SetTooltip("%s", sendChordHelp());

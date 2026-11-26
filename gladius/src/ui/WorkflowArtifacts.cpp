@@ -1,6 +1,10 @@
 #include "WorkflowArtifacts.h"
 
+#include "AgentPanelMetrics.h"
+#include "AgentPanelWidgets.h"
 #include "AgentWorkflowAnimation.h"
+
+#include <IconsFontAwesome5.h>
 
 #include "../Document.h"
 #include "../nodes/Assembly.h"
@@ -18,6 +22,13 @@ namespace gladius::ui
         constexpr ImVec4 kMeasuredColor = {0.40f, 0.78f, 0.46f, 1.00f};
         constexpr ImVec4 kWarningColor = {1.00f, 0.72f, 0.32f, 1.00f};
 
+        /// @brief ImGui has no ImVec4+alpha overload of GetColorU32
+        ImU32 tinted(ImVec4 color, float alpha)
+        {
+            color.w *= alpha;
+            return ImGui::GetColorU32(color);
+        }
+
         void pushRowAlpha(float alpha)
         {
             if (alpha < 0.999f)
@@ -34,14 +45,78 @@ namespace gladius::ui
             }
         }
 
-        void sectionLabel(char const * label)
+        void sectionLabel(char const * icon, char const * label)
         {
-            ImGui::TextDisabled("%s", label);
+            agentWidgets::sectionLabel(icon, label);
         }
 
         ImVec4 accentColor()
         {
-            return ImGui::GetStyleColorVec4(ImGuiCol_SliderGrab);
+            return agentWidgets::accent();
+        }
+
+        /// @brief Style the borderless table cells use: they read as text, not input boxes
+        void pushFlatInputStyle()
+        {
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.f, 0.f, 0.f, 0.f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.f, 0.f, 0.f, 0.f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.f, 0.f, 0.f, 0.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                                ImVec2(0.f, ImGui::GetStyle().FramePadding.y));
+        }
+
+        void popFlatInputStyle()
+        {
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+        }
+
+        bool flatInput(char const * label, char * buf, std::size_t bufSize, float width)
+        {
+            pushFlatInputStyle();
+            ImGui::SetNextItemWidth(width);
+            bool const submitted = ImGui::InputText(label, buf, bufSize) != false;
+            popFlatInputStyle();
+            return submitted;
+        }
+
+        bool flatInputWithHint(char const * label,
+                               char const * hint,
+                               char * buf,
+                               std::size_t bufSize,
+                               float width,
+                               ImGuiInputTextFlags flags = ImGuiInputTextFlags_None)
+        {
+            pushFlatInputStyle();
+            ImGui::SetNextItemWidth(width);
+            bool const submitted
+              = ImGui::InputTextWithHint(label, hint, buf, bufSize, flags) != false;
+            popFlatInputStyle();
+            return submitted;
+        }
+
+        /// @brief Continue the current row at an absolute screen x.
+        ///
+        /// SameLine(offset) is measured from the window origin without the active indent, so
+        /// passing a value taken from GetCursorPosX() inside an indented child window snaps the
+        /// following items back to the left. Nudging from the current cursor is space agnostic.
+        void sameLineAt(float screenX)
+        {
+            ImGui::SameLine();
+            float const nudge = screenX - ImGui::GetCursorScreenPos().x;
+            if (nudge != 0.f)
+            {
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + nudge);
+            }
+        }
+
+        /// @brief Faint rule under a table row, the way the draft separates requirement rows
+        void drawRowRule(float left, float right)
+        {
+            ImDrawList & drawList = *ImGui::GetWindowDrawList();
+            float const y = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y * 0.5f;
+            drawList.AddLine(ImVec2(left, y), ImVec2(right, y),
+                             ImGui::GetColorU32(ImGuiCol_Border, 0.35f), 1.f);
         }
     } // namespace
 
@@ -53,6 +128,50 @@ namespace gladius::ui
         return animation.artifactArrival(key, now);
     }
 
+    /// @brief Horizontal layout of one requirement row, measured right to left in screen space
+    WorkflowArtifacts::Columns WorkflowArtifacts::measureColumns()
+    {
+        ImGuiStyle const & style = ImGui::GetStyle();
+
+        Columns columns;
+        columns.rowLeft = ImGui::GetCursorScreenPos().x;
+        columns.rowRight = columns.rowLeft + ImGui::GetContentRegionAvail().x;
+        columns.classWidth = ImGui::CalcTextSize("Required").x + style.FramePadding.x;
+        columns.trailingWidth = ImGui::CalcTextSize(ICON_FA_TIMES).x + style.FramePadding.x * 2.f;
+
+        columns.trailingX = columns.rowRight - columns.trailingWidth;
+        columns.classX = columns.trailingX - style.ItemSpacing.x * 2.f - columns.classWidth;
+        columns.descriptionWidth
+          = std::max(40.f, columns.classX - style.ItemSpacing.x * 2.f - columns.rowLeft);
+        return columns;
+    }
+
+    bool WorkflowArtifacts::classToggle(Columns const & columns, bool mandatory)
+    {
+        // A plain right-aligned word, not a framed button: it reads as a value in the table.
+        sameLineAt(columns.classX);
+        bool const clicked
+          = ImGui::InvisibleButton("##class", ImVec2(columns.classWidth, ImGui::GetTextLineHeight()))
+          != false;
+        char const * label = mandatory ? "Required" : "Optional";
+        ImVec4 color = mandatory ? agentWidgets::accent()
+                                 : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+        // The rect of the submitted button is in screen coordinates; the measured columns are
+        // window-local, so the glyph position has to be derived from the rect, not from the column.
+        ImVec2 const rectMin = ImGui::GetItemRectMin();
+        float const textX = rectMin.x + std::max(0.f, columns.classWidth
+                                                        - ImGui::CalcTextSize(label).x);
+        ImGui::GetWindowDrawList()->AddText(ImVec2(textX, rectMin.y),
+                                            ImGui::GetColorU32(color),
+                                            label);
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Click to make this a %s",
+                              mandatory ? "preference" : "required constraint");
+        }
+        return clicked;
+    }
+
     void WorkflowArtifacts::renderRequirementRow(design::Requirement const & requirement,
                                                  AgentWorkflowAnimationState & animation)
     {
@@ -61,22 +180,32 @@ namespace gladius::ui
         pushRowAlpha(alpha);
         ImGui::PushID(requirement.id.c_str());
 
-        float const width = ImGui::GetContentRegionAvail().x;
+        // Table look from the draft: the requirement fills the left, its class sits right-aligned
+        // in its own column and the remove control stays on the right edge.
+        Columns const columns = measureColumns();
+
         char descBuf[512];
         std::snprintf(descBuf, sizeof(descBuf), "%s", requirement.description.c_str());
-        ImGui::SetNextItemWidth(width * 0.50f);
-        bool edited = ImGui::InputText("##desc", descBuf, sizeof(descBuf));
-        ImGui::SameLine();
         char catBuf[64];
         std::snprintf(catBuf, sizeof(catBuf), "%s", requirement.category.c_str());
-        ImGui::SetNextItemWidth(width * 0.18f);
-        edited |= ImGui::InputText("##cat", catBuf, sizeof(catBuf));
-        ImGui::SameLine();
-        bool mandatory = requirement.mandatory;
-        edited |= ImGui::Checkbox("Constraint", &mandatory);
-        ImGui::SameLine();
-        bool removed = ImGui::SmallButton("x");
-        if (edited)
+
+        bool edited = false;
+        edited |= flatInput("##desc", descBuf, sizeof(descBuf), columns.descriptionWidth);
+        edited |= ImGui::IsItemDeactivatedAfterEdit();
+
+        bool const mandatory = !classToggle(columns, requirement.mandatory)
+                             ? requirement.mandatory
+                             : !requirement.mandatory;
+
+        sameLineAt(columns.trailingX);
+        bool const removed = ImGui::SmallButton(ICON_FA_TIMES);
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Remove requirement");
+        }
+        drawRowRule(columns.rowLeft, columns.rowRight);
+
+        if (edited || mandatory != requirement.mandatory)
         {
             m_graph->updateRequirement(requirement.id, descBuf, catBuf, mandatory, true);
         }
@@ -91,7 +220,7 @@ namespace gladius::ui
 
     void WorkflowArtifacts::renderUnderstand(AgentWorkflowAnimationState & animation)
     {
-        sectionLabel("Requirements - extracted, not yet verified");
+        sectionLabel(ICON_FA_CLIPBOARD_LIST, "Requirements");
         auto const requirementsCopy = m_graph->requirements();
         if (requirementsCopy.empty())
         {
@@ -110,31 +239,38 @@ namespace gladius::ui
         }
         if (!soft.empty())
         {
-            sectionLabel("Preferences and objectives");
+            sectionLabel(ICON_FA_ADJUST, "Preferences");
             for (auto const & req : soft)
             {
                 renderRequirementRow(req, animation);
             }
         }
 
-        float const width = ImGui::GetContentRegionAvail().x;
-        ImGui::SetNextItemWidth(width * 0.50f);
-        ImGui::InputTextWithHint("##newReqDesc", "Add requirement...", m_newRequirementBuf,
-                                 sizeof(m_newRequirementBuf));
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(width * 0.18f);
-        ImGui::InputText("##newReqCat", m_newRequirementCategoryBuf,
-                         sizeof(m_newRequirementCategoryBuf));
-        ImGui::SameLine();
-        ImGui::Checkbox("Constraint##new", &m_newRequirementMandatory);
-        ImGui::SameLine();
-        if (ImGui::SmallButton("+ Add") && m_newRequirementBuf[0] != '\0')
+        // The add row mirrors the requirement rows so the section reads as one table.
+        Columns const columns = measureColumns();
+
+        bool const descSubmitted
+          = flatInputWithHint("##newReqDesc",
+                              "Add requirement...",
+                              m_newRequirementBuf,
+                              sizeof(m_newRequirementBuf),
+                              columns.descriptionWidth,
+                              ImGuiInputTextFlags_EnterReturnsTrue);
+
+        if (classToggle(columns, m_newRequirementMandatory))
+        {
+            m_newRequirementMandatory = !m_newRequirementMandatory;
+        }
+
+        sameLineAt(columns.trailingX);
+        if ((ImGui::SmallButton(ICON_FA_PLUS) || descSubmitted) && m_newRequirementBuf[0] != '\0')
         {
             std::string const newId = m_graph->addRequirement(
               m_newRequirementBuf, m_newRequirementCategoryBuf, m_newRequirementMandatory);
             m_graph->recordUserAddedRequirement(newId);
             m_newRequirementBuf[0] = '\0';
         }
+        drawRowRule(columns.rowLeft, columns.rowRight);
     }
 
     void WorkflowArtifacts::collectNodeRows(std::string const & nodeId,
@@ -183,14 +319,19 @@ namespace gladius::ui
 
     void WorkflowArtifacts::renderDecompose(AgentWorkflowAnimationState & animation)
     {
-        sectionLabel("Design structure");
+        using namespace agentMetrics;
+        sectionLabel(ICON_FA_SITEMAP, "Design structure");
         auto const rows = designStructureRows();
         if (rows.empty())
         {
             ImGui::TextDisabled("The problem has not been decomposed yet.");
             return;
         }
-        float const indentUnit = ImGui::GetFontSize() * 0.75f;
+        float const fontSize = ImGui::GetFontSize();
+        float const lineHeight = ImGui::GetTextLineHeight();
+        float const indentUnit = fontSize * 0.85f;
+        ImDrawList & drawList = *ImGui::GetWindowDrawList();
+
         for (auto const & row : rows)
         {
             auto const nodeIt = m_graph->nodes().find(row.id);
@@ -202,16 +343,59 @@ namespace gladius::ui
             float const alpha = noteArrival(key, animation);
             pushRowAlpha(alpha);
             ImGui::PushID(row.id.c_str());
-            ImGui::Indent(static_cast<float>(row.depth) * indentUnit);
+
             bool const frozen = nodeIt->second.status == design::DesignStatus::Frozen;
-            ImGui::Text("%s", row.name.c_str());
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s - %zu alternatives%s",
-                                design::toString(nodeIt->second.type),
-                                nodeIt->second.variantIds.size(),
-                                frozen ? ", frozen" : "");
-            ImGui::SameLine();
-            if (ImGui::SmallButton(frozen ? "Unfreeze" : "Freeze"))
+            bool const explored = row.id == m_exploredNodeId;
+            float const nameIndent = static_cast<float>(row.depth) * indentUnit;
+            agentWidgets::ReservedRow frame = agentWidgets::reserveRow(lineHeight * 2.f,
+                                                                      "##nodeRow");
+            frame.origin.x += nameIndent;
+            frame.max.x = std::max(frame.origin.x + 1.f, frame.max.x);
+            agentWidgets::drawBand(drawList, frame.origin, frame.max, explored, frame.hovered);
+
+            // Tree ticks carry the hierarchy; a heavy tree widget would fight the rail.
+            if (row.depth > 0)
+            {
+                ImU32 const tick = ImGui::GetColorU32(ImGuiCol_Border);
+                float const tickX = frame.origin.x - indentUnit * 0.5f;
+                drawList.AddLine(ImVec2(tickX, frame.origin.y - lineHeight * 0.55f),
+                                 ImVec2(tickX, frame.origin.y + lineHeight * 0.55f),
+                                 tick,
+                                 1.f);
+                drawList.AddLine(ImVec2(tickX, frame.origin.y + lineHeight * 0.45f),
+                                 ImVec2(frame.origin.x - fontSize * 0.30f,
+                                        frame.origin.y + lineHeight * 0.45f),
+                                 tick,
+                                 1.f);
+            }
+
+            drawList.AddText(ImVec2(frame.origin.x, frame.origin.y),
+                             ImGui::GetColorU32(ImGuiCol_Text),
+                             ICON_FA_CUBES);
+            ImU32 const nameColor = explored ? ImGui::GetColorU32(ImVec4(1.f, 1.f, 1.f, 1.f))
+                                             : ImGui::GetColorU32(ImGuiCol_Text);
+            agentWidgets::drawEmphasized(drawList,
+                                         ImVec2(frame.origin.x + fontSize * 1.40f,
+                                                frame.origin.y),
+                                         ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                                         row.name.c_str());
+            std::string const summary = std::string(design::toString(nodeIt->second.type))
+                                      + " - " + std::to_string(nodeIt->second.variantIds.size())
+                                      + " alternatives" + (frozen ? ", frozen" : "");
+            drawList.AddText(ImVec2(frame.origin.x + fontSize * 1.40f, frame.origin.y + lineHeight),
+                             ImGui::GetColorU32(ImGuiCol_Text),
+                             summary.c_str());
+
+            char const * freezeLabel = frozen ? ICON_FA_LOCK_OPEN " Unfreeze"
+                                              : ICON_FA_LOCK " Freeze";
+            float const actionsWidth
+              = ImGui::CalcTextSize(freezeLabel).x
+              + ImGui::CalcTextSize(ICON_FA_COLUMNS " Alternatives").x
+              + ImGui::GetStyle().FramePadding.x * 4.f + ImGui::GetStyle().ItemSpacing.x;
+            ImGui::SetCursorScreenPos(ImVec2(std::max(frame.origin.x,
+                                                      frame.max.x - actionsWidth),
+                                             frame.origin.y));
+            if (ImGui::SmallButton(freezeLabel))
             {
                 if (frozen)
                 {
@@ -223,11 +407,16 @@ namespace gladius::ui
                 }
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton("Show alternatives"))
+            if (ImGui::SmallButton(ICON_FA_COLUMNS " Alternatives"))
             {
                 m_exploredNodeId = row.id;
             }
-            ImGui::Unindent(static_cast<float>(row.depth) * indentUnit);
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Show the alternatives of this element");
+            }
+
+            agentWidgets::endReservedRow(frame);
             ImGui::PopID();
             popRowAlpha(alpha);
         }
@@ -235,157 +424,193 @@ namespace gladius::ui
 
     void WorkflowArtifacts::renderVariantCard(design::DesignVariant const & variant,
                                               bool selected,
-                                              AgentWorkflowAnimationState & animation)
+                                              AgentWorkflowAnimationState & animation,
+                                              char letter)
     {
+        using namespace agentMetrics;
         std::string const key = "var_" + variant.id;
         float const alpha = noteArrival(key, animation);
         pushRowAlpha(alpha);
         ImGui::PushID(variant.id.c_str());
+        ImDrawList & drawList = *ImGui::GetWindowDrawList();
+        float const fontSize = ImGui::GetFontSize();
+        float const lineHeight = ImGui::GetTextLineHeight();
+        float const radius = fontSize * cardThumbSize * 0.5f;
 
-        float const box = ImGui::GetFontSize() * 2.6f;
-        ImGui::BeginGroup();
+        // Two text lines next to a circular preview, plus the comment field.
+        float const height = std::max(cardThumbSize * fontSize, lineHeight * 2.f)
+                           + ImGui::GetFrameHeight() + fontSize * cardPadding;
+        agentWidgets::ReservedRow const row = agentWidgets::reserveRow(height, "##varRow");
+        agentWidgets::drawRowBand(row, selected, row.hovered);
+
         int w = 0;
         int h = 0;
         unsigned int const texId =
-          m_previewTexture ? m_previewTexture("var_" + variant.id, variant.previewPng, w, h) : 0u;
-        if (texId != 0u)
-        {
-            ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(texId)),
-                         ImVec2(box, box));
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(texId)),
-                             ImVec2(box * 3.5f, box * 3.5f));
-                ImGui::Text("%s (%s)", variant.name.c_str(), design::toString(variant.fidelity));
-                if (!variant.rationale.empty())
-                {
-                    ImGui::TextWrapped("Rationale: %s", variant.rationale.c_str());
-                }
-                if (!variant.userFeedback.empty())
-                {
-                    ImGui::TextWrapped("Your comment: %s", variant.userFeedback.c_str());
-                }
-                ImGui::EndTooltip();
-            }
-        }
-        else
-        {
-            // No preview has been rendered for this alternative: say so instead of inventing one.
-            ImGui::Dummy(ImVec2(box, box));
-            ImDrawList & dl = *ImGui::GetWindowDrawList();
-            dl.AddRect(ImGui::GetItemRectMin(),
-                       ImGui::GetItemRectMax(),
-                       ImGui::GetColorU32(ImGuiCol_Border),
-                       0.f,
-                       0,
-                       1.f);
-            dl.AddText(ImVec2(ImGui::GetItemRectMin().x + 4.f,
-                              ImGui::GetItemRectMin().y + box * 0.38f),
-                       ImGui::GetColorU32(ImGuiCol_TextDisabled),
-                       "no preview");
-        }
-        ImGui::EndGroup();
-        ImVec2 const boxMin = ImGui::GetItemRectMin();
-        ImVec2 const boxMax = ImGui::GetItemRectMax();
+          m_previewTexture ? m_previewTexture(key, variant.previewPng, w, h) : 0u;
+        ImVec2 const thumbCenter(row.origin.x + radius + fontSize * 0.20f,
+                                 row.origin.y + row.size().y * 0.42f);
+        agentWidgets::drawCircularThumb(drawList, thumbCenter, radius, texId);
 
-        ImGui::SameLine();
-        ImGui::BeginGroup();
-        ImGui::Text("%s", variant.name.c_str());
-        ImGui::TextDisabled("%s - %s",
-                            design::toString(variant.fidelity),
-                            design::toString(variant.status));
-        if (!variant.rationale.empty())
+        float const textX = thumbCenter.x + radius + fontSize * 0.55f;
+        float const statusY = row.origin.y + lineHeight * 1.05f;
+        ImVec2 const statusCenter(textX + lineHeight * 0.45f, statusY + lineHeight * 0.5f);
+        char const * statusText = nullptr;
+        ImVec4 statusColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        switch (variant.status)
         {
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
-            ImGui::TextWrapped("%s", variant.rationale.c_str());
-            ImGui::PopTextWrapPos();
+        case design::DesignStatus::Rejected:
+            drawList.AddCircle(statusCenter,
+                               lineHeight * 0.42f,
+                               ImGui::GetColorU32(kWarningColor),
+                               24,
+                               1.4f);
+            statusText = "Rejected";
+            statusColor = kWarningColor;
+            break;
+        case design::DesignStatus::Active:
+        case design::DesignStatus::Frozen:
+            drawList.AddCircleFilled(statusCenter,
+                                     lineHeight * 0.42f,
+                                     tinted(kMeasuredColor, 0.16f),
+                                     24);
+            drawList.AddText(ImVec2(statusCenter.x - lineHeight * 0.24f, statusY),
+                             ImGui::GetColorU32(kMeasuredColor),
+                             ICON_FA_CHECK);
+            statusText = "Preview ready";
+            statusColor = kMeasuredColor;
+            break;
+        case design::DesignStatus::Proposed:
+            drawList.AddCircle(statusCenter,
+                               lineHeight * 0.42f,
+                               ImGui::GetColorU32(ImGuiCol_Border),
+                               24,
+                               1.4f);
+            statusText = "Not rendered yet";
+            statusColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            break;
         }
+        agentWidgets::drawEmphasized(drawList,
+                                     ImVec2(textX, row.origin.y + fontSize * 0.18f),
+                                     ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                                     variant.name.c_str());
+        drawList.AddText(ImVec2(statusCenter.x + lineHeight * 0.65f, statusY),
+                         ImGui::GetColorU32(statusColor),
+                         statusText);
+
+        // Letter chip: the draft labels each alternative so a comment can refer to it by letter.
+        agentWidgets::drawLetterChip(drawList,
+                                     ImVec2(row.max.x - lineHeight * 0.62f,
+                                            row.origin.y + lineHeight * 0.62f),
+                                     lineHeight * 0.52f,
+                                     letter,
+                                     selected ? accentColor()
+                                              : ImGui::GetStyleColorVec4(ImGuiCol_Border));
+
         char fbBuf[256];
         std::snprintf(fbBuf, sizeof(fbBuf), "%s", variant.userFeedback.c_str());
-        ImGui::SetNextItemWidth(-1.f);
-        if (ImGui::InputTextWithHint("##varFb", "Comment...", fbBuf, sizeof(fbBuf)))
+        ImGui::SetCursorScreenPos(ImVec2(textX, row.max.y - ImGui::GetFrameHeight() - fontSize * 0.10f));
+        float const commentWidth = row.max.x - textX - lineHeight * 1.9f;
+        ImGui::SetNextItemWidth(std::max(40.f, commentWidth));
+        bool const feedbackEdited
+          = ImGui::InputTextWithHint("##varFb", "Comment...", fbBuf, sizeof(fbBuf)) != false;
+        ImGui::SameLine();
+        bool const rejected = ImGui::SmallButton(ICON_FA_TIMES) != false;
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Reject this alternative");
+        }
+        if (feedbackEdited)
         {
             m_graph->setVariantFeedback(variant.id, fbBuf);
         }
-        if (ImGui::SmallButton("Reject") && variant.status != design::DesignStatus::Rejected)
+        if (rejected && variant.status != design::DesignStatus::Rejected)
         {
             m_graph->rejectVariant(variant.id, "Rejected in the Design Agent panel");
         }
-        ImGui::EndGroup();
 
-        if (selected)
+        if (row.hovered)
         {
-            ImGui::GetWindowDrawList()->AddRect(
-              ImVec2(boxMin.x - 3.f, boxMin.y - 3.f),
-              ImVec2(std::max(boxMax.x, ImGui::GetItemRectMax().x) + 3.f,
-                     std::max(boxMax.y, ImGui::GetItemRectMax().y) + 3.f),
-              ImGui::GetColorU32(accentColor()),
-              3.f,
-              0,
-              1.6f);
+            ImGui::SetTooltip("%s\nFidelity: %s\nStatus: %s%s%s",
+                              variant.name.c_str(),
+                              design::toString(variant.fidelity),
+                              design::toString(variant.status),
+                              variant.rationale.empty() ? "" : "\n\n",
+                              variant.rationale.c_str());
         }
 
+        agentWidgets::endReservedRow(row);
+        ImGui::Spacing();
         ImGui::PopID();
         popRowAlpha(alpha);
-        ImGui::Spacing();
     }
 
     void WorkflowArtifacts::renderConfigurationRow(design::Configuration const & configuration,
                                                    AgentWorkflowAnimationState & animation)
     {
+        using namespace agentMetrics;
         std::string const key = "cfg_" + configuration.id;
         float const alpha = noteArrival(key, animation);
         pushRowAlpha(alpha);
         ImGui::PushID(configuration.id.c_str());
+        ImDrawList & drawList = *ImGui::GetWindowDrawList();
+        float const fontSize = ImGui::GetFontSize();
+        float const lineHeight = ImGui::GetTextLineHeight();
 
-        float const box = ImGui::GetFontSize() * 2.2f;
+        float const height = std::max(fontSize * 1.8f, lineHeight)
+                           + ImGui::GetFrameHeight() + fontSize * cardPadding * 0.5f;
+        agentWidgets::ReservedRow const row = agentWidgets::reserveRow(height, "##cfgRow");
+        agentWidgets::drawRowBand(row, configuration.active, row.hovered);
+
         int w = 0;
         int h = 0;
         unsigned int const texId = m_previewTexture
-                                     ? m_previewTexture("cfg_" + configuration.id,
-                                                        configuration.previewPng,
-                                                        w,
-                                                        h)
+                                     ? m_previewTexture(key, configuration.previewPng, w, h)
                                      : 0u;
-        if (texId != 0u)
-        {
-            ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(texId)),
-                         ImVec2(box, box));
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(texId)),
-                             ImVec2(box * 3.5f, box * 3.5f));
-                ImGui::Text("%s (%s)%s",
-                            configuration.name.c_str(),
-                            configuration.id.c_str(),
-                            configuration.active ? " [active]" : "");
-                ImGui::Text("Alternatives selected: %zu", configuration.selectedVariants.size());
-                if (!configuration.userFeedback.empty())
-                {
-                    ImGui::TextWrapped("Your comment: %s", configuration.userFeedback.c_str());
-                }
-                for (auto const & pass : configuration.evaluation.deterministicPassed)
-                {
-                    ImGui::TextColored(kMeasuredColor, "Measured OK: %s", pass.c_str());
-                }
-                for (auto const & warn : configuration.evaluation.deterministicWarnings)
-                {
-                    ImGui::TextColored(kWarningColor, "Warning: %s", warn.c_str());
-                }
-                ImGui::EndTooltip();
-            }
-        }
-        ImGui::SameLine();
+        float const radius = fontSize * 0.75f;
+        ImVec2 const thumbCenter(row.origin.x + radius, row.origin.y + lineHeight * 0.60f);
+        agentWidgets::drawCircularThumb(drawList, thumbCenter, radius, texId);
 
-        ImGui::BeginGroup();
+        float const textX = thumbCenter.x + radius + fontSize * 0.45f;
+        std::string const title = configuration.name
+                                + (configuration.active ? "  (active)" : "");
+        drawList.AddText(ImVec2(textX, row.origin.y + fontSize * 0.10f),
+                         ImGui::GetColorU32(ImGuiCol_Text),
+                         title.c_str());
+        if (row.hovered)
+        {
+            ImGui::SetTooltip("%s (%s)\nAlternatives selected: %zu%s",
+                              configuration.name.c_str(),
+                              configuration.id.c_str(),
+                              configuration.selectedVariants.size(),
+                              configuration.evaluation.deterministicWarnings.empty()
+                                ? ""
+                                : "\nHas measurement warnings");
+        }
+
         auto selIt = std::find(selectedRecombineConfigs.begin(),
                                selectedRecombineConfigs.end(),
                                configuration.id);
         bool selectedForRecombine = selIt != selectedRecombineConfigs.end();
-        if (ImGui::Checkbox("##recombine", &selectedForRecombine))
+
+        char fbBuf[256];
+        std::snprintf(fbBuf, sizeof(fbBuf), "%s", configuration.userFeedback.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(textX, row.max.y - ImGui::GetFrameHeight()));
+        float const actionsWidth = ImGui::CalcTextSize(ICON_FA_EXCHANGE_ALT " Swap").x
+                                 + ImGui::CalcTextSize(ICON_FA_EYE " Inspect").x
+                                 + ImGui::CalcTextSize("x").x * 2.f
+                                 + ImGui::GetStyle().FramePadding.x * 4.f
+                                 + ImGui::GetStyle().ItemSpacing.x * 2.f;
+        ImGui::SetNextItemWidth(std::max(40.f, row.max.x - textX - actionsWidth));
+        bool const edited
+          = ImGui::InputTextWithHint("##cfgFb", "Comment...", fbBuf, sizeof(fbBuf)) != false;
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_EXCHANGE_ALT))
         {
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Use this configuration as the recombination source");
+            }
+            selectedForRecombine = !selectedForRecombine;
             if (selectedForRecombine)
             {
                 selectedRecombineConfigs.push_back(configuration.id);
@@ -395,75 +620,98 @@ namespace gladius::ui
                 selectedRecombineConfigs.erase(selIt);
             }
         }
-        ImGui::SameLine();
-        ImGui::Text("%s%s", configuration.name.c_str(), configuration.active ? " [active]" : "");
-        if (!configuration.active && ImGui::SmallButton("Activate"))
+        if (selectedForRecombine)
         {
-            m_graph->activateConfiguration(configuration.id);
+            ImDrawList & dl = *ImGui::GetWindowDrawList();
+            dl.AddCircleFilled(ImVec2(ImGui::GetItemRectMax().x - fontSize * 0.10f,
+                                      ImGui::GetItemRectMin().y + fontSize * 0.10f),
+                               fontSize * 0.12f,
+                               ImGui::GetColorU32(accentColor()));
         }
         ImGui::SameLine();
-        if (ImGui::SmallButton("Inspect"))
+        if (!configuration.active && ImGui::SmallButton(ICON_FA_BOLT))
+        {
+            m_graph->activateConfiguration(configuration.id);
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Make this the active configuration");
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(ICON_FA_EYE))
         {
             m_exploredNodeId.clear();
             for (auto const & [nodeId, variantId] : configuration.selectedVariants)
             {
+                (void) variantId;
                 m_exploredNodeId = nodeId;
                 break;
             }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Compare the alternatives of this configuration");
+            }
         }
-        char fbBuf[256];
-        std::snprintf(fbBuf, sizeof(fbBuf), "%s", configuration.userFeedback.c_str());
-        ImGui::SetNextItemWidth(-1.f);
-        if (ImGui::InputTextWithHint("##cfgFb", "Comment...", fbBuf, sizeof(fbBuf)))
+        if (edited)
         {
             m_graph->setConfigurationFeedback(configuration.id, fbBuf);
         }
-        ImGui::EndGroup();
 
+        agentWidgets::endReservedRow(row);
         ImGui::PopID();
         popRowAlpha(alpha);
-        ImGui::Separator();
     }
 
     void WorkflowArtifacts::renderCheckpointRow(tools::CheckpointSummary const & checkpoint,
                                                 AgentWorkflowAnimationState & animation)
     {
+        using namespace agentMetrics;
         std::string const key = "cp_" + checkpoint.id;
         float const alpha = noteArrival(key, animation);
         pushRowAlpha(alpha);
         ImGui::PushID(checkpoint.id.c_str());
+        ImDrawList & drawList = *ImGui::GetWindowDrawList();
+        float const fontSize = ImGui::GetFontSize();
+        float const lineHeight = ImGui::GetTextLineHeight();
 
-        float const box = ImGui::GetFontSize() * 1.7f;
+        float const height = std::max(fontSize * 1.7f, lineHeight)
+                           + ImGui::GetFrameHeight() + fontSize * cardPadding * 0.5f;
+        agentWidgets::ReservedRow const row = agentWidgets::reserveRow(height, "##cpRow");
+        agentWidgets::drawRowBand(row, false, row.hovered);
+
         int w = 0;
         int h = 0;
         unsigned int const texId = m_previewTexture
-                                     ? m_previewTexture("cp_" + checkpoint.id,
-                                                        checkpoint.previewPng,
-                                                        w,
-                                                        h)
+                                     ? m_previewTexture(key, checkpoint.previewPng, w, h)
                                      : 0u;
-        if (texId != 0u)
-        {
-            ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(texId)),
-                         ImVec2(box, box));
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::BeginTooltip();
-                ImGui::Image(static_cast<ImTextureID>(static_cast<std::uintptr_t>(texId)),
-                             ImVec2(box * 3.5f, box * 3.5f));
-                ImGui::Text("%s (%s)", checkpoint.label.c_str(), checkpoint.id.c_str());
-                ImGui::Text("Functions: %zu | Level: %d", checkpoint.functionCount, checkpoint.level);
-                if (!checkpoint.userFeedback.empty())
-                {
-                    ImGui::TextWrapped("Your comment: %s", checkpoint.userFeedback.c_str());
-                }
-                ImGui::EndTooltip();
-            }
-            ImGui::SameLine();
-        }
-        ImGui::Text("%s (%zu functions)", checkpoint.label.c_str(), checkpoint.functionCount);
+        float const radius = fontSize * 0.68f;
+        ImVec2 const thumbCenter(row.origin.x + radius, row.origin.y + row.size().y * 0.40f);
+        agentWidgets::drawCircularThumb(drawList, thumbCenter, radius, texId);
+
+        float const textX = thumbCenter.x + radius + fontSize * 0.45f;
+        drawList.AddText(ImVec2(textX, row.origin.y + fontSize * 0.08f),
+                         ImGui::GetColorU32(ImGuiCol_Text),
+                         checkpoint.label.c_str());
+        std::string const meta = std::to_string(checkpoint.functionCount)
+                               + " functions - level " + std::to_string(checkpoint.level);
+        drawList.AddText(ImVec2(textX, row.origin.y + lineHeight * 1.02f),
+                         ImGui::GetColorU32(ImGuiCol_Text),
+                         meta.c_str());
+
+        char cpFb[256];
+        std::snprintf(cpFb, sizeof(cpFb), "%s", checkpoint.userFeedback.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(textX, row.max.y - ImGui::GetFrameHeight()));
+        float const restoreWidth = ImGui::CalcTextSize(ICON_FA_HISTORY " Restore").x
+                                 + ImGui::GetStyle().FramePadding.x * 2.f;
+        ImGui::SetNextItemWidth(std::max(40.f, row.max.x - textX - restoreWidth
+                                                     - ImGui::GetStyle().ItemSpacing.x));
+        bool const edited = ImGui::InputTextWithHint("##cpFb",
+                                                     "Snapshot comment...",
+                                                     cpFb,
+                                                     sizeof(cpFb))
+                            != false;
         ImGui::SameLine();
-        if (ImGui::SmallButton("Restore"))
+        if (ImGui::SmallButton(ICON_FA_HISTORY " Restore"))
         {
             if (m_document != nullptr && m_document->getAssembly()
                 && m_checkpoints->restoreCheckpoint(checkpoint.id, *m_document->getAssembly()))
@@ -477,19 +725,16 @@ namespace gladius::ui
                 }
             }
         }
-        char cpFb[256];
-        std::snprintf(cpFb, sizeof(cpFb), "%s", checkpoint.userFeedback.c_str());
-        ImGui::SetNextItemWidth(-1.f);
-        if (ImGui::InputTextWithHint("##cpFb", "Snapshot comment...", cpFb, sizeof(cpFb)))
+        if (edited)
         {
             m_checkpoints->setFeedback(checkpoint.id, cpFb);
         }
 
+        agentWidgets::endReservedRow(row);
+        ImGui::Spacing();
         ImGui::PopID();
         popRowAlpha(alpha);
-        ImGui::Spacing();
     }
-
     void WorkflowArtifacts::renderExplore(AgentWorkflowAnimationState & animation)
     {
         auto const & nodes = m_graph->nodes();
@@ -578,6 +823,7 @@ namespace gladius::ui
                             rejected);
 
         auto const activeConfig = m_graph->activeConfiguration();
+        std::size_t cardIndex = 0;
         for (auto const & vid : explored->second.variantIds)
         {
             auto const vit = m_graph->variants().find(vid);
@@ -591,13 +837,15 @@ namespace gladius::ui
                 auto const sel = activeConfig->selectedVariants.find(explored->first);
                 selected = sel != activeConfig->selectedVariants.end() && sel->second == vid;
             }
-            renderVariantCard(vit->second, selected, animation);
+            char const letter = static_cast<char>('A' + static_cast<int>(cardIndex % 26u));
+            ++cardIndex;
+            renderVariantCard(vit->second, selected, animation, letter);
         }
 
         if (!m_graph->configurations().empty())
         {
             ImGui::Spacing();
-            sectionLabel("System configurations");
+            sectionLabel(ICON_FA_CUBES, "System configurations");
             if (selectedRecombineConfigs.size() >= 2)
             {
                 if (ImGui::Button("Recombine the two selected"))
@@ -634,7 +882,7 @@ namespace gladius::ui
         if (!checkpoints.empty())
         {
             ImGui::Spacing();
-            sectionLabel("Iteration snapshots");
+            sectionLabel(ICON_FA_HISTORY, "Iteration snapshots");
             for (auto const & cp : checkpoints)
             {
                 renderCheckpointRow(cp, animation);
@@ -644,7 +892,7 @@ namespace gladius::ui
 
     void WorkflowArtifacts::renderDevelop(AgentWorkflowAnimationState & animation)
     {
-        sectionLabel("Development tasks");
+        sectionLabel(ICON_FA_TASKS, "Development tasks");
         if (!activeToolName.empty())
         {
             ImGui::TextDisabled("Running: %s", activeToolName.c_str());
@@ -694,7 +942,7 @@ namespace gladius::ui
 
     void WorkflowArtifacts::renderValidate(AgentWorkflowAnimationState & animation)
     {
-        sectionLabel("Measured by Gladius evaluators");
+        sectionLabel(ICON_FA_CHECK_CIRCLE, "Measured results");
         auto const active = m_graph->activeConfiguration();
         if (!active)
         {
@@ -720,7 +968,7 @@ namespace gladius::ui
         }
 
         ImGui::Spacing();
-        sectionLabel("Agent assessment - not independently measured");
+        sectionLabel(ICON_FA_COMMENT_ALT, "Agent assessment");
         bool const anyNote =
           active && (!active->evaluation.heuristicNotes.empty()
                      || !active->evaluation.subjectiveNotes.empty());

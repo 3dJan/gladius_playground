@@ -75,6 +75,21 @@ namespace gladius::ui
         std::string activeToolName;
 
       private:
+        /// @brief Horizontal layout of one requirement row, measured in screen coordinates
+        struct Columns
+        {
+            float rowLeft = 0.0f;
+            float rowRight = 0.0f;
+            float descriptionWidth = 0.0f;
+            float classX = 0.0f;
+            float classWidth = 0.0f;
+            float trailingX = 0.0f;
+            float trailingWidth = 0.0f;
+        };
+
+        [[nodiscard]] Columns measureColumns();
+        bool classToggle(Columns const & columns, bool mandatory);
+
         struct NodeRow
         {
             std::string id;
@@ -91,9 +106,11 @@ namespace gladius::ui
         void renderRequirementRow(design::Requirement const & requirement,
                                   AgentWorkflowAnimationState & animation);
 
+        /// @param letter Chip label of the alternative within its element (A, B, C ...)
         void renderVariantCard(design::DesignVariant const & variant,
                                bool selected,
-                               AgentWorkflowAnimationState & animation);
+                               AgentWorkflowAnimationState & animation,
+                               char letter);
 
         void renderConfigurationRow(design::Configuration const & configuration,
                                     AgentWorkflowAnimationState & animation);

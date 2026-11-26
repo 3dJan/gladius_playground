@@ -19,8 +19,12 @@
 #include "design/TodoStore.h"
 #include "tools/CheckpointManager.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace gladius::ui::tests
 {
@@ -31,6 +35,13 @@ namespace gladius::ui::tests
         {
             int vertices = 0;
             float scrollMaxY = 0.f;
+            std::array<AgentWorkflowView::RowLayout, kWorkflowPhaseCount> layout{};
+            /// @brief Rail legs drawn by the view, as (fromY, toY) of each centre-to-centre stroke
+            std::array<std::pair<float, float>, kWorkflowPhaseCount - 1> spine{};
+            /// @brief X of the cursor the view gave each phase's artifact renderer
+            std::array<float, kWorkflowPhaseCount> contentX{};
+            /// @brief X of the first line the Understand section started after its own content
+            float understandFirstLineX = 0.f;
         };
 
         /// @brief Drives the rail and all five artifact sections the way AgentPanels does
@@ -68,18 +79,38 @@ namespace gladius::ui::tests
                 }
                 m_animation.update(activeIndex, states, timeSeconds);
 
-                std::array<AgentWorkflowView::ArtifactRenderer, kWorkflowPhaseCount> const renderers
-                  = {
-                    [&]() { m_artifacts.renderUnderstand(m_animation); },
-                    [&]() { m_artifacts.renderDecompose(m_animation); },
-                    [&]() { m_artifacts.renderExplore(m_animation); },
-                    [&]() { m_artifacts.renderDevelop(m_animation); },
-                    [&]() { m_artifacts.renderValidate(m_animation); }};
-
-                ImGui::BeginChild("WorkflowScroll", ImVec2(0.f, -120.f), true);
                 // Scroll extents are finalised at the end of a frame, so this reads the settled
                 // value of the previous frame: callers render each configuration twice.
                 FrameMetrics metrics;
+
+                // The view owns where content starts; record it where the callback is invoked.
+                std::array<AgentWorkflowView::ArtifactRenderer, kWorkflowPhaseCount> renderers;
+                for (std::size_t i = 0; i < kWorkflowPhaseCount; ++i)
+                {
+                    renderers[i] = [this, i, &metrics]() {
+                        metrics.contentX[i] = ImGui::GetCursorScreenPos().x;
+                        if (i == 0)
+                        {
+                            // Proxy items: the first consumes the cursor the view just set, the
+                            // second starts a fresh line. Sections that draw their own text
+                            // return the cursor to the line start, so that x is what a section
+                            // label ends up using.
+                            ImGui::Dummy(ImVec2(1.0f, 1.0f));
+                            ImGui::Dummy(ImVec2(1.0f, 1.0f));
+                            metrics.understandFirstLineX = ImGui::GetCursorScreenPos().x;
+                        }
+                        switch (i)
+                        {
+                        case 0: m_artifacts.renderUnderstand(m_animation); break;
+                        case 1: m_artifacts.renderDecompose(m_animation); break;
+                        case 2: m_artifacts.renderExplore(m_animation); break;
+                        case 3: m_artifacts.renderDevelop(m_animation); break;
+                        default: m_artifacts.renderValidate(m_animation); break;
+                        }
+                    };
+                }
+
+                ImGui::BeginChild("WorkflowScroll", ImVec2(0.f, -120.f), true);
                 metrics.scrollMaxY = ImGui::GetScrollMaxY();
                 m_view.render(states, activeIndex, summaries, expanded, renderers, m_animation);
                 ImGui::EndChild();
@@ -94,6 +125,8 @@ namespace gladius::ui::tests
                         metrics.vertices += static_cast<int>(list->VtxBuffer.size());
                     }
                 }
+                metrics.layout = m_view.lastLayout();
+                metrics.spine = m_view.lastSpine();
                 return metrics;
             }
 
@@ -252,5 +285,147 @@ namespace gladius::ui::tests
         // line transition is still travelling.
         EXPECT_GT(metrics.vertices, 0);
         EXPECT_GT(metrics.scrollMaxY, 0.f);
+    }
+    namespace
+    {
+        /// @brief True when a rail leg reaches `y`, i.e. the stroke runs past the circle edge
+        bool spineReaches(std::array<std::pair<float, float>, kWorkflowPhaseCount - 1> const & spine,
+                          float y)
+        {
+            return std::any_of(spine.begin(),
+                               spine.end(),
+                               [y](std::pair<float, float> const & leg) {
+                                   return leg.first <= y && leg.second >= y;
+                               });
+        }
+    } // namespace
+
+    TEST_F(ImGuiFrameFixture, Render_RailLineRunsThroughEveryPhaseCircle)
+    {
+        design::DesignGraph graph;
+        design::TodoStore todos;
+        tools::CheckpointManager checkpoints;
+        graph.setPhase(design::DesignPhase::DevelopComponents);
+        populateDesign(graph, todos);
+        WorkflowPanelHarness harness(graph, todos, checkpoints);
+
+        std::array<bool, kWorkflowPhaseCount> expanded{};
+        expanded.fill(false);
+        auto const metrics = harness.render(graph, WorkflowSignals{}, expanded, 360.f, 700.f, 0.f);
+
+        // One spine: every circle sits on the same vertical axis...
+        for (std::size_t i = 0; i < kWorkflowPhaseCount; ++i)
+        {
+            EXPECT_NEAR(metrics.layout[i].railX, metrics.layout[0].railX, 0.01f) << "phase " << i;
+            EXPECT_NEAR(metrics.layout[i].center.x, metrics.layout[0].railX, 0.01f) << "phase " << i;
+            if (i > 0)
+            {
+                EXPECT_LT(metrics.layout[i - 1].center.y, metrics.layout[i].center.y)
+                  << "phase " << i;
+            }
+        }
+
+        // ...and the stroke reaches each centre instead of stopping at the circle edge, which is
+        // what made the line look broken in the previous design.
+        for (std::size_t i = 0; i + 1 < kWorkflowPhaseCount; ++i)
+        {
+            // The leg is drawn from centre to centre, so it covers both circles completely rather
+            // than stopping at their edges.
+            EXPECT_TRUE(spineReaches(metrics.spine, metrics.layout[i].center.y))
+              << "leg into phase " << i;
+            EXPECT_TRUE(spineReaches(metrics.spine, metrics.layout[i + 1].center.y))
+              << "leg into phase " << i + 1;
+            EXPECT_NEAR(metrics.spine[i].first, metrics.layout[i].center.y, 0.01f) << "phase " << i;
+            EXPECT_NEAR(metrics.spine[i].second, metrics.layout[i + 1].center.y, 0.01f)
+              << "phase " << i;
+        }
+        for (auto const & leg : metrics.spine)
+        {
+            EXPECT_GT(leg.second, leg.first);
+        }
+    }
+
+    TEST_F(ImGuiFrameFixture, Render_ExpandedPhaseContentStartsRightOfTheRail)
+    {
+        design::DesignGraph graph;
+        design::TodoStore todos;
+        tools::CheckpointManager checkpoints;
+        graph.setPhase(design::DesignPhase::DecomposeFunctions);
+        populateDesign(graph, todos);
+        WorkflowPanelHarness harness(graph, todos, checkpoints);
+
+        std::array<bool, kWorkflowPhaseCount> expanded{};
+        expanded.fill(true);
+        float const panelWidth = 360.f;
+        (void) harness.render(graph, WorkflowSignals{}, expanded, panelWidth, 700.f, 0.f);
+        auto const metrics = harness.render(graph, WorkflowSignals{}, expanded, panelWidth, 700.f,
+                                            0.02f);
+
+        float const rightEdge = panelWidth - ImGui::GetStyle().WindowPadding.x;
+        for (std::size_t i = 0; i < kWorkflowPhaseCount; ++i)
+        {
+            auto const & row = metrics.layout[i];
+            EXPECT_GT(row.contentX, row.railX + row.radius) << "phase " << i;
+            EXPECT_LT(row.railX, rightEdge) << "phase " << i;
+            EXPECT_LT(metrics.contentX[i], rightEdge) << "phase " << i;
+            EXPECT_NEAR(metrics.contentX[i], row.contentX, 0.01f) << "phase " << i;
+        }
+    }
+
+    TEST_F(ImGuiFrameFixture, Render_SectionsAfterContentRowRestartAtTheContentColumn)
+    {
+        design::DesignGraph graph;
+        design::TodoStore todos;
+        tools::CheckpointManager checkpoints;
+        graph.addRequirement("Diameter of the filter disc is 100 mm", "dimension", true);
+        graph.setPhase(design::DesignPhase::DevelopComponents);
+        populateDesign(graph, todos);
+        WorkflowPanelHarness harness(graph, todos, checkpoints);
+
+        std::array<bool, kWorkflowPhaseCount> expanded{};
+        expanded[0] = true;
+        (void) harness.render(graph, WorkflowSignals{}, expanded, 360.f, 700.f, 0.f);
+        auto const metrics = harness.render(graph, WorkflowSignals{}, expanded, 360.f, 700.f, 0.02f);
+
+        // Sections move the cursor by drawing their own rows, so the indent that puts content
+        // right of the rail has to survive them; otherwise every section after the first snaps
+        // back to the window's left edge.
+        auto const & row = metrics.layout[0];
+        EXPECT_GT(metrics.understandFirstLineX, row.railX + row.radius);
+        EXPECT_NEAR(metrics.understandFirstLineX, row.contentX, 0.01f);
+    }
+
+    TEST_F(ImGuiFrameFixture, Render_SpineStaysContinuousAtEveryWidthAndScale)
+    {
+        design::DesignGraph graph;
+        design::TodoStore todos;
+        tools::CheckpointManager checkpoints;
+        graph.setPhase(design::DesignPhase::DevelopComponents);
+        populateDesign(graph, todos);
+        WorkflowPanelHarness harness(graph, todos, checkpoints);
+
+        ImGuiIO & io = ImGui::GetIO();
+        float const baseFontScale = io.FontGlobalScale;
+        float const uiScales[] = {0.75f, 1.f, 2.f};
+        float const widths[] = {280.f, 420.f, 900.f};
+        for (float const scale : uiScales)
+        {
+            io.FontGlobalScale = baseFontScale * scale;
+            for (float const width : widths)
+            {
+                // Expanded phases add tall artifact sections: the spine must still connect every
+                // circle, not just the ones of a collapsed rail.
+                std::array<bool, kWorkflowPhaseCount> expanded{};
+                expanded.fill(true);
+                auto const metrics = harness.render(graph, WorkflowSignals{}, expanded, width,
+                                                    380.f, scale);
+                for (std::size_t i = 0; i + 1 < kWorkflowPhaseCount; ++i)
+                {
+                    EXPECT_TRUE(spineReaches(metrics.spine, metrics.layout[i].center.y))
+                      << "scale " << scale << " width " << width << " phase " << i;
+                }
+            }
+        }
+        io.FontGlobalScale = baseFontScale;
     }
 } // namespace gladius::ui::tests

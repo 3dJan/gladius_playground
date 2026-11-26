@@ -143,6 +143,30 @@ namespace gladius::design::tests
         EXPECT_EQ(restored.activeConfiguration()->userFeedback, "Prefer thinner walls");
     }
 
+    TEST(DesignGraph, SetGoal_JsonRoundTrip_SummarizesGoal)
+    {
+        // Arrange
+        DesignGraph graph;
+        graph.setGoal("Periodic filter disc, 100 mm envelope");
+
+        // Act
+        nlohmann::json const serialized = graph.toJson();
+        DesignGraph restored;
+        ASSERT_TRUE(restored.fromJson(serialized));
+
+        // Assert
+        EXPECT_EQ(restored.goal(), "Periodic filter disc, 100 mm envelope");
+        EXPECT_NE(restored.summarize().find("Goal: Periodic filter disc"), std::string::npos);
+
+        // Documents saved before the goal existed stay loadable and simply have no goal.
+        DesignGraph legacy;
+        nlohmann::json legacyJson = serialized;
+        legacyJson.erase("goal");
+        ASSERT_TRUE(legacy.fromJson(legacyJson));
+        EXPECT_TRUE(legacy.goal().empty());
+        EXPECT_EQ(legacy.summarize().find("Goal:"), std::string::npos);
+    }
+
     TEST(TodoStore, AddUpdateAndJson_RoundTripsChecklistState)
     {
         // Arrange

@@ -420,6 +420,7 @@ namespace gladius::design
 
         return {
             {"phase", toString(m_phase)},
+            {"goal", m_goal},
             {"requirements", std::move(reqs)},
             {"nodes", std::move(nodesArr)},
             {"variants", std::move(varsArr)},
@@ -455,6 +456,7 @@ namespace gladius::design
         };
 
         m_phase = designPhaseFromString(json.value("phase", "ClarifyRequirements"));
+        m_goal = json.value("goal", std::string{});
 
         if (json.contains("requirements") && json["requirements"].is_array())
         {
@@ -568,6 +570,10 @@ namespace gladius::design
     std::string DesignGraph::summarize() const
     {
         std::ostringstream out;
+        if (!m_goal.empty())
+        {
+            out << "Goal: " << m_goal << ", ";
+        }
         out << "Phase: " << toString(m_phase) << ", Requirements: " << m_requirements.size()
             << ", Nodes: " << m_nodes.size() << ", Variants: " << m_variants.size()
             << ", Configurations: " << m_configurations.size();
@@ -595,6 +601,7 @@ namespace gladius::design
     void DesignGraph::clear()
     {
         m_phase = DesignPhase::ClarifyRequirements;
+        m_goal.clear();
         m_requirements.clear();
         m_nodes.clear();
         m_variants.clear();

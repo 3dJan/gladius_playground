@@ -96,6 +96,16 @@ namespace gladius::ui
         PromptInput() = default;
         explicit PromptInput(Config config);
 
+        /**
+         * @brief Replaces the layout config of this instance.
+         * @details The defaults suit a wide chat panel; a host that wants a single-line composer
+         *          derives the numbers from its own font size and applies them here.
+         */
+        void setConfig(Config config) noexcept
+        {
+            m_config = config;
+        }
+
         /// @brief Moves the draft out for submission and clears it
         std::string takeDraft();
 

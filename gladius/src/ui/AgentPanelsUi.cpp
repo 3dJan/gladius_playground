@@ -4,6 +4,8 @@
 #include "AgentPanelColors.h"
 #include "AgentPanels.h"
 
+#include "AgentPanelMetrics.h"
+#include "AgentPanelWidgets.h"
 #include "AgentWorkflow.h"
 #include "AgentWorkflowAnimation.h"
 #include "AgentWorkflowView.h"
@@ -48,7 +50,8 @@ namespace gladius::ui
             {
                 return "Nothing captured yet";
             }
-            return std::to_string(hard) + " constraints, " + std::to_string(soft) + " preferences";
+            return std::to_string(hard) + (hard == 1 ? " constraint, " : " constraints, ")
+                 + std::to_string(soft) + (soft == 1 ? " preference" : " preferences");
         }
         if (index == indexOf(WorkflowPhase::Decompose))
         {
@@ -131,10 +134,29 @@ namespace gladius::ui
           ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(panelWidth, vp->WorkSize.y), ImGuiCond_FirstUseEver);
 
-        if (!ImGui::Begin("Design Agent", &m_visible))
+        // The panel draws its own header, so ImGui's title bar is replaced rather than styled.
+        if (!ImGui::Begin("Design Agent", &m_visible, ImGuiWindowFlags_NoTitleBar))
         {
             ImGui::End();
             return;
+        }
+
+        auto const headerCommands = m_header.render(m_graph.goal(), m_startFresh);
+        if (headerCommands.goalCommitRequested)
+        {
+            m_graph.setGoal(headerCommands.goalDraft);
+        }
+        if (headerCommands.settingsRequested)
+        {
+            m_showSettings = !m_showSettings;
+        }
+        if (headerCommands.clearSessionRequested)
+        {
+            clearSession();
+        }
+        if (headerCommands.hideRequested)
+        {
+            m_visible = false;
         }
 
         WorkflowSignals const signals = workflowSignals();
@@ -199,7 +221,11 @@ namespace gladius::ui
         {
             return;
         }
-        if (!ImGui::CollapsingHeader("Conversation"))
+        // Flat toggle row instead of a CollapsingHeader: same visual family as the section rows.
+        if (!agentWidgets::toggleRow("##conversationSection",
+                                     ICON_FA_COMMENTS,
+                                     "Conversation",
+                                     m_conversationExpanded))
         {
             return;
         }
@@ -228,9 +254,13 @@ namespace gladius::ui
 
     void AgentPanels::renderDiagnosticsSection()
     {
+        std::string const activityLabel = "Activity log (" + std::to_string(m_activityLog.size())
+                                        + " steps)";
         if (!m_activityLog.empty()
-            && ImGui::CollapsingHeader(("Activity log (" + std::to_string(m_activityLog.size())
-                                        + " steps)").c_str()))
+            && agentWidgets::toggleRow("##activityLogSection",
+                                       ICON_FA_HISTORY,
+                                       activityLabel.c_str(),
+                                       m_activityLogExpanded))
         {
             for (std::size_t idx = 0; idx < m_activityLog.size(); ++idx)
             {
@@ -260,7 +290,10 @@ namespace gladius::ui
             }
         }
 
-        if (ImGui::CollapsingHeader("Developer diagnostics"))
+        if (agentWidgets::toggleRow("##diagnosticsSection",
+                                    ICON_FA_WRENCH,
+                                    "Developer diagnostics",
+                                    m_diagnosticsExpanded))
         {
             ImGui::Checkbox("Developer trace", &m_showDeveloperTrace);
             ImGui::SameLine();

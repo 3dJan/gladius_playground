@@ -19,6 +19,17 @@ namespace gladius::design
             m_phase = phase;
         }
 
+        /// @brief One-line summary of what is being designed; shown in the Design Agent header
+        [[nodiscard]] std::string const & goal() const noexcept
+        {
+            return m_goal;
+        }
+
+        void setGoal(std::string goal)
+        {
+            m_goal = std::move(goal);
+        }
+
         [[nodiscard]] DesignPhase phase() const noexcept
         {
             return m_phase;
@@ -114,6 +125,7 @@ namespace gladius::design
 
       private:
         DesignPhase m_phase = DesignPhase::ClarifyRequirements;
+        std::string m_goal;
         std::vector<Requirement> m_requirements;
         std::map<std::string, DesignNode> m_nodes;
         std::map<std::string, DesignVariant> m_variants;

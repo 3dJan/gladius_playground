@@ -1,5 +1,8 @@
 #include "AgentWorkflowView.h"
 
+#include <IconsFontAwesome5.h>
+
+#include "AgentPanelMetrics.h"
 #include "AgentWorkflowAnimation.h"
 
 #include <algorithm>
@@ -11,15 +14,6 @@ namespace gladius::ui
 {
     namespace
     {
-        constexpr ImVec4 kCompletedColor = {0.36f, 0.66f, 0.42f, 1.00f};
-        constexpr ImVec4 kAttentionColor = {0.86f, 0.62f, 0.22f, 1.00f};
-
-        /// @brief Gladius accent colour of the active theme instead of a hard-coded hue
-        ImVec4 accentColor()
-        {
-            return ImGui::GetStyleColorVec4(ImGuiCol_SliderGrab);
-        }
-
         ImVec4 scaled(ImVec4 color, float alpha)
         {
             color.w *= alpha;
@@ -101,9 +95,10 @@ namespace gladius::ui
         }
     } // namespace
 
+
     float AgentWorkflowView::contentIndent() noexcept
     {
-        return ImGui::GetFontSize() * 1.20f;
+        return ImGui::GetFontSize() * (agentMetrics::railTextGap + agentMetrics::sectionIndent);
     }
 
     void AgentWorkflowView::render(
@@ -114,29 +109,39 @@ namespace gladius::ui
       std::array<ArtifactRenderer, kWorkflowPhaseCount> const & renderers,
       AgentWorkflowAnimationState & animation)
     {
+        using namespace agentMetrics;
         ImGuiStyle const & style = ImGui::GetStyle();
         float const fontSizePx = ImGui::GetFontSize();
         float const lineHeight = fontSizePx + style.ItemSpacing.y;
         float const smallLine = fontSizePx * 0.95f;
-        float const rowStartX = ImGui::GetCursorScreenPos().x;
-        float const availWidth = std::max(64.f, ImGui::GetContentRegionAvail().x);
-        float const railX = rowStartX + fontSizePx * 0.90f;
-        float const contentX = railX + contentIndent();
         float const nowSeconds = static_cast<float>(ImGui::GetTime());
 
+        // Geometry is kept in screen coordinates end to end: mixing them with the window-local
+        // variants is what previously pushed artifact content out to the window's left edge.
+        float const rowStartX = ImGui::GetCursorScreenPos().x;
+        float const availWidth = std::max(64.f, ImGui::GetContentRegionAvail().x);
+        float const rightEdgeX = rowStartX + availWidth;
+        float const railX = rowStartX + fontSizePx * railOffset;
+        float const textX = railX + fontSizePx * railTextGap;
+        float const titleX = textX + fontSizePx * chevronGutter;
+        // Pixel aligned: the content column is reached through a group indent, and ImGui snaps the
+        // line start of an indented line to the whole pixel of (window pos + indent).
+        float const contentX = std::floor(titleX + fontSizePx * sectionIndent);
+
         ImDrawList & drawList = *ImGui::GetWindowDrawList();
-        std::array<RowLayout, kWorkflowPhaseCount> rows{};
+        std::array<RowLayout, kWorkflowPhaseCount> & rows = m_rows;
+        rows = {};
 
         for (std::size_t i = 0; i < kWorkflowPhaseCount; ++i)
         {
             PhaseState const state = states[i];
-            float const wrapWidth = std::max(48.f, rowStartX + availWidth - contentX);
+            float const wrapWidth = std::max(48.f, rightEdgeX - titleX);
             std::vector<TextLine> const summaryLines =
               measureWrappedLines(summaries[i].c_str(), wrapWidth);
             float const summaryHeight = static_cast<float>(summaryLines.size()) * smallLine;
-            float const rowHeight = lineHeight + summaryHeight;
+            float const rowHeight = lineHeight + summaryHeight + fontSizePx * rowPadding;
 
-            ImGui::SetCursorPosX(rowStartX);
+            ImGui::SetCursorScreenPos(ImVec2(rowStartX, ImGui::GetCursorScreenPos().y));
             ImGui::PushID(static_cast<int>(i));
             bool const clicked = ImGui::InvisibleButton("##phaseRow", ImVec2(availWidth, rowHeight));
             RowLayout & row = rows[i];
@@ -145,16 +150,18 @@ namespace gladius::ui
             row.rowBottom = ImGui::GetItemRectMax().y;
             ImGui::PopID();
 
+            row.railX = railX;
+            row.contentX = contentX;
+            row.radius = railCircleRadius(state);
             row.center = ImVec2(railX, (row.rowTop + row.rowBottom) * 0.5f);
-            row.radius = state == PhaseState::Active ? fontSizePx * 0.34f : fontSizePx * 0.27f;
             row.expanded = expanded[i];
             row.contentBottom = row.rowBottom;
 
             if (row.hovered)
             {
-                drawList.AddRectFilled(ImVec2(contentX, row.rowTop),
-                                       ImVec2(rowStartX + availWidth, row.rowBottom),
-                                       toU32(accentColor(), 0.08f),
+                drawList.AddRectFilled(ImVec2(textX, row.rowTop),
+                                       ImVec2(rightEdgeX, row.rowBottom),
+                                       toU32(railAccentColor(), 0.07f),
                                        style.FrameRounding * 0.5f);
             }
 
@@ -174,16 +181,20 @@ namespace gladius::ui
                 titleColor = scaled(titleColor, 0.88f);
                 break;
             }
-            drawList.AddText(ImVec2(contentX, row.rowTop + style.ItemSpacing.y * 0.5f),
+            // The chevron is the expand/collapse affordance of the row.
+            drawList.AddText(ImVec2(textX, row.rowTop + style.ItemSpacing.y * 0.5f),
+                             ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                             expanded[i] ? ICON_FA_CHEVRON_DOWN : ICON_FA_CHEVRON_RIGHT);
+            drawList.AddText(ImVec2(titleX, row.rowTop + style.ItemSpacing.y * 0.5f),
                              ImGui::GetColorU32(titleColor),
                              phaseLabel(phaseAt(i)));
             if (!summaryLines.empty())
             {
                 ImVec4 const summaryColor = state == PhaseState::Attention
-                                              ? scaled(kAttentionColor, 0.95f)
+                                              ? scaled(railAttentionColor(), 0.95f)
                                               : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
                 drawWrappedLines(drawList,
-                                 ImVec2(contentX, row.rowTop + lineHeight),
+                                 ImVec2(titleX, row.rowTop + lineHeight),
                                  summaryLines,
                                  summaryColor,
                                  smallLine);
@@ -191,13 +202,16 @@ namespace gladius::ui
 
             if (row.expanded)
             {
-                ImGui::SetCursorPosX(contentX);
+                // A real indent, not a one-off cursor move: widgets that reset the line (Text,
+                // InputText, a drawn label) return to the indent edge, so every artifact row of a
+                // phase shares the content column instead of snapping back to the window's left edge.
+                ImGui::Indent(contentX - rowStartX);
                 ImGui::Dummy(ImVec2(0.f, fontSizePx * 0.15f));
-                ImGui::SetCursorPosX(contentX);
                 if (renderers[i])
                 {
                     renderers[i]();
                 }
+                ImGui::Unindent(contentX - rowStartX);
                 row.contentBottom = std::max(row.rowBottom, ImGui::GetCursorScreenPos().y);
             }
 
@@ -212,110 +226,41 @@ namespace gladius::ui
 
             if (i + 1 < kWorkflowPhaseCount)
             {
-                ImGui::SetCursorPosX(rowStartX);
-                ImGui::Dummy(ImVec2(0.f, fontSizePx * 0.34f));
+                ImGui::SetCursorScreenPos(ImVec2(rowStartX, ImGui::GetCursorScreenPos().y));
+                ImGui::Dummy(ImVec2(0.f, fontSizePx * railRowSpacing));
             }
         }
 
-        // Connectors are drawn after layout so the line can run through the artifact block of the
-        // phase above; that keeps the progress line continuous while a phase is expanded.
+        // The spine is one continuous line from the first node centre to the last one. It is drawn
+        // before the nodes, which paint an opaque disc, so the line visibly runs through them.
         for (std::size_t i = 1; i < kWorkflowPhaseCount; ++i)
         {
-            float const fromY = rows[i - 1].contentBottom;
-            float const toY = rows[i].center.y - rows[i].radius;
-            if (toY <= fromY)
-            {
-                continue;
-            }
             bool const travelled = states[i - 1] == PhaseState::Completed
                                    || states[i - 1] == PhaseState::Attention;
-            ImVec4 const lineColor = travelled
-                                       ? scaled(accentColor(), 0.42f)
-                                       : ImGui::GetStyleColorVec4(ImGuiCol_Border);
-            drawList.AddLine(ImVec2(railX, fromY), ImVec2(railX, toY),
-                             ImGui::GetColorU32(lineColor), 1.4f);
+            // Centre to centre, never edge to edge: the node discs hide the stroke inside the
+            // circle, which is what makes the spine read as one line running through the rail.
+            m_spine[i - 1] = {rows[i - 1].center.y, rows[i].center.y};
+            drawRailLeg(drawList, railX, m_spine[i - 1].first, m_spine[i - 1].second, travelled);
         }
 
-        renderConnector(drawList, rows, activeIndex, animation, nowSeconds);
+        renderGlow(drawList, rows, animation, nowSeconds);
 
         for (std::size_t i = 0; i < kWorkflowPhaseCount; ++i)
         {
-            renderCircle(drawList,
-                         rows[i],
-                         states[i],
-                         animation.completionPulse(i, nowSeconds),
-                         states[i] == PhaseState::Active ? animation.activeBreath(nowSeconds) : 0.f);
+            drawRailCircle(drawList,
+                           RailCircle{rows[i].center, rows[i].radius},
+                           states[i],
+                           animation.completionPulse(i, nowSeconds),
+                           states[i] == PhaseState::Active ? animation.activeBreath(nowSeconds) : 0.f);
         }
     }
 
-    void AgentWorkflowView::renderCircle(ImDrawList & drawList,
-                                         RowLayout const & row,
-                                         PhaseState state,
-                                         float pulse,
-                                         float breath) const
+    void AgentWorkflowView::renderGlow(ImDrawList & drawList,
+                                       std::array<RowLayout, kWorkflowPhaseCount> const & rows,
+                                       AgentWorkflowAnimationState & animation,
+                                       float nowSeconds) const
     {
-        ImVec2 const c = row.center;
-        float const r = row.radius;
-        ImVec4 const accent = accentColor();
-        float const dpi = ImGui::GetWindowDpiScale();
-
-        if (pulse > 0.001f)
-        {
-            drawList.AddCircle(c,
-                               r + (2.0f + pulse * 5.0f) * dpi,
-                               toU32(accent, 0.40f * pulse),
-                               32,
-                               1.2f * dpi);
-        }
-
-        switch (state)
-        {
-        case PhaseState::Pending:
-            drawList.AddCircleFilled(c, r, ImGui::GetColorU32(ImGuiCol_FrameBg));
-            drawList.AddCircle(c, r, ImGui::GetColorU32(ImGuiCol_Border), 28, 1.2f * dpi);
-            break;
-        case PhaseState::Completed:
-            drawList.AddCircleFilled(c, r, toU32(kCompletedColor, 0.28f));
-            drawList.AddCircle(c, r, ImGui::GetColorU32(kCompletedColor), 28, 1.3f * dpi);
-            {
-                float const s = r * 0.62f;
-                ImU32 const ink = ImGui::GetColorU32(kCompletedColor);
-                drawList.AddLine(ImVec2(c.x - s, c.y + s * 0.02f),
-                                 ImVec2(c.x - s * 0.22f, c.y + s * 0.66f), ink, 1.6f * dpi);
-                drawList.AddLine(ImVec2(c.x - s * 0.22f, c.y + s * 0.66f),
-                                 ImVec2(c.x + s * 0.90f, c.y - s * 0.66f), ink, 1.6f * dpi);
-            }
-            break;
-        case PhaseState::Attention:
-            drawList.AddCircleFilled(c, r, toU32(kAttentionColor, 0.26f));
-            drawList.AddCircle(c, r, ImGui::GetColorU32(kAttentionColor), 28, 1.5f * dpi);
-            {
-                ImU32 const ink = ImGui::GetColorU32(kAttentionColor);
-                drawList.AddLine(ImVec2(c.x, c.y - r * 0.48f),
-                                 ImVec2(c.x, c.y + r * 0.14f), ink, 1.6f * dpi);
-                drawList.AddCircleFilled(ImVec2(c.x, c.y + r * 0.46f), 1.4f * dpi, ink);
-            }
-            break;
-        case PhaseState::Active:
-            drawList.AddCircleFilled(c, r, toU32(accent, 0.30f));
-            drawList.AddCircle(c, r, ImGui::GetColorU32(accent), 32, 1.8f * dpi);
-            // Slow breathing ring: the only continuously animated element in the rail.
-            drawList.AddCircle(c,
-                               r + (2.5f + breath * 2.0f) * dpi,
-                               toU32(accent, 0.12f + 0.16f * breath),
-                               32,
-                               1.1f * dpi);
-            break;
-        }
-    }
-
-    void AgentWorkflowView::renderConnector(ImDrawList & drawList,
-                                            std::array<RowLayout, kWorkflowPhaseCount> const & rows,
-                                            std::size_t activeIndex,
-                                            AgentWorkflowAnimationState & animation,
-                                            float nowSeconds) const
-    {
-        if (!animation.lineTransitionActive() || activeIndex == 0)
+        if (!animation.lineTransitionActive())
         {
             return;
         }
@@ -324,22 +269,22 @@ namespace gladius::ui
         {
             return;
         }
-        std::size_t const to = from + 1;
         float const progress = animation.lineTransitionProgress(nowSeconds);
         if (progress >= 1.0f)
         {
             return;
         }
-        float const fromY = rows[from].contentBottom;
-        float const toY = rows[to].center.y - rows[to].radius;
+        float const fromY = rows[from].center.y;
+        float const toY = rows[from + 1].center.y;
         if (toY <= fromY)
         {
             return;
         }
-        // A short luminous section travels down the connector into the newly active phase.
+        // A short luminous section travels down the spine into the newly active phase.
+        float const railX = rows[from].center.x;
         float const centre = fromY + (toY - fromY) * progress;
         float const span = std::min((toY - fromY) * 0.30f, 26.f);
-        ImVec4 const accent = accentColor();
+        ImVec4 const accent = railAccentColor();
         for (int s = 0; s < 5; ++s)
         {
             float const t = static_cast<float>(s) / 4.f;
@@ -350,10 +295,7 @@ namespace gladius::ui
                 continue;
             }
             float const fade = (1.0f - t) * (1.0f - progress * 0.35f);
-            drawList.AddLine(ImVec2(rows[from].center.x, y0),
-                             ImVec2(rows[to].center.x, y1),
-                             toU32(accent, 0.55f * fade),
-                             1.8f);
+            drawList.AddLine(ImVec2(railX, y0), ImVec2(railX, y1), toU32(accent, 0.55f * fade), 1.8f);
         }
     }
 } // namespace gladius::ui

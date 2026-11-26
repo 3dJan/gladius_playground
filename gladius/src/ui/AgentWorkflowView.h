@@ -1,12 +1,14 @@
 #pragma once
 
 #include "AgentWorkflow.h"
+#include "AgentWorkflowRailDraw.h"
 
 #include <array>
 #include <cstddef>
 #include <functional>
 #include <imgui.h>
 #include <string>
+#include <utility>
 
 namespace gladius::ui
 {
@@ -44,10 +46,12 @@ namespace gladius::ui
         /// @brief Horizontal space the rail occupies before artifact content starts
         [[nodiscard]] static float contentIndent() noexcept;
 
-      private:
+        /// @brief Geometry the last render pass measured for one phase row
         struct RowLayout
         {
             ImVec2 center{};
+            float railX = 0.0f;
+            float contentX = 0.0f;
             float radius = 0.0f;
             float rowTop = 0.0f;
             float rowBottom = 0.0f;
@@ -57,16 +61,26 @@ namespace gladius::ui
             bool clicked = false;
         };
 
-        void renderCircle(ImDrawList & drawList,
-                          RowLayout const & row,
-                          PhaseState state,
-                          float pulse,
-                          float breath) const;
+        /// @brief Rows of the last render pass; lets the host and the tests assert on rail geometry
+        [[nodiscard]] std::array<RowLayout, kWorkflowPhaseCount> const & lastLayout() const noexcept
+        {
+            return m_rows;
+        }
 
-        void renderConnector(ImDrawList & drawList,
-                             std::array<RowLayout, kWorkflowPhaseCount> const & rows,
-                             std::size_t activeIndex,
-                             AgentWorkflowAnimationState & animation,
-                             float nowSeconds) const;
+        /// @brief Spine segments (fromY, toY) drawn between consecutive nodes by the last render
+        [[nodiscard]] std::array<std::pair<float, float>, kWorkflowPhaseCount - 1> const &
+          lastSpine() const noexcept
+        {
+            return m_spine;
+        }
+
+      private:
+        void renderGlow(ImDrawList & drawList,
+                        std::array<RowLayout, kWorkflowPhaseCount> const & rows,
+                        AgentWorkflowAnimationState & animation,
+                        float nowSeconds) const;
+
+        std::array<RowLayout, kWorkflowPhaseCount> m_rows{};
+        std::array<std::pair<float, float>, kWorkflowPhaseCount - 1> m_spine{};
     };
 } // namespace gladius::ui

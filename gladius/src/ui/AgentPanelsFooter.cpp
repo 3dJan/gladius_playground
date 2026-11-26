@@ -4,6 +4,8 @@
 // and run control in AgentPanels.cpp.
 
 #include "AgentPanelColors.h"
+#include "AgentPanelMetrics.h"
+#include "AgentPanelWidgets.h"
 #include "AgentPanels.h"
 
 #include <IconsFontAwesome5.h>
@@ -17,51 +19,71 @@
 
 namespace gladius::ui
 {
+    float AgentPanels::measureControlRowHeight() const
+    {
+        // Compact tool buttons are square and font-derived, so the row keeps its proportions at
+        // any UI scale and matches the composer's icon buttons.
+        return std::max(ImGui::GetFrameHeight(),
+                        agentMetrics::compactButtonHeight * ImGui::GetFontSize());
+    }
+
+    std::vector<float> AgentPanels::measureIdleButtonWidths() const
+    {
+        float const size = measureControlRowHeight();
+        return {size, size, size, size, size, size};
+    }
+
     std::size_t AgentPanels::measureControlRows()
     {
-        // SameLine wrapping decides how many rows the control row needs; measure it the same
-        // way the buttons are drawn so the pinned footer can never be clipped.
-        ImGuiStyle const & style = ImGui::GetStyle();
-        auto const buttonWidth = [&style](char const * label) {
-            return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.f;
-        };
-        auto const checkWidth = [&style, &buttonWidth](char const * label) {
-            return ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + buttonWidth(label);
-        };
-
-        std::vector<float> widths;
         if (m_running.load())
         {
-            widths.push_back(buttonWidth(m_runControl.isPaused() ? "Resume" : "Pause"));
-            widths.push_back(buttonWidth("Stop"));
+            // The idle tool row is not drawn while a run is active.
+            return 0u;
         }
-        else
-        {
-            widths.push_back(buttonWidth("Clear session"));
-        }
-        widths.push_back(buttonWidth("Settings"));
-        widths.push_back(buttonWidth("Insert image"));
-        widths.push_back(checkWidth("Start fresh"));
-        return PromptInput::countWrappedRows(widths,
-                                            m_prompt.cardOuterWidth(),
-                                            style.ItemSpacing.x);
+        // SameLine wrapping decides how many rows the tool row needs; measure it the same way the
+        // buttons are drawn so the pinned footer can never be clipped.
+        return PromptInput::countWrappedRows(measureIdleButtonWidths(),
+                                             m_prompt.cardOuterWidth(),
+                                             ImGui::GetStyle().ItemSpacing.x);
     }
 
     float AgentPanels::measureStatusLineHeight()
     {
-        return ImGui::GetTextLineHeightWithSpacing();
+        // The status line carries the run controls inline, so it is as tall as those buttons.
+        return std::max(ImGui::GetTextLineHeightWithSpacing(),
+                        measureControlRowHeight() + ImGui::GetStyle().FramePadding.y);
+    }
+
+    void AgentPanels::applyComposerMetrics()
+    {
+        using namespace agentMetrics;
+        float const fontSize = ImGui::GetFontSize();
+        PromptInput::Config config = m_prompt.config();
+        // One line by default: the draft's composer is a chat field, not a large text block. The
+        // field still grows to maxLines when the draft needs it.
+        config.minLines = 1;
+        config.maxLines = 6;
+        config.minHeight = fontSize * composerMinHeight;
+        config.maxHeight = fontSize * 8.f;
+        config.iconButtonSize = fontSize * sendButtonSize;
+        config.attachmentThumbSize = fontSize * 2.1f;
+        config.placeholder = "Ask for a change...";
+        config.cardPadding = std::max(4.f, fontSize * 0.30f);
+        config.cardRounding = fontSize * cardRounding;
+        config.minComboWidth = fontSize * 6.f;
+        m_prompt.setConfig(config);
     }
 
     AgentPanels::FooterMetrics AgentPanels::measureFooter()
     {
         ImGuiStyle const & style = ImGui::GetStyle();
         FooterMetrics metrics;
+        applyComposerMetrics();
         metrics.statusLineHeight = measureStatusLineHeight();
-        metrics.controlRows = std::max<std::size_t>(1u, measureControlRows());
+        metrics.controlRows = measureControlRows();
         metrics.controlRowsHeight
           = static_cast<float>(metrics.controlRows)
-            * (std::max(ImGui::GetFrameHeight(), ImGui::GetTextLineHeightWithSpacing())
-               + style.ItemSpacing.y);
+            * (measureControlRowHeight() + style.ItemSpacing.y);
 
         bool awaiting = false;
         {
@@ -89,6 +111,17 @@ namespace gladius::ui
         return metrics;
     }
 
+    bool AgentPanels::iconButton(char const * icon, char const * tooltip)
+    {
+        float const size = measureControlRowHeight();
+        bool const clicked = ImGui::Button(icon, ImVec2(size, size));
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("%s", tooltip);
+        }
+        return clicked;
+    }
+
     void AgentPanels::renderStatusLine()
     {
         bool const running = m_running.load();
@@ -99,95 +132,139 @@ namespace gladius::ui
             awaiting = m_awaitingConfirmation && !m_confirmationResolved;
         }
 
-        // Status line: meaningful operation names, never a bare elapsed-time spinner.
+        // Status line: meaningful operation names, never a bare elapsed-time spinner. The run
+        // controls sit inline on the right so the line is the single place to steer a running job.
+        char const * statusText = nullptr;
+        ImVec4 statusColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
         if (running && paused)
         {
-            ImGui::TextColored(colorWarn(), "Paused - press Resume to continue");
+            statusText = "Paused";
+            statusColor = colorWarn();
         }
         else if (running)
         {
-            char const * spinner[] = {"|", "/", "-", "\\"};
-            int const frame = static_cast<int>(ImGui::GetTime() * 6.0) % 4;
+            // The notch glyph is the activity mark; it is static, the text names the operation.
             if (!m_activeToolName.empty())
             {
                 ImGui::TextColored(colorInfo(),
-                                   "%s Running %s",
-                                   spinner[frame],
+                                   "%s %s",
+                                   ICON_FA_CIRCLE_NOTCH,
                                    humaniseToolName(m_activeToolName).c_str());
             }
             else
             {
-                ImGui::TextColored(colorInfo(), "%s Waiting for the model", spinner[frame]);
+                ImGui::TextColored(colorInfo(), "%s Waiting for the model", ICON_FA_CIRCLE_NOTCH);
             }
         }
         else if (awaiting)
         {
-            ImGui::TextColored(colorWarn(), "Action required: approve or decline below");
+            statusText = "Action required: approve or decline below";
+            statusColor = colorWarn();
         }
         else if (isDesignComplete(m_graph))
         {
-            ImGui::TextColored(colorOk(), "Design complete");
+            statusText = "Design complete";
+            statusColor = colorOk();
         }
         else if (!m_conversation.empty())
         {
-            ImGui::TextColored(colorInfo(), "Waiting for your instruction");
+            statusText = "Ready";
+            statusColor = colorInfo();
         }
-        else
+        if (statusText != nullptr)
         {
-            ImGui::TextDisabled("Describe what you want to design");
+            ImGui::TextColored(statusColor, "%s", statusText);
         }
-    }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("%s", m_graph.goal().empty() ? "" : m_graph.goal().c_str());
+        }
 
-    void AgentPanels::renderControlRow()
-    {
-        bool const running = m_running.load();
         if (running)
         {
-            if (m_runControl.isPaused())
+            // The tool row is empty while a run is active: the controls belong here instead.
+            // Right-align them against the content edge, the way the composer aligns its buttons.
+            float const buttonsWidth
+              = measureControlRowHeight() * 2.f + ImGui::GetStyle().ItemSpacing.x;
+            float const textMaxX = ImGui::GetCursorPosX()
+                                 + std::max(0.f, ImGui::GetContentRegionAvail().x - buttonsWidth);
+            if (ImGui::GetCursorPosX() > textMaxX)
             {
-                if (ImGui::Button("Resume"))
+                ImGui::NewLine();
+            }
+            ImGui::SameLine(textMaxX);
+            if (paused)
+            {
+                if (iconButton(ICON_FA_PLAY, "Resume the current run"))
                 {
                     m_runControl.resume();
                 }
             }
-            else if (ImGui::Button("Pause"))
+            else if (iconButton(ICON_FA_PAUSE, "Pause the current run"))
             {
                 m_runControl.requestPause();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Stop"))
+            if (iconButton(ICON_FA_STOP, "Stop the current run"))
             {
                 stopRun();
             }
         }
-        else if (ImGui::Button("Clear session"))
+    }
+
+    void AgentPanels::clearSession()
+    {
+        m_conversation.clear();
+        m_activityLog.clear();
+        m_lastError.clear();
+        m_streamingBuffer.clear();
+        m_workflowAnimation.reset();
+    }
+
+    void AgentPanels::renderControlRow()
+    {
+        if (m_running.load())
         {
-            m_conversation.clear();
-            m_activityLog.clear();
-            m_lastError.clear();
-            m_streamingBuffer.clear();
-            m_workflowAnimation.reset();
+            // Pause/stop live on the status line while a run is active.
+            return;
+        }
+
+        // Compact idle tool row: square icon buttons keep the footer short and match the composer.
+        if (iconButton(ICON_FA_BROOM, "Clear the conversation and activity log"))
+        {
+            clearSession();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Settings"))
-        {
-            m_showSettings = !m_showSettings;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Insert image"))
+        if (iconButton(ICON_FA_FILE_IMPORT,
+                       "Insert a picked image as a document resource"))
         {
             insertClipboardOrFileImageIntoDocument();
         }
-        if (ImGui::IsItemHovered())
+        ImGui::SameLine();
+        if (iconButton(ICON_FA_SYNC_ALT,
+                       "Clear current model & history on next prompt (auto-unchecks after first "
+                       "prompt)"))
         {
-            ImGui::SetTooltip("Insert the clipboard or a picked image as a document resource");
+            m_startFresh = !m_startFresh;
+        }
+        if (m_startFresh)
+        {
+            // A filled corner dot marks the toggle as armed without taking horizontal space.
+            ImDrawList & drawList = *ImGui::GetWindowDrawList();
+            ImVec2 const max = ImGui::GetItemRectMax();
+            float const fontSize = ImGui::GetFontSize();
+            drawList.AddCircleFilled(ImVec2(max.x - fontSize * 0.30f, max.y - fontSize * 0.30f),
+                                     fontSize * 0.13f,
+                                     ImGui::GetColorU32(agentWidgets::accent()));
         }
         ImGui::SameLine();
-        ImGui::Checkbox("Start fresh", &m_startFresh);
-        if (ImGui::IsItemHovered())
+        // Reference images attach to the next prompt. They live on this row so the composer card
+        // stays a single chat field, the way the draft has it.
+        renderImageControls(measureControlRowHeight());
+        ImGui::SameLine();
+        if (iconButton(ICON_FA_COG, "Provider settings"))
         {
-            ImGui::SetTooltip(
-              "Clear current model & history on next prompt (auto-unchecks after first prompt)");
+            m_showSettings = !m_showSettings;
         }
     }
 
@@ -216,23 +293,18 @@ namespace gladius::ui
 
     float AgentPanels::leadingControlsWidth()
     {
-        ImGuiStyle const & style = ImGui::GetStyle();
-        float const size = m_prompt.config().iconButtonSize;
-        return size * 2.f + style.ItemSpacing.x;
+        // The card's toolbar carries only the model pickers and the trailing expand/submit pair;
+        // the image controls live on the flat tool row above the card.
+        return 0.f;
     }
 
     void AgentPanels::renderComposerToolbar(PromptInput::ToolbarLayout const & layout, int row)
     {
-        if (row == 0 && layout.drawLeading)
-        {
-            renderImageControls(m_prompt.config().iconButtonSize);
-        }
+        // Only the model pickers live inside the card; the leading controls of the tool row above
+        // are measured through leadingControlsWidth(). PromptInput breaks a wrapped second row onto
+        // its own line, so the combos never need an explicit SameLine.
         if (row + 1 == layout.rowCount && layout.drawCombos)
         {
-            if (row == 0)
-            {
-                ImGui::SameLine();
-            }
             renderModelCombos(layout);
         }
     }
