@@ -152,7 +152,14 @@ namespace gladius::ui
                   m_eventQueue.push(agent::ImageGeneratedEvent{resp.image, req.prompt});
               }
               co_return resp;
-          }});
+          },
+          // Autonomy can change between runs, so the policy is read when a question arrives.
+          [this](agent::UserQuestion const & question, io::CancellationToken const & cancellation)
+            -> coro::task<agent::UserDecisionResult> {
+              co_return co_await agent::makeAskUserCallback(m_userDecisions, decisionPolicy())(
+                question, cancellation);
+          },
+          0});
         design::registerDesignTools(m_registry, *m_toolCtx);
     }
 
@@ -1041,6 +1048,11 @@ namespace gladius::ui
             auto h = std::exchange(m_webConfirmHandle, {});
             h.resume();
         }
+        // A answered design question parks the run coroutine on this thread too.
+        if (auto h = m_userDecisions.takeResumable())
+        {
+            h.resume();
+        }
         {
             ClipboardImageResult webClip;
             if (ClipboardImageHelper::consumePendingWebImage(webClip) && webClip.success)
@@ -1105,6 +1117,15 @@ namespace gladius::ui
                 saveSessionState();
             }
         }
+    }
+
+    agent::DecisionPolicy AgentPanels::decisionPolicy() const
+    {
+        // Questions are only useful when a human is watching the panel: a run that works on its own
+        // must take the recommendation instead of parking forever.
+        return m_policy.autonomy() == agent::AutonomyLevel::WorkAutonomously
+                 ? agent::DecisionPolicy::UseRecommendation
+                 : agent::DecisionPolicy::AskUser;
     }
 
     agent::DesignContextSnapshot AgentPanels::buildContextSnapshot(std::string const & knowledgeQuery)
@@ -1214,6 +1235,12 @@ namespace gladius::ui
         m_cancellation.reset();
         m_runControl.reset();
         m_workflowAnimation.reset();
+        m_userDecisions.abandon("Previous run ended");
+        m_userDecisionText.clear();
+        if (m_toolCtx)
+        {
+            m_toolCtx->userQuestionsAsked = 0;
+        }
 
         // A prompt that arrives after the design was finished extends the requirements: re-open the
         // design so the new request is iterated on instead of being reported as already done.
@@ -1477,6 +1504,8 @@ namespace gladius::ui
             m_confirmationApproved = false;
         }
         m_confirmCv.notify_all();
+        // A question on screen would otherwise park the run thread forever.
+        m_userDecisions.abandon("Run stopped");
 #ifdef __EMSCRIPTEN__
         m_webConfirmHandle = {};
         m_webRunTask.reset();

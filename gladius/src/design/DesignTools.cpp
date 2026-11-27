@@ -1,4 +1,5 @@
 #include "DesignTools.h"
+#include "../agent/UserDecision.h"
 
 #include "../Document.h"
 #include "../EventLogger.h"
@@ -249,6 +250,7 @@ namespace gladius::design
 
         /// @brief Requirement engineer: writes requirements and the acceptance checklist only
         constexpr char const * const kRequirementsSurface[] = {"add_requirement",
+                                                               "ask_user",
                                                                "create_todo_list",
                                                                "add_todo_item",
                                                                "update_todo_item",
@@ -259,6 +261,7 @@ namespace gladius::design
         /// @brief Decomposer: builds the tree and its contracts, never touches geometry
         constexpr char const * const kDecompositionSurface[] = {"add_function",
                                                                 "add_requirement",
+                                                                "ask_user",
                                                                 "create_variant",
                                                                 "define_interface",
                                                                 "freeze_component",
@@ -268,7 +271,8 @@ namespace gladius::design
                                                                 "get_node"};
 
         /// @brief Component designer: models one scoped node, cannot complete the design
-        constexpr char const * const kComponentSurface[] = {"begin_edit",
+        constexpr char const * const kComponentSurface[] = {"ask_user",
+                                                            "begin_edit",
                                                             "capture_viewport",
                                                             "commit_edit",
                                                             "ensure_output_chain",
@@ -286,6 +290,7 @@ namespace gladius::design
         /// @brief Review gate: reads, one capture and verdicts; geometry stays untouched
         constexpr char const * const kReviewSurface[] = {"add_requirement",
                                                          "add_variant_feedback",
+                                                         "ask_user",
                                                          "capture_viewport",
                                                          "check_printability",
                                                          "get_bounding_box",
@@ -2728,6 +2733,224 @@ namespace gladius::design
                 DesignToolContext & m_ctx;
             };
 
+            class AskUserTool final : public tools::ITool
+            {
+              public:
+                explicit AskUserTool(DesignToolContext & context)
+                    : m_ctx(context)
+                {
+                }
+
+                [[nodiscard]] tools::ToolDefinition definition() const override
+                {
+                    return {"ask_user",
+                            "Ask the user to choose between alternatives and apply the answer to the design graph. "
+                            "Use it where several designs are legitimately different, for example a combustion or an "
+                            "electric engine: list the options, mark the one you recommend, name the node and, when "
+                            "the options are existing variants, their variantIds so the choice is applied.",
+                            {{"type", "object"},
+                             {"required", {"question"}},
+                             {"properties",
+                              {{"question", {{"type", "string"}}},
+                               {"options", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                               {"optionVariantIds", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                               {"recommended", {{"type", "integer"}}},
+                               {"reason", {{"type", "string"}}},
+                               {"nodeId", {{"type", "string"}}},
+                               {"todoId", {{"type", "string"}}},
+                               {"checkIndex", {{"type", "integer"}}}}}},
+                            tools::ToolPolicy::ReadOnly};
+                }
+
+                [[nodiscard]] coro::task<nlohmann::json>
+                execute(nlohmann::json const & args, io::CancellationToken const & cancellation) override
+                {
+                    if (!m_ctx.askUser)
+                    {
+                        co_return nlohmann::json{{"success", false},
+                                                 {"error", "This host cannot ask the user; decide yourself"}};
+                    }
+                    std::string const questionText = args.value("question", "");
+                    if (questionText.empty())
+                    {
+                        co_return nlohmann::json{{"success", false}, {"error", "question is required"}};
+                    }
+                    if (m_ctx.userQuestionsAsked >= agent::kMaxUserQuestions)
+                    {
+                        co_return nlohmann::json{{"success", false},
+                                                 {"error", "Question budget reached; decide yourself"}};
+                    }
+
+                    agent::UserQuestion question;
+                    question.id = "q_" + std::to_string(m_ctx.userQuestionsAsked + 1);
+                    question.question = questionText;
+                    question.reason = args.value("reason", "");
+                    question.nodeId = args.value("nodeId", "");
+                    if (args.contains("options") && args["options"].is_array())
+                    {
+                        for (auto const & option : args["options"])
+                        {
+                            if (option.is_string())
+                            {
+                                question.options.push_back(option.get<std::string>());
+                            }
+                        }
+                    }
+                    std::vector<std::string> variantIds;
+                    if (args.contains("optionVariantIds") && args["optionVariantIds"].is_array())
+                    {
+                        for (auto const & id : args["optionVariantIds"])
+                        {
+                            variantIds.push_back(id.is_string() ? id.get<std::string>() : "");
+                        }
+                    }
+                    int recommended = args.value("recommended", -1);
+                    if (recommended < 0 || static_cast<std::size_t>(recommended) >= question.options.size())
+                    {
+                        recommended = -1;
+                    }
+                    question.recommended = recommended;
+
+                    ++m_ctx.userQuestionsAsked;
+                    agent::UserDecisionResult const result = co_await m_ctx.askUser(question, cancellation);
+                    if (result.cancelled)
+                    {
+                        co_return nlohmann::json{{"success", false},
+                                                 {"error",
+                                                  result.error.empty() ? "The user did not answer"
+                                                                       : result.error}};
+                    }
+                    if (!result.answered && !result.answer.assumed)
+                    {
+                        co_return nlohmann::json{{"success", false},
+                                                 {"error",
+                                                  result.error.empty() ? "No answer received" : result.error}};
+                    }
+
+                    std::string choice = result.answer.choice;
+                    bool freeText = false;
+                    if (choice.empty() && !result.answer.customText.empty())
+                    {
+                        auto const match =
+                          std::find_if(question.options.begin(),
+                                       question.options.end(),
+                                       [&](std::string const & option) {
+                                           return option.size() == result.answer.customText.size() &&
+                                              std::equal(option.begin(),
+                                                         option.end(),
+                                                         result.answer.customText.begin(),
+                                                         [](char a, char b)
+                                                         { return std::tolower(a) == std::tolower(b); });
+                                       });
+                        if (match != question.options.end())
+                        {
+                            choice = *match;
+                        }
+                        else
+                        {
+                            choice = result.answer.customText;
+                            freeText = true;
+                        }
+                    }
+                    std::size_t const choiceIndex = static_cast<std::size_t>(
+                      std::distance(question.options.begin(),
+                                    std::find(question.options.begin(), question.options.end(), choice)));
+
+                    nlohmann::json response{{"success", true},
+                                            {"questionId", question.id},
+                                            {"choice", choice},
+                                            {"freeText", freeText},
+                                            {"assumed", result.answer.assumed}};
+
+                    std::string const variantId =
+                      !freeText && choiceIndex < variantIds.size() ? variantIds[choiceIndex] : "";
+                    if (!variantId.empty())
+                    {
+                        std::string error;
+                        if (applyDecisionVariant(m_ctx, question.nodeId, variantId, error))
+                        {
+                            response["appliedVariantId"] = variantId;
+                            if (m_ctx.onDocumentModified)
+                            {
+                                m_ctx.onDocumentModified();
+                            }
+                        }
+                        else
+                        {
+                            response["success"] = false;
+                            response["error"] = "Answer cannot be applied: " + error;
+                        }
+                    }
+
+                    if (args.contains("todoId"))
+                    {
+                        std::string const todoId = args.value("todoId", "");
+                        auto const checkIndex = args.value("checkIndex", -1);
+                        std::string reason;
+                        bool recorded = false;
+                        if (m_ctx.todos != nullptr && checkIndex >= 0)
+                        {
+                            nlohmann::json evidence{{"question", question.question},
+                                                    {"choice", choice},
+                                                    {"questionId", question.id}};
+                            if (result.answer.assumed)
+                            {
+                                evidence["assumed"] = true;
+                            }
+                            recorded = m_ctx.todos->checkByUser(
+                              todoId, static_cast<std::size_t>(checkIndex), std::move(evidence),
+                              result.answer.assumed, &reason);
+                        }
+                        response["checklistRecorded"] = recorded;
+                        if (!recorded)
+                        {
+                            response["checklistError"] = reason.empty() ? "todoId and checkIndex required"
+                                                                        : reason;
+                        }
+                    }
+                    co_return response;
+                }
+
+              private:
+                /**
+                 * @brief Selects a variant for a node as the outcome of a user decision.
+                 * @details Reuses `substituteVariant` so an answer that violates a frozen node or an
+                 *          interface contract is refused by the same gate a model-authored switch faces.
+                 */
+                static bool applyDecisionVariant(DesignToolContext & ctx,
+                                                 std::string const & nodeId,
+                                                 std::string const & variantId,
+                                                 std::string & errorOut)
+                {
+                    if (ctx.graph.findNode(nodeId) == nullptr)
+                    {
+                        errorOut = "Unknown nodeId: " + nodeId;
+                        return false;
+                    }
+                    auto const * variant = ctx.graph.findVariant(variantId);
+                    if (variant == nullptr)
+                    {
+                        errorOut = "Unknown variantId: " + variantId;
+                        return false;
+                    }
+                    if (auto const active = ctx.graph.activeConfiguration())
+                    {
+                        return ctx.graph.substituteVariant(active->id, nodeId, variantId, errorOut);
+                    }
+                    std::string const cfgId =
+                      ctx.graph.createConfiguration("Decision " + variant->name, {{nodeId, variantId}});
+                    if (!ctx.graph.activateConfiguration(cfgId))
+                    {
+                        errorOut = "Could not activate configuration " + cfgId;
+                        return false;
+                    }
+                    return true;
+                }
+
+                DesignToolContext & m_ctx;
+            };
+
+            registry.registerTool(std::make_shared<AskUserTool>(ctx));
             registry.registerTool(std::make_shared<GenerateReferenceImageTool>(ctx));
         }
 

@@ -60,6 +60,16 @@ namespace gladius::agent::bench
         {
             failures.push_back(f);
         }
+        nlohmann::json decisionList = nlohmann::json::array();
+        for (auto const & decision : decisions)
+        {
+            decisionList.push_back({{"questionId", decision.questionId},
+                                    {"question", trim(decision.question, 160)},
+                                    {"script", decision.script},
+                                    {"choice", decision.choice},
+                                    {"assumed", decision.assumed},
+                                    {"refused", decision.refused}});
+        }
         return {{"taskId", taskId},
                 {"wallMs", wallMs},
                 {"modelTurns", modelTurns},
@@ -70,6 +80,9 @@ namespace gladius::agent::bench
                 {"emptyTurns", emptyTurns},
                 {"providerFailures", providerFailures},
                 {"viewportCaptures", viewportCaptures},
+                {"userQuestionsAsked", userQuestionsAsked},
+                {"userQuestionsAnswered", userQuestionsAnswered},
+                {"decisions", std::move(decisionList)},
                 {"librarySearches", librarySearches},
                 {"libraryImports", libraryImports},
                 {"libraryExports", libraryExports},
@@ -191,6 +204,12 @@ namespace gladius::agent::bench
         m_metrics.providerFailures = providerFailures;
         m_metrics.truncatedTurns = result.truncatedTurns;
         m_metrics.emptyTurns = result.emptyTurns;
+        m_metrics.userQuestionsAsked = host.userQuestionsAsked();
+        m_metrics.decisions = host.decisions();
+        m_metrics.userQuestionsAnswered = std::count_if(m_metrics.decisions.begin(),
+                                                        m_metrics.decisions.end(),
+                                                        [](agent::ScriptedDecision const & decision)
+                                                        { return !decision.refused; });
         m_metrics.wallMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - m_startTime)
                              .count();

@@ -8,6 +8,7 @@
 #include "agent/KnowledgeStore.h"
 #include "agent/PermissionPolicy.h"
 #include "agent/SkillLoader.h"
+#include "agent/UserDecision.h"
 #include "agent/providers/IAiProvider.h"
 #include "agent/trace/AgentTrace.h"
 #include "compute/ApplicationComputeRuntime.h"
@@ -84,6 +85,11 @@ namespace gladius::agent::bench
         /// @details An image costs a fixed share of every following turn, so the budget matters more
         ///          than the image size.
         int maxViewportReviews = 0;
+        /// @brief Answers to `ask_user` questions, consumed in question order
+        /// @details A headless run has no human, so decisions are scripted: an option index or option
+        ///          text per question. Once the script is exhausted the recommended option is assumed,
+        ///          which keeps every run reproducible while still exercising decision mode.
+        std::vector<std::string> decisionScript;
 
         /// @brief Reads `GLADIUS_AGENT_BENCH_*` overrides with strata defaults
         [[nodiscard]] static BenchRunConfig fromEnvironment();
@@ -196,6 +202,12 @@ namespace gladius::agent::bench
         [[nodiscard]] std::size_t toolCount() const;
         [[nodiscard]] bool hasTool(std::string const & name) const;
 
+        /// @brief Decisions resolved during the task currently being measured, oldest first
+        [[nodiscard]] std::vector<agent::ScriptedDecision> decisions() const;
+
+        /// @brief `ask_user` calls made by the model in the task currently being measured
+        [[nodiscard]] std::size_t userQuestionsAsked() const;
+
         /// @brief Builds the provider configured from the environment (anthropic or openai wire format)
         [[nodiscard]] std::unique_ptr<IAiProvider> makeDefaultProvider() const;
 
@@ -227,6 +239,8 @@ namespace gladius::agent::bench
         design::TodoStore m_todos;
         agent::KnowledgeStore m_knowledge;
         std::unique_ptr<design::DesignToolContext> m_toolCtx;
+        /// @brief Decisions resolved by the scripted callback of the current task
+        std::vector<agent::ScriptedDecision> m_decisions;
         tools::ToolRegistry m_registry;
         tools::ToolExecutor m_executor;
         agent::ContextBuilder m_contextBuilder;

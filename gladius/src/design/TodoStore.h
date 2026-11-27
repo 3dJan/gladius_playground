@@ -210,6 +210,20 @@ namespace gladius::design
                          std::string * reason = nullptr);
 
         /**
+         * @brief Records a human decision as the proof for one checklist entry.
+         * @details Decision mode is the only non-gate way to close a deterministic entry: the user
+         *          picking an alternative really does satisfy "which engine" style requirements.
+         * @param evidence The question and chosen answer, stored on the entry
+         * @param assumed True when no user was present and the host answered with the recommendation
+         * @param reason Optional out parameter describing why the check was refused
+         */
+        bool checkByUser(std::string const & id,
+                         std::size_t index,
+                         nlohmann::json evidence,
+                         bool assumed = false,
+                         std::string * reason = nullptr);
+
+        /**
          * @brief Gate verdict for one checklist entry.
          * @details A gate either proves the requirement and hands back its measurement, or explains
          *          why it cannot; there is no third state in which the model may certify itself.

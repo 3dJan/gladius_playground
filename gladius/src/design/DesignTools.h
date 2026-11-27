@@ -5,6 +5,7 @@
 #include "TodoStore.h"
 #include "../agent/KnowledgeStore.h"
 #include "../agent/SkillLoader.h"
+#include "../agent/UserDecision.h"
 #include "../agent/providers/ImageProvider.h"
 #include "../tools/CheckpointManager.h"
 #include "../tools/ToolRegistry.h"
@@ -93,6 +94,13 @@ namespace gladius::design
         /// @brief Viewport images already handed out; the host resets this per run
         std::size_t viewportReviewsUsed = 0;
         ImageGenerationCallback generateImage;
+
+        /// @brief Decision-mode transport: show a question to the user and await the answer
+        /// @details Without a callback `ask_user` refuses, which keeps headless or restricted hosts
+        ///          from ever waiting on a human that is not there.
+        agent::AskUserCallback askUser;
+        /// @brief Questions asked so far in this run; the host resets this per run
+        std::size_t userQuestionsAsked = 0;
     };
 
     /// @brief Register the canonical design-space, lifecycle, evaluation, and viewport tools

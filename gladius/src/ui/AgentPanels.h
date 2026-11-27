@@ -9,6 +9,7 @@
 #include "../agent/KnowledgeStore.h"
 #include "../agent/PermissionPolicy.h"
 #include "../agent/SkillLoader.h"
+#include "../agent/UserDecision.h"
 #include "../agent/providers/IAiProvider.h"
 #include "../agent/providers/ImageProvider.h"
 #include "../agent/providers/ModelDiscovery.h"
@@ -168,6 +169,8 @@ namespace gladius::ui
             float confirmationHeight = 0.f;
             /// @brief Space for the pinned agent reply card, 0 while nothing awaits a reply
             float replyCardHeight = 0.f;
+            /// @brief Space for the pending design question, 0 while nothing is being asked
+            float userDecisionHeight = 0.f;
             /// @brief Space for the provider error line, 0 while nothing failed
             float errorLineHeight = 0.f;
             float totalHeight = 0.f;
@@ -187,7 +190,13 @@ namespace gladius::ui
         /// @brief Square icon button that matches the composer toolbar's buttons
         [[nodiscard]] bool iconButton(char const * icon, char const * tooltip);
         void clearSession();
+        /// @brief How the panel answers design questions, derived from the autonomy level
+        [[nodiscard]] agent::DecisionPolicy decisionPolicy() const;
         void renderConfirmation();
+        /// @brief Renders the pending design question (options, custom text, recommendation)
+        void renderUserDecision();
+        /// @brief Height the pending design question needs in the footer
+        [[nodiscard]] float userDecisionHeight() const;
         /// @brief Pinned card with the agent's last reply when it is waiting on the user
         void renderReplyCard();
         /// @brief Height the reply card needs, 0 when nothing awaits a reply
@@ -337,5 +346,11 @@ namespace gladius::ui
         bool m_confirmationResolved = false;
         bool m_confirmationApproved = false;
         std::string m_pendingConfirmPrompt;
+
+        // Design-question handshake between the ask_user tool and the UI thread
+        /// @brief Pending design questions raised by the agent's ask_user tool
+        agent::UserDecisionHandoff m_userDecisions;
+        /// @brief Free-form answer typed into the pending design question
+        std::string m_userDecisionText;
     };
 } // namespace gladius::ui

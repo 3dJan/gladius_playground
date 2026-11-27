@@ -98,6 +98,41 @@ namespace gladius::design
         return applyGateCheck(*it, index, evidence, reason);
     }
 
+    bool TodoStore::checkByUser(std::string const & id,
+                                std::size_t index,
+                                nlohmann::json evidence,
+                                bool assumed,
+                                std::string * reason)
+    {
+        auto it = std::find_if(m_items.begin(), m_items.end(), [&](TodoItem const & item) {
+            return item.id == id;
+        });
+        if (it == m_items.end())
+        {
+            if (reason != nullptr)
+            {
+                *reason = "unknown todo id " + id;
+            }
+            return false;
+        }
+        if (index >= it->checklist.size())
+        {
+            if (reason != nullptr)
+            {
+                *reason = "no checklist entry at index " + std::to_string(index);
+            }
+            return false;
+        }
+        ChecklistEntry & entry = it->checklist[index];
+        entry.checked = true;
+        entry.assumed = assumed;
+        if (!evidence.is_null())
+        {
+            entry.evidence = std::move(evidence);
+        }
+        return true;
+    }
+
     std::string TodoStore::addItem(std::string title,
                                    std::string description,
                                    std::vector<ChecklistEntry> checklist)

@@ -10,6 +10,7 @@
 
 #include <IconsFontAwesome5.h>
 #include <imgui.h>
+#include <imgui_stdlib.h>
 
 #include <algorithm>
 #include <cmath>
@@ -113,12 +114,13 @@ namespace gladius::ui
                                                         - ImGui::GetFontSize() * 8.f)))
                                       * ImGui::GetTextLineHeightWithSpacing();
         metrics.replyCardHeight = measureReplyCard();
+        metrics.userDecisionHeight = m_userDecisions.peek() ? userDecisionHeight() : 0.f;
 
         // The workflow keeps a minimum height; whatever is left belongs to the composer.
         constexpr float workflowMinHeight = 120.f;
         float const overhead = metrics.statusLineHeight + metrics.controlRowsHeight
-                             + metrics.confirmationHeight + metrics.errorLineHeight
-                             + metrics.replyCardHeight;
+                             + metrics.confirmationHeight + metrics.userDecisionHeight
+                             + metrics.errorLineHeight + metrics.replyCardHeight;
         float const available = std::max(0.f, ImGui::GetContentRegionAvail().y - workflowMinHeight);
         metrics.composer = m_prompt.measureCard(std::max(0.f, available - overhead),
                                                 m_pendingImages.size());
@@ -408,6 +410,85 @@ namespace gladius::ui
         }
     }
 
+    float AgentPanels::userDecisionHeight() const
+    {
+        auto const pending = m_userDecisions.peek();
+        if (!pending.has_value())
+        {
+            return 0.f;
+        }
+        ImGuiStyle const & style = ImGui::GetStyle();
+        float const lineHeight = ImGui::GetTextLineHeightWithSpacing();
+        float const width = std::max(1.f, m_prompt.cardOuterWidth());
+        // Question, optional reason and the option buttons stacked on their own lines.
+        float lines = std::max(
+          1.f,
+          std::ceil(ImGui::CalcTextSize(pending->question.c_str(), nullptr, true).x / width));
+        if (!pending->reason.empty())
+        {
+            lines += std::max(
+              1.f,
+              std::ceil(ImGui::CalcTextSize(pending->reason.c_str(), nullptr, true).x / width));
+        }
+        lines += static_cast<float>(pending->options.size());
+        // Custom answer field plus the "decide yourself" escape hatch.
+        lines += 2.f;
+        return lines * lineHeight + ImGui::GetFrameHeight() + style.ItemSpacing.y * 3.f;
+    }
+
+    void AgentPanels::renderUserDecision()
+    {
+        auto const pending = m_userDecisions.peek();
+        if (!pending.has_value())
+        {
+            return;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, colorInfo());
+        ImGui::TextWrapped("%s", pending->question.c_str());
+        ImGui::PopStyleColor();
+        if (!pending->reason.empty())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", pending->reason.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        auto const & options = pending->options;
+        for (std::size_t i = 0; i < options.size(); ++i)
+        {
+            std::string label = options[i];
+            if (static_cast<int>(i) == pending->recommended)
+            {
+                label += " (recommended)";
+            }
+            if (ImGui::Button(label.c_str()))
+            {
+                m_userDecisions.answerOption(options[i]);
+                return;
+            }
+        }
+
+        ImGui::InputText("##decisionText", &m_userDecisionText);
+        if (!m_userDecisionText.empty() && ImGui::Button("Send answer"))
+        {
+            m_userDecisions.answerText(m_userDecisionText);
+            m_userDecisionText.clear();
+            return;
+        }
+        // Never let a run park on a question the user does not want to answer.
+        if (ImGui::Button("Let the agent decide"))
+        {
+            std::string recommendedChoice;
+            if (pending->recommended >= 0
+                && static_cast<std::size_t>(pending->recommended) < options.size())
+            {
+                recommendedChoice = options[static_cast<std::size_t>(pending->recommended)];
+            }
+            m_userDecisions.answerAssumed(std::move(recommendedChoice));
+            m_userDecisionText.clear();
+        }
+    }
+
     float AgentPanels::leadingControlsWidth()
     {
         // The card's toolbar carries only the model pickers and the trailing expand/submit pair;
@@ -467,6 +548,7 @@ namespace gladius::ui
         renderErrorLine();
         renderControlRow();
         renderConfirmation();
+        renderUserDecision();
         renderReplyCard();
         renderComposer(metrics.composer);
     }

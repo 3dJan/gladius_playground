@@ -39,6 +39,12 @@ namespace gladius::agent::bench
         /// @brief Model turns that came back with neither text nor tool calls
         std::size_t emptyTurns = 0;
         std::size_t viewportCaptures = 0;
+        /// @brief `ask_user` calls the model made (the tool itself caps how many get through)
+        std::size_t userQuestionsAsked = 0;
+        /// @brief Questions that produced a usable answer, assumed recommendations included
+        std::size_t userQuestionsAnswered = 0;
+        /// @brief How each question was resolved, oldest first; empty when nothing was asked
+        std::vector<agent::ScriptedDecision> decisions;
         std::size_t librarySearches = 0;
         std::size_t libraryImports = 0;
         std::size_t libraryExports = 0;

@@ -83,6 +83,29 @@ namespace gladius::agent::bench
             }
         }
 
+        /// @brief Splits a `;`-separated environment list into script entries
+        [[nodiscard]] std::vector<std::string> envList(char const * name)
+        {
+            std::vector<std::string> out;
+            std::string const raw = envOr(name, "");
+            std::size_t start = 0;
+            while (start <= raw.size())
+            {
+                auto const end = raw.find(';', start);
+                auto const piece = raw.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                if (!piece.empty())
+                {
+                    out.push_back(piece);
+                }
+                if (end == std::string::npos)
+                {
+                    break;
+                }
+                start = end + 1;
+            }
+            return out;
+        }
+
         /// @brief Orbital pitch/yaw angles of the named camera preset
         [[nodiscard]] std::pair<float, float> viewPitchYaw(std::string const & view)
         {
@@ -177,6 +200,7 @@ namespace gladius::agent::bench
         config.autoCompleteDesignGraph =
           envOr("GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH", "1") != "0";
         config.maxViewportReviews = std::max(0, envInt("GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS", 2));
+        config.decisionScript = envList("GLADIUS_AGENT_BENCH_DECISIONS");
         return config;
     }
 
@@ -236,7 +260,11 @@ namespace gladius::agent::bench
           &m_todos,
           &m_knowledge,
           m_config.autoCompleteDesignGraph,
-          static_cast<std::size_t>(std::max(0, m_config.maxViewportReviews))});
+          static_cast<std::size_t>(std::max(0, m_config.maxViewportReviews)),
+          /*viewportReviewsUsed=*/0,
+          /*generateImage=*/nullptr,
+          agent::makeScriptedAskUserCallback(m_config.decisionScript, m_decisions),
+          /*userQuestionsAsked=*/0});
         design::registerDesignTools(m_registry, *m_toolCtx, m_toolSurface);
         m_policy.setAutonomy(agent::AutonomyLevel::WorkAutonomously);
         return {true, {}};
@@ -398,7 +426,9 @@ namespace gladius::agent::bench
             if (m_toolCtx)
             {
                 m_toolCtx->viewportReviewsUsed = 0;
+                m_toolCtx->userQuestionsAsked = 0;
             }
+            m_decisions.clear();
         }
 
         AgentLimits limits;
@@ -408,7 +438,7 @@ namespace gladius::agent::bench
 
         auto const prompt = task.prompt;
         agent::AgentLoop loop;
-        return coro::sync_wait(loop.run(
+        AgentRunResult result = coro::sync_wait(loop.run(
           m_conversation,
           *provider,
           m_registry,
@@ -451,6 +481,33 @@ namespace gladius::agent::bench
               return snap;
           },
           m_trace.get()));
+
+        // Decisions are part of the measured behaviour: recording them makes a run replayable and
+        // lets the comparison script see whether a change made the agent ask more or fewer questions.
+        for (auto const & decision : m_decisions)
+        {
+            if (m_trace != nullptr)
+            {
+                m_trace->recordNote("user_decision",
+                                    {{"questionId", decision.questionId},
+                                     {"question", decision.question},
+                                     {"script", decision.script},
+                                     {"choice", decision.choice},
+                                     {"assumed", decision.assumed},
+                                     {"refused", decision.refused}});
+            }
+        }
+        return result;
+    }
+
+    std::vector<agent::ScriptedDecision> HeadlessAgentHost::decisions() const
+    {
+        return m_decisions;
+    }
+
+    std::size_t HeadlessAgentHost::userQuestionsAsked() const
+    {
+        return m_toolCtx ? m_toolCtx->userQuestionsAsked : 0;
     }
 
     std::vector<AgentEvent> HeadlessAgentHost::drainEvents()
