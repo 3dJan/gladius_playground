@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Gladius WebGPU</title>
   <style>
     :root { color-scheme: dark; font-family: system-ui, sans-serif; }
@@ -14,6 +14,11 @@
       overflow: hidden;
       background: #16181d;
       position: fixed;
+      /* A phone must not select UI text or fire the tap flash, all input is canvas input. */
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: none;
     }
     #gladius-canvas {
       display: block;
@@ -29,8 +34,11 @@
     }
     #gladius-status {
       position: absolute;
-      top: 10px;
-      left: 10px;
+      /* viewport-fit=cover lets the canvas reach under the notch, the message must not. */
+      top: calc(10px + env(safe-area-inset-top));
+      left: calc(10px + env(safe-area-inset-left));
+      right: calc(10px + env(safe-area-inset-right));
+      max-width: 100vw;
       z-index: 100;
       color: #aeb8c8;
       background: rgba(22, 24, 29, 0.85);
@@ -96,6 +104,17 @@
       var canvas = document.getElementById('gladius-canvas');
       if (!canvas) return;
 
+      var resizeDebounceTimer = null;
+      // Rotating a phone fires a burst of resize events; recreating the swapchain for each one
+      // stalls the render loop, so the canvas is resized once the burst has settled.
+      function scheduleResize() {
+        if (resizeDebounceTimer !== null) return;
+        resizeDebounceTimer = setTimeout(function () {
+          resizeDebounceTimer = null;
+          resizeCanvasToDevicePixels();
+        }, 250);
+      }
+
       function resizeCanvasToDevicePixels() {
         var bounds = canvas.getBoundingClientRect();
         var pixelRatio = window.devicePixelRatio || 1;
@@ -106,9 +125,16 @@
       }
 
       window.gladiusResizeCanvasToDevicePixels = resizeCanvasToDevicePixels;
-      window.addEventListener('resize', resizeCanvasToDevicePixels);
+    // A phone reports its input capability up front, which is what picks the compact layout.
+    window.gladiusInputEnvironment = {
+      coarsePointer: typeof window.matchMedia === 'function' &&
+        window.matchMedia('(pointer: coarse)').matches,
+      devicePixelRatio: window.devicePixelRatio || 1
+    };
+    window.addEventListener('resize', scheduleResize);
+    window.addEventListener('orientationchange', scheduleResize);
       if (typeof ResizeObserver !== 'undefined') {
-        window.gladiusCanvasResizeObserver = new ResizeObserver(resizeCanvasToDevicePixels);
+      window.gladiusCanvasResizeObserver = new ResizeObserver(scheduleResize);
         window.gladiusCanvasResizeObserver.observe(canvas);
       }
       if (typeof MutationObserver !== 'undefined') {
