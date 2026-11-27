@@ -30,6 +30,7 @@
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "../io/MeshExporter.h"
 #endif
+#include "AgentPanelDocking.h"
 #include "AboutDialog.h"
 #include "FileChooser.h"
 #include "FileSystemUtils.h"
@@ -2074,6 +2075,14 @@ namespace gladius::ui
                          ImGuiDockNodeFlags_None |
                            ImGuiDockNodeFlags_PassthruCentralNode /*|ImGuiDockNodeFlags_NoResize*/);
 
+        // First-run default: dock the Design Agent panel to the right edge. ImGui only stores window
+        // settings for a panel the user actually had, so "no settings" means "no layout of their own".
+        if (!m_defaultAgentPanelLayoutApplied &&
+            ImGui::FindWindowSettingsByID(ImHashStr(kAgentPanelWindowName)) == nullptr)
+        {
+            applyAgentPanelDefaultLayout(dockspaceID);
+            m_defaultAgentPanelLayoutApplied = true;
+        }
 #endif
         ImGui::SetWindowPos("MainWindowDockingArea", {0, menuBarHeight}, ImGuiCond_Always);
         ImGui::End();

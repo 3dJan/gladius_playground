@@ -24,7 +24,7 @@ namespace gladius::ui
         /**
          * @brief Starts an interactive window move from the drawn header.
          * @details A docked panel has to be floated first, otherwise the move would drag the whole
-         *          dock node. The dock node's tab bar stays available as the alternative handle.
+         *          dock node. The floated panel can be dragged back onto the dockspace later.
          */
         void startWindowDrag(ImGuiWindow & window)
         {

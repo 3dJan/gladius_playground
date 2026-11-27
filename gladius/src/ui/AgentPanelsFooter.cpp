@@ -5,6 +5,7 @@
 
 #include "AgentPanelColors.h"
 #include "AgentPanelMetrics.h"
+#include "AgentPanelText.h"
 #include "AgentPanelWidgets.h"
 #include "AgentPanels.h"
 
@@ -164,7 +165,7 @@ namespace gladius::ui
                 ImGui::TextColored(colorInfo(),
                                    "%s %s",
                                    ICON_FA_CIRCLE_NOTCH,
-                                   humaniseToolName(m_activeToolName).c_str());
+                                   agentText::humaniseName(m_activeToolName).c_str());
             }
             else
             {

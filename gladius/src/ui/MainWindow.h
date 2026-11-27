@@ -351,6 +351,8 @@ namespace gladius::ui
         bool m_uiSliceHeightInitialized{false};
         bool m_showSaveBeforeExit{false};
         bool m_showSaveBeforeFileOperation{false};
+        /// @brief Guards the one-shot default right-dock of the Design Agent panel
+        bool m_defaultAgentPanelLayoutApplied{false};
         bool m_showExportInProgressWarning{false};
         PendingFileOperation m_pendingFileOperation{PendingFileOperation::None};
         std::optional<std::filesystem::path> m_pendingOpenFilename;
