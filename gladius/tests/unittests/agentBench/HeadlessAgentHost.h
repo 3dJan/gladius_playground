@@ -65,10 +65,14 @@ namespace gladius::agent::bench
         int providerThinkingTokens = 1024;
         /// @brief Explicit prompt-cache breakpoints: "none", "tools" or "all"
         std::string cacheBreakpoints = "tools";
-        /// @brief Tool surface handed to the model: "full" or "geometry"
-        /// @details "geometry" registers only the model/snippet/library/viewport/finish tools. Every
-        ///          definition is re-sent on every turn, so the ~37-tool list is a fixed per-turn cost.
+        /// @brief Tool surface the model sees: "full", "geometry", or a role name
+        /// @details Every definition is re-sent on every turn, so the ~38-tool list is a fixed per-turn
+        ///          cost. A role name selects both the tool surface and the role prompt for it.
         std::string toolSurface = "full";
+        /// @brief Design node to scope the context to; empty means the whole graph (orchestrator view)
+        /// @details Simulates one component agent of the hierarchical topology: requirements, todos and
+        ///          sibling branches are withheld from the prompt.
+        std::string scopeNodeId;
         /// @brief Starting document: "template" (shipped volumetric scaffold) or "blank"
         /// @details The scaffold is what a user gets from File > New. "blank" starts from an empty
         ///          3MF instead, which is how the harness behaves when nothing wires the program into
@@ -232,6 +236,9 @@ namespace gladius::agent::bench
         io::CancellationToken m_cancellation;
         std::string m_initializeError;
         bool m_geometryOnlySurface = false;
+        /// @brief Tool surface / role pair resolved from `BenchRunConfig::toolSurface`
+        design::DesignToolSurface m_toolSurface = design::DesignToolSurface::Full;
+        AgentRole m_role = AgentRole::Default;
         std::filesystem::path m_traceDir;
         std::unique_ptr<agent::trace::AgentTraceRecorder> m_trace;
     };

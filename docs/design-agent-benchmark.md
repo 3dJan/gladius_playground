@@ -69,6 +69,11 @@ taskPassed = judgeAvailable AND judgePasses AND allGeometryGatesPassed
   `agent::AgentLoop` counts turns the provider cut off (`truncatedTurns` in the report) and replies
   to a cut-off answer with an instruction to emit snippets one helper function at a time. Cut-off
   answers are the main cause of `set_program_snippet: snippet is required` failures.
+* **Empty-completion guard** — a turn that returns neither text nor a tool call is a provider fault,
+  not an agent decision. It used to fall into the "the agent is finished" branch, which ended the run
+  as a silent success with an empty document; `agent::AgentLoop` now sends a corrective message and
+  retries twice (`empty_completion_retry` note, `emptyTurns` in the report) before failing the run
+  with a classified `MalformedResponse` error that names the output limit when the stop reason says so.
 * **Robust tool arguments** — array-valued tool arguments also accept a single string
   (`"tags": "gyroid"`), because local models get this wrong often enough to dominate the failure
   count otherwise. The system prompt states the rule as well.
@@ -113,7 +118,8 @@ aggregate report test must see the other runs in the same process.
 | `GLADIUS_AGENT_BENCH_MAX_TOKENS` | `8192` | completion budget per model turn (a whole program snippet must fit) |
 | `GLADIUS_AGENT_BENCH_THINKING_TOKENS` | `1024` | hidden-reasoning budget per turn; `0` leaves it to the provider. Uncapped reasoning dominated wall time and once consumed the whole judge budget without producing a verdict |
 | `GLADIUS_AGENT_BENCH_CACHE_BREAKPOINTS` | `tools` | explicit `cache_control` placement: `none`, `tools` (after the tool schemas) or `all` (also after the newest message). `none` measurably degrades outcomes, so `tools` is the default |
-| `GLADIUS_AGENT_BENCH_TOOL_SURFACE` | `geometry` | `geometry` registers only the eleven geometry tools (see [Lean tool surface](#lean-tool-surface)); `full` registers all of them, as the interactive app does |
+| `GLADIUS_AGENT_BENCH_TOOL_SURFACE` | `geometry` | `geometry` registers only the eleven geometry tools (see [Lean tool surface](#lean-tool-surface)); `full` registers all of them, as the interactive app does. A role name (`requirements`, `decomposition`, `component`, `review`) selects that role's tool allowlist *and* its system prompt, which is how one run simulates one agent of the hierarchical topology |
+| `GLADIUS_AGENT_BENCH_SCOPE_NODE` | unset | design node to scope the live context to (subtree + inherited interface contract only; requirements, todos and sibling branches are withheld). Empty = whole graph, the orchestrator view |
 | `GLADIUS_AGENT_BENCH_DOCUMENT_SEED` | `template` | `template` seeds `examples/template.3mf` (the same seed a UI "new model" run gets); `blank` starts from `Document::newModel()`, which has no level set or build item, so the renderability gate and `ensure_output_chain` repair path are what decide the outcome |
 | `GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH` | `1` | `finish_design` derives the design-graph node, variant and active configuration itself instead of expecting four hand-written tool calls |
 | `GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS` | `2` | screenshots a task may request; further calls fail with an error that points at `finish_design`. `0` is unlimited |
@@ -131,7 +137,7 @@ trace is opt-in — see [Profiling and bottleneck analysis](#profiling-and-bottl
 Per run ([`results.json`](../tests/unittests/agentBench/AgentBenchReport.h)):
 
 * `modelTurns`, `toolCalls`, `toolFailures`, `unknownToolCalls`, `providerFailures`,
-  `truncatedTurns`
+  `truncatedTurns`, `emptyTurns`
 * `perTool` — calls and failures for every tool name
 * `librarySearches`, `libraryImports` (distinct entries), `libraryExports`, `libraryFilesAdded`
 * `viewportCaptures`, `designGraphMutations`
@@ -244,7 +250,7 @@ Every run writes `<output>/<taskId>/trace.jsonl`, one JSON object per line. All 
 | `turn` | `AgentLoop` | `durationMs`, `buildMs` (context assembly), `completionMs`, `ttftMs`, `firstTokenMs` (first generated token, reasoning included), `firstContentMs` (first *visible* output), `streamEvents`, `thinkingChars`, `textChars`, `toolJsonChars`, `promptBytes` (per component), `context` (`imagesKept`, `messagesSent`, `messagesPruned`), `usage`, `stopReason` |
 | `tool_call` | `AgentLoop` | `name`, `policy`, `durationMs`, `success`, `denied`, `argsBytes`, `resultBytes`, trimmed `error` |
 | `phase` | harness | `name` (`seed_document`, `export_stl`, `measure_mesh`, `save_document`, `render:isometric`, `judge`), `durationMs` |
-| `note` | `AgentLoop` | `kind`: `retry_after_failure`, `autonomous_nudge`, `truncation_nudge` — this is how wasted turns get attributed |
+| `note` | `AgentLoop` | `kind`: `retry_after_failure`, `autonomous_nudge`, `truncation_nudge`, `empty_completion_retry` — this is how wasted turns get attributed |
 
 With `GLADIUS_AGENT_TRACE_PROMPT=1` each `turn` also carries the full request (system prompt plus
 messages). That is megabytes per run, so it stays opt-in; it is the only way to see *what* the model
@@ -325,10 +331,27 @@ avoidable tool errors, stopped re-prefilling rewritten history, and stopped payi
 reasoning. `contextTax` for this task is 14.1x. `wallMs` still varies with machine load, which is why
 the comparer reports it but never gates on it.
 
-Still open: on this endpoint the *read-back* amount stays pinned at the system-prompt-plus-tools
-prefix even though the conversation prefix is provably append-only, so `promptCacheHitRate` stays
-well below what the same requests reach when replayed on their own. `GLADIUS_AGENT_PROVIDER_DUMP`
-plus replaying the dumps is how that gets bisected further.
+Read-back now reaches the full prefix on a short, image-light task: with the per-request tunables at
+their defaults and `tools` breakpoints, `sphere_r5` caches 99.8% of its prompt (`cacheMissTurns`
+9 -> 0) while the two screenshot-heavy tasks stay near 4-7%, because every retained screenshot sits
+inside the cached window and is re-written on the next turn. `GLADIUS_AGENT_PROVIDER_DUMP` plus
+replaying the dumps is how that gets bisected further.
+
+Guard verification run (same endpoint, model `gyro-gyro-m`, all three tasks passing):
+
+| task | turns | tool calls | prompt tokens | cache hit | contextTax | `emptyTurns` |
+| --- | --- | --- | --- | --- | --- | --- |
+| sphere_r5 | 9 -> 7 | 9 -> 8 | 25 378 -> 20 571 | 0% -> 99.8% | 6.99 -> 5.92 | 0 |
+| sphere_gyroid | 12 -> 9 | 15 -> 10 | 45 892 -> 29 391 | 0% -> 6.5% | 8.10 -> 7.07 | 0 |
+| lego_brick_3x4 | 9 -> 10 | 12 -> 11 | 49 701 -> 48 042 | 0% -> 4.1% | 6.67 -> 7.66 | 0 |
+
+`emptyTurns` stayed at zero across the run, which is what "the fix does not fire on healthy turns"
+means; the guard itself is covered by unit tests rather than by a benchmark gate, since provoking it
+needs a provider that answers with an empty completion. `wallMs` roughly doubled on the two
+screenshot tasks because that run used a different (heavier reasoning) model than the committed
+baseline — wall time stays a reported, never gated, metric for exactly this reason. The same
+comparison flags `lego_brick_3x4` `outputTokens` 3 574 -> 6 321 as a secondary regression, which is
+also model-driven: hidden reasoning tokens are counted as output.
 
 ### Lean tool surface
 

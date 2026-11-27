@@ -28,6 +28,20 @@
   window appends its contents as prompt instructions (desktop only).
 - **Smooth window resize experience**: Eliminated flicker and clearing of rendered content during window resize operations. The viewport now preserves the displayed 3D scene during manual resize, maximize/restore, and multi-monitor transitions, providing a more professional and polished user experience.
 
+- **Design Agent failure reporting**: an agent run that ended without a result is now explained
+  instead of silently going quiet. A model turn that returned neither text nor a tool call (a local
+  endpoint spending its whole output budget on hidden reasoning, for example) used to be treated as
+  "the agent is done": the run reported success with an empty document and no message. The loop now
+  retries such a turn twice and then reports a classified error in the status line, pointing at the
+  setting that fixes it. Turns cut off at the model output limit get the split-your-snippets hint
+  even when no tool call followed them.
+- **Design Agent per-request tunables**: the settings section now exposes **Max output tokens**,
+  **Thinking tokens** (hidden-reasoning budget), **Request timeout** and **Prompt cache** breakpoints
+  (Auto / None / Tools / All), persisted with the other agent settings and applied to every provider
+  profile. The interactive defaults were raised to 8192 output tokens, a 1024 token thinking cap and a
+  600 s request timeout — matching what the design-agent benchmark runs with — replacing the old
+  4096 / uncapped reasoning / 120 s combination that produced truncated and empty answers on local models.
+
 ### Improvements
 
 - Added minimum viewport dimension validation to prevent edge cases with very small window sizes

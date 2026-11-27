@@ -1,8 +1,10 @@
 #include "DesignGraph.h"
 
 #include "../agent/Conversation.h"
+#include "InterfaceCompliance.h"
 
 #include <algorithm>
+#include <functional>
 #include <sstream>
 
 namespace gladius::design
@@ -272,27 +274,31 @@ namespace gladius::design
             {
                 continue;
             }
-            for (auto const & ifaceA : varIt->second.interfaces)
+            for (auto const & problem : checkInterfacesAgainstConfiguration(varIt->second.interfaces,
+                                                                           otherVarIt->second.interfaces))
             {
-                for (auto const & ifaceB : otherVarIt->second.interfaces)
+                errorOut = "Interface mismatch on " + problem.describe() + ": variant '" + newVariantId + "' vs '" +
+                           otherVarId + "'";
+                return false;
+            }
+        }
+
+        // A variant may not stick out of the envelope its parent reserved for this node.
+        if (auto const * parent = findParentNode(nodeId))
+        {
+            auto const parentSelection = cfgIt->second.selectedVariants.find(parent->id);
+            if (parentSelection != cfgIt->second.selectedVariants.end())
+            {
+                auto const parentVarIt = m_variants.find(parentSelection->second);
+                if (parentVarIt != m_variants.end())
                 {
-                    if (ifaceA.name != ifaceB.name || ifaceA.kind != ifaceB.kind)
+                    auto const containment = checkEnvelopeContainmentBetween(parentVarIt->second.interfaces,
+                                                                            varIt->second.interfaces);
+                    if (!containment.compatible)
                     {
-                        continue;
-                    }
-                    if (!ifaceA.specification.is_object() || !ifaceB.specification.is_object())
-                    {
-                        continue;
-                    }
-                    for (auto const & [key, valA] : ifaceA.specification.items())
-                    {
-                        if (ifaceB.specification.contains(key) && ifaceB.specification[key] != valA)
-                        {
-                            errorOut = "Interface mismatch on '" + ifaceA.name + "' (" + ifaceA.kind + "), key '" + key +
-                                       "': variant '" + newVariantId + "' has " + valA.dump() + " vs '" + otherVarId +
-                                       "' " + ifaceB.specification[key].dump();
-                            return false;
-                        }
+                        errorOut = "Interface mismatch on " + containment.describe() + ": variant '" + newVariantId +
+                                   "' does not fit the envelope reserved by node '" + parent->id + "'";
+                        return false;
                     }
                 }
             }
@@ -305,6 +311,17 @@ namespace gladius::design
     DesignNode const * DesignGraph::findNode(std::string const & nodeId) const
     {
         auto it = m_nodes.find(nodeId);
+        return it != m_nodes.end() ? &it->second : nullptr;
+    }
+
+    DesignNode const * DesignGraph::findParentNode(std::string const & nodeId) const
+    {
+        auto it = std::find_if(m_nodes.begin(), m_nodes.end(),
+            [&nodeId](std::pair<std::string, DesignNode> const & node)
+            {
+                return std::find(node.second.children.begin(), node.second.children.end(), nodeId) !=
+                       node.second.children.end();
+            });
         return it != m_nodes.end() ? &it->second : nullptr;
     }
 
@@ -500,6 +517,77 @@ namespace gladius::design
             }
         }
         return std::nullopt;
+    }
+
+    std::string DesignGraph::describeSubtree(std::string const & nodeId) const
+    {
+        auto const node = findNode(nodeId);
+        if (!node)
+        {
+            return "";
+        }
+
+        std::ostringstream out;
+        // Depth-first with an indent per level: a scoped agent sees its own branch, nothing else.
+        std::function<void(DesignNode const &, int)> walk = [&](DesignNode const & n, int depth)
+        {
+            out << std::string(static_cast<std::size_t>(depth) * 2u, ' ') << "- " << n.id << " "
+                << n.name << " (" << toString(n.type) << ", " << toString(n.status);
+            if (!n.addressedRequirements.empty())
+            {
+                out << ", reqs " << n.addressedRequirements.size();
+            }
+            out << ")\n";
+            for (auto const & variantId : n.variantIds)
+            {
+                if (auto const * variant = findVariant(variantId))
+                {
+                    out << std::string(static_cast<std::size_t>(depth + 1) * 2u, ' ') << "variant "
+                        << variant->id << " " << variant->name << " [" << toString(variant->fidelity)
+                        << ", " << toString(variant->status) << "]";
+                    if (!variant->functionName.empty())
+                    {
+                        out << " function=" << variant->functionName;
+                    }
+                    out << "\n";
+                }
+            }
+            for (auto const & childId : n.children)
+            {
+                if (auto const * child = findNode(childId))
+                {
+                    walk(*child, depth + 1);
+                }
+            }
+        };
+        walk(*node, 0);
+        return out.str();
+    }
+
+    std::string DesignGraph::describeInheritedContract(std::string const & nodeId) const
+    {
+        auto const node = findNode(nodeId);
+        if (!node)
+        {
+            return "";
+        }
+
+        std::ostringstream out;
+        for (auto const & variantId : node->variantIds)
+        {
+            auto const * variant = findVariant(variantId);
+            if (!variant || variant->interfaces.empty())
+            {
+                continue;
+            }
+            out << "Variant " << variant->id << " (" << variant->name << "):\n";
+            for (auto const & iface : variant->interfaces)
+            {
+                out << "  - " << iface.name << " [" << iface.kind << "] = " << iface.specification.dump()
+                    << "\n";
+            }
+        }
+        return out.str();
     }
 
     nlohmann::json DesignGraph::toJson() const

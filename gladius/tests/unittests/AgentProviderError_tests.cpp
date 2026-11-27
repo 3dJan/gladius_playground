@@ -148,6 +148,29 @@ namespace gladius::agent::tests
         EXPECT_NE(trimmed.find("..."), std::string::npos);
     }
 
+    TEST(ProviderError, DescribeEmptyCompletion_TruncatedStopReason_MentionsOutputLimit)
+    {
+        // Act
+        auto const err = describeEmptyCompletion("max_tokens", "local model");
+
+        // Assert
+        EXPECT_EQ(err.kind, ProviderErrorKind::MalformedResponse);
+        EXPECT_NE(err.message.find("output limit"), std::string::npos);
+        EXPECT_NE(err.hint.find("max output tokens"), std::string::npos);
+        EXPECT_EQ(err.detail, "max_tokens");
+    }
+
+    TEST(ProviderError, DescribeEmptyCompletion_StopWithoutReason_FallsBackToGenericLabel)
+    {
+        // Act
+        auto const err = describeEmptyCompletion("");
+
+        // Assert
+        EXPECT_EQ(err.kind, ProviderErrorKind::MalformedResponse);
+        EXPECT_NE(err.message.find("The model answered with nothing"), std::string::npos);
+        EXPECT_FALSE(err.hint.empty());
+    }
+
     TEST(ProviderError, Summarised_MessageWithHint_JoinsBoth)
     {
         // Arrange

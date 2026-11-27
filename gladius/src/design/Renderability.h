@@ -4,6 +4,7 @@
 
 #include <lib3mf_implicit.hpp>
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,10 @@ namespace gladius::design
         std::string renderChannel;
         std::string modelBounds;
         bool boundsUsable{};
+        /// @brief Measured `[minx,miny,minz,maxx,maxy,maxz]`; only filled when `boundsNumeric`
+        std::array<double, 6> boundsMinMax{};
+        /// @brief True when `modelBounds` was measured numerically, so gates can use it without re-probing
+        bool boundsNumeric{};
         std::vector<RenderabilityBlocker> blockers;
 
         [[nodiscard]] bool isRenderable() const

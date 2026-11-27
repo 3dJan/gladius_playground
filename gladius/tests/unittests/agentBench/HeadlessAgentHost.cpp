@@ -23,6 +23,43 @@ namespace gladius::agent::bench
 {
     namespace
     {
+        /// @brief Role and tool surface a `toolSurface` name stands for
+        /// @details Lets one environment variable simulate a whole role of the hierarchical
+        ///          topology in a single-agent run: prompt, tool list and prompt-cadence flag move
+        ///          together, exactly as the orchestrator would configure a sub-agent.
+        struct SurfaceProfile
+        {
+            design::DesignToolSurface surface = design::DesignToolSurface::Full;
+            AgentRole role = AgentRole::Default;
+            /// @brief True when the prompt may describe snippet writing and must drop the finish ceremony
+            bool geometryPrompt = false;
+        };
+
+        SurfaceProfile surfaceProfile(std::string const & name)
+        {
+            if (name == "geometry")
+            {
+                return {design::DesignToolSurface::GeometryOnly, AgentRole::Default, true};
+            }
+            if (name == "requirements")
+            {
+                return {design::DesignToolSurface::Requirements, AgentRole::Requirements, false};
+            }
+            if (name == "decomposition")
+            {
+                return {design::DesignToolSurface::Decomposition, AgentRole::Decomposition, false};
+            }
+            if (name == "component")
+            {
+                return {design::DesignToolSurface::Component, AgentRole::Component, true};
+            }
+            if (name == "review")
+            {
+                return {design::DesignToolSurface::Review, AgentRole::Review, false};
+            }
+            return {};
+        }
+
         [[nodiscard]] std::string envOr(char const * name, std::string const & fallback)
         {
             char const * const value = std::getenv(name);
@@ -135,6 +172,7 @@ namespace gladius::agent::bench
         // itself, and the viewport review budget is capped. Each switch can be turned back off with
         // its own variable to A/B a change; the product host always uses the full surface.
         config.toolSurface = envOr("GLADIUS_AGENT_BENCH_TOOL_SURFACE", std::string{"geometry"});
+        config.scopeNodeId = envOr("GLADIUS_AGENT_BENCH_SCOPE_NODE", std::string{});
         config.documentSeed = envOr("GLADIUS_AGENT_BENCH_DOCUMENT_SEED", std::string{"template"});
         config.autoCompleteDesignGraph =
           envOr("GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH", "1") != "0";
@@ -178,8 +216,12 @@ namespace gladius::agent::bench
 
         m_knowledge.setStoragePath((userLibrary.parent_path() / "agent-knowledge.json").string());
 
-        m_geometryOnlySurface = m_config.toolSurface == "geometry";
+        auto const profile = surfaceProfile(m_config.toolSurface);
+        m_toolSurface = profile.surface;
+        m_role = profile.role;
+        m_geometryOnlySurface = profile.geometryPrompt;
         m_contextBuilder.setGeometryToolSurface(m_geometryOnlySurface);
+        m_contextBuilder.setRole(m_role);
 
         m_toolCtx = std::make_unique<design::DesignToolContext>(design::DesignToolContext{
           m_graph,
@@ -195,10 +237,7 @@ namespace gladius::agent::bench
           &m_knowledge,
           m_config.autoCompleteDesignGraph,
           static_cast<std::size_t>(std::max(0, m_config.maxViewportReviews))});
-        design::registerDesignTools(m_registry,
-                                    *m_toolCtx,
-                                    m_geometryOnlySurface ? design::DesignToolSurface::GeometryOnly
-                                                          : design::DesignToolSurface::Full);
+        design::registerDesignTools(m_registry, *m_toolCtx, m_toolSurface);
         m_policy.setAutonomy(agent::AutonomyLevel::WorkAutonomously);
         return {true, {}};
     }
@@ -299,6 +338,8 @@ namespace gladius::agent::bench
                                 {"maxToolCalls", m_config.maxToolCalls},
                                 {"renderSize", m_config.renderWidth},
                                 {"toolSurface", m_config.toolSurface},
+                                {"role", agentRoleName(m_role)},
+                                {"scopeNodeId", m_config.scopeNodeId},
                                 {"autoCompleteDesignGraph", m_config.autoCompleteDesignGraph},
                                 {"maxViewportReviews", m_config.maxViewportReviews}});
     }
@@ -395,6 +436,12 @@ namespace gladius::agent::bench
               snap.availableSkillsSummary = m_skills.summarizeForPrompt();
               snap.todoSummary = m_todos.summarize();
               snap.knowledgeSummary = m_knowledge.summarizeForPrompt(prompt, 5);
+              snap.scopeNodeId = m_config.scopeNodeId;
+              if (!snap.scopeNodeId.empty())
+              {
+                  snap.subtreeSummary = m_graph.describeSubtree(snap.scopeNodeId);
+                  snap.inheritedContract = m_graph.describeInheritedContract(snap.scopeNodeId);
+              }
               for (auto const & req : m_graph.requirements())
               {
                   snap.requirementsSummary += "- " + req.id + " [" + req.category

@@ -30,6 +30,44 @@ namespace gladius::agent
         std::string validationSummary;
         std::string todoSummary;
         std::string knowledgeSummary;
+        /// @brief Checklist entries owned by the scoped node only (acceptance criteria for it)
+        std::string assignedChecklistSummary;
+        /// @brief Design-graph node this run is scoped to; empty for whole-design runs.
+        /// When set, orchestrator-level state (graph summary, todos, skills, knowledge) is
+        /// withheld so a component agent only ever sees its own contract.
+        std::string scopeNodeId;
+        /// @brief Only the scoped node and its descendants; never the whole graph
+        std::string subtreeSummary;
+        /// @brief Pre-formatted interface contract the scoped node must obey
+        std::string inheritedContract;
+    };
+
+    /// @brief Roles of the hierarchical (divide-and-conquer) agent topology
+    enum class AgentRole
+    {
+        Default,       ///< Monolithic design agent: owns the whole loop
+        Requirements,  ///< Requirement engineer: requirements and acceptance checklist
+        Decomposition, ///< Decomposer: design tree, leaf split, interface contracts
+        Component,     ///< Component designer: solves one scoped node in isolation
+        Review,        ///< Orchestrator review gate: evaluates one component against its contract
+    };
+
+    /// @brief Stable lowercase name of an agent role (trace/event field)
+    [[nodiscard]] char const * agentRoleName(AgentRole role) noexcept;
+
+    /// @brief Static system-prompt descriptor. Kept byte-constant per role/surface pair so the
+    /// provider prompt cache survives every turn of a run.
+    struct RolePrompt
+    {
+        AgentRole role = AgentRole::Default;
+        /// @brief True when only the geometry tool surface is registered and the visual-review +
+        /// finish-design ceremony is therefore part of the prompt
+        bool geometryToolSurface = false;
+
+        bool operator==(RolePrompt const & other) const noexcept
+        {
+            return role == other.role && geometryToolSurface == other.geometryToolSurface;
+        }
     };
 
     /// @brief How much conversation history is worth resending to the model
@@ -74,9 +112,12 @@ namespace gladius::agent
                                               DesignContextSnapshot const & snapshot = {},
                                               ContextBuildStats * stats = nullptr) const;
 
-        /// @brief Default engineering-design system instructions
-        /// @param geometryToolSurface true when the host only registered the geometry tool surface,
-        ///        in which case the planning, variant, and ceremony instructions are left out
+        /// @brief Engineering-design system instructions for a role
+        /// @details The Default role yields the classic monolithic prompt. All prompts are
+        ///          byte-constant per RolePrompt value so the provider prompt cache survives a run.
+        [[nodiscard]] static std::string defaultSystemPrompt(RolePrompt const & prompt);
+
+        /// @brief Legacy overload: Default role, optional geometry-only tool surface
         [[nodiscard]] static std::string defaultSystemPrompt(bool geometryToolSurface = false);
 
         /// @brief History budget used for image and tool-result retention
@@ -95,8 +136,23 @@ namespace gladius::agent
             m_geometryToolSurface = geometryOnly;
         }
 
+        /**
+         * @brief Tell the builder which role of the hierarchical topology this run plays.
+         * @details The role only changes the static prompt, never the live context cadence, so the
+         *          prompt cache stays valid for the whole run.
+         */
+        void setRole(AgentRole role) noexcept
+        {
+            m_role = role;
+        }
+
+        /// @brief Role of this run (Default for the monolithic agent)
+        [[nodiscard]] AgentRole role() const noexcept
+        {
+            return m_role;
+        }
+
       private:
-        /// @brief Instruction-like prompt text; must stay byte-identical for the whole run
         [[nodiscard]] std::string buildStaticSystemPrompt(DesignContextSnapshot const & snapshot,
                                                           PrivacySettings const & privacy) const;
 
@@ -111,5 +167,6 @@ namespace gladius::agent
 
         ContextPolicy m_policy;
         bool m_geometryToolSurface = false;
+        AgentRole m_role = AgentRole::Default;
     };
 } // namespace gladius::agent

@@ -15,6 +15,9 @@
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace gladius
@@ -46,8 +49,21 @@ namespace gladius::design
         /// @brief The complete canonical tool set
         Full,
         /// @brief Only model read/write, viewport, library, requirements, and finish tools
-        GeometryOnly
+        GeometryOnly,
+        /// @brief Requirement engineering: requirements and acceptance checklist, no geometry writes
+        Requirements,
+        /// @brief Decomposition: design tree, variants and interface contracts, no geometry writes
+        Decomposition,
+        /// @brief Component design: model read/write and library, without finish_design
+        Component,
+        /// @brief Review gate: reads, one viewport capture and verdict tools, no geometry writes
+        Review
     };
+
+    /// @brief Tools the given surface keeps; an empty span means "everything"
+    /// @details Named role surfaces never offer finish_design: completing the design belongs to the
+    ///          orchestrator, and a definition the agent cannot legitimately use is pure prompt cost.
+    [[nodiscard]] std::span<char const * const> toolSurfaceAllowlist(DesignToolSurface surface);
 
     /// @brief Shared context for design-space, transaction, checkpoint, and evaluation tools
     struct DesignToolContext

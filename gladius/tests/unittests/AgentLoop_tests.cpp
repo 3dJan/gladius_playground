@@ -737,6 +737,127 @@ namespace gladius::agent::tests
         }
     }
 
+    TEST(AgentLoop, Run_EmptyCompletionThenToolCall_RetriesInsteadOfCompleting)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        bool finished = false;
+        registry.registerSyncTool(
+          {"finish_design", "Finish", {{"type", "object"}}, tools::ToolPolicy::DesignGraphModification},
+          [&](nlohmann::json const &) {
+              finished = true;
+              return nlohmann::json{{"success", true}};
+          });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(CompletionResponse{"", {}, "max_tokens", true, ""});
+        provider.responses.push(CompletionResponse{
+          "Finishing now",
+          {ToolCall{"c1", "finish_design", nlohmann::json::object()}},
+          "tool_calls",
+          true,
+          ""});
+
+        Conversation conv;
+        conv.appendUserText("Design a bracket");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(
+          loop.run(conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel));
+
+        // Assert
+        EXPECT_TRUE(res.completed);
+        EXPECT_TRUE(finished);
+        EXPECT_EQ(res.emptyTurns, 1u);
+        bool correctiveSent = false;
+        for (auto const & message : provider.capturedRequests[1].messages)
+        {
+            correctiveSent = correctiveSent || messageText(message).find("reply was empty")
+                             != std::string::npos;
+        }
+        EXPECT_TRUE(correctiveSent);
+        auto const events = queue.drain();
+        EXPECT_TRUE(std::get_if<AgentFailedEvent>(&events.back()) == nullptr);
+    }
+
+    TEST(AgentLoop, Run_EmptyCompletionsAtOutputLimit_FailsWithActionableError)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        for (int i = 0; i < 3; ++i)
+        {
+            provider.responses.push(CompletionResponse{"", {}, "max_tokens", true, ""});
+        }
+
+        Conversation conv;
+        conv.appendUserText("Design a housing");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(
+          loop.run(conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel));
+
+        // Assert
+        EXPECT_FALSE(res.completed);
+        EXPECT_NE(res.error.find("output limit"), std::string::npos);
+        EXPECT_EQ(res.emptyTurns, 3u);
+        auto events = queue.drain();
+        auto const * failedEvent = std::get_if<AgentFailedEvent>(&events.back());
+        ASSERT_NE(failedEvent, nullptr);
+        EXPECT_EQ(failedEvent->errorInfo.kind, ProviderErrorKind::MalformedResponse);
+        EXPECT_NE(failedEvent->errorInfo.message.find("output limit"), std::string::npos);
+        EXPECT_NE(failedEvent->errorInfo.hint.find("max output tokens"), std::string::npos);
+    }
+
+    TEST(AgentLoop, Run_EmptyCompletionWithoutTruncation_FailsWithUnknownStopReason)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        for (int i = 0; i < 3; ++i)
+        {
+            provider.responses.push(CompletionResponse{"", {}, "", true, ""});
+        }
+
+        Conversation conv;
+        conv.appendUserText("Design a housing");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(
+          loop.run(conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel));
+
+        // Assert
+        EXPECT_FALSE(res.completed);
+        EXPECT_EQ(res.error, "Model returned an empty answer");
+        auto events = queue.drain();
+        auto const * failedEvent = std::get_if<AgentFailedEvent>(&events.back());
+        ASSERT_NE(failedEvent, nullptr);
+        EXPECT_NE(failedEvent->errorInfo.message.find("answered with nothing"), std::string::npos);
+    }
+
     TEST(AgentLoop, Run_ProviderFails_ClassifiesErrorForThePanel)
     {
         // Arrange

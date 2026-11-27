@@ -336,6 +336,61 @@ namespace gladius::design::tests
         EXPECT_EQ(harness.graph.activeConfiguration(), std::nullopt);
     }
 
+    TEST(RegisterDesignTools_RoleSurfaces, Registry_KeepsOnlyAllowlistedTools)
+    {
+        // Arrange / Act
+        SurfaceHarness requirements{DesignToolSurface::Requirements};
+        SurfaceHarness decomposition{DesignToolSurface::Decomposition};
+        SurfaceHarness component{DesignToolSurface::Component};
+        SurfaceHarness review{DesignToolSurface::Review};
+        auto const has = [](tools::ToolRegistry & registry, char const * const name)
+        {
+            return registry.hasTool(name);
+        };
+        auto const expectOrchestratorOnly = [&](tools::ToolRegistry & registry)
+        {
+            // Assert: the orchestrator alone owns finish_design and the bookkeeping ceremony
+            EXPECT_FALSE(has(registry, "finish_design"));
+            EXPECT_FALSE(has(registry, "create_configuration"));
+            EXPECT_FALSE(has(registry, "store_knowledge"));
+            EXPECT_LT(registry.definitions().size(), 20u) << "a role surface must stay cheap per turn";
+        };
+
+        expectOrchestratorOnly(requirements.registry);
+        expectOrchestratorOnly(decomposition.registry);
+        expectOrchestratorOnly(component.registry);
+        expectOrchestratorOnly(review.registry);
+        EXPECT_TRUE(has(requirements.registry, "add_requirement"));
+        EXPECT_TRUE(has(requirements.registry, "create_todo_list"));
+        EXPECT_FALSE(has(requirements.registry, "set_program_snippet"));
+
+        EXPECT_TRUE(has(decomposition.registry, "add_function"));
+        EXPECT_TRUE(has(decomposition.registry, "define_interface"));
+        EXPECT_TRUE(has(decomposition.registry, "create_variant"));
+        EXPECT_FALSE(has(decomposition.registry, "begin_edit"));
+
+        EXPECT_TRUE(has(component.registry, "set_program_snippet"));
+        EXPECT_TRUE(has(component.registry, "import_library_item"));
+        EXPECT_TRUE(has(component.registry, "ensure_output_chain"));
+        EXPECT_FALSE(has(component.registry, "create_variant"));
+
+        EXPECT_TRUE(has(review.registry, "capture_viewport"));
+        EXPECT_TRUE(has(review.registry, "reject_variant"));
+        EXPECT_FALSE(has(review.registry, "commit_edit"));
+    }
+
+    TEST(RegisterDesignTools_RoleSurfaces, GeometrySurface_StaysAtItsRecordedSize)
+    {
+        // Arrange / Act: the baseline surface is what the existing benchmarks were recorded against
+        SurfaceHarness geometry{DesignToolSurface::GeometryOnly};
+        auto const names = geometry.registry.definitions();
+
+        // Assert
+        EXPECT_EQ(names.size(), 11u);
+        EXPECT_TRUE(geometry.registry.hasTool("finish_design"));
+        EXPECT_FALSE(geometry.registry.hasTool("get_node"));
+    }
+
     TEST(FinishDesign_AutoCompleteEnabled, ToolCall_DerivesConfigurationAndCompletes)
     {
         // Arrange
@@ -385,6 +440,58 @@ namespace gladius::design::tests
         EXPECT_NE(second.value("error", "").find("finish_design"), std::string::npos) << second.dump();
         EXPECT_EQ(harness.captures, 1u) << "Exhausted budget must not render again";
     }
+    TEST(AddTodoItem_ChecklistWithUnknownKind, ToolCall_RejectsInsteadOfDefaultingToManual)
+    {
+        ToolHarness harness;
+
+        // Arrange / Act: a misspelled kind would silently become self-certifiable
+        auto const result = harness.executor.executeSync(
+          "add_todo_item",
+          {{"title", "Wheel"}, {"checklist", {{{"label", "Renders"}, {"kind", "rednerability"}}}}},
+          harness.cancellation);
+
+        // Assert
+        EXPECT_FALSE(result.value("success", true)) << result.dump();
+        EXPECT_NE(result.value("error", "").find("rednerability"), std::string::npos) << result.dump();
+        EXPECT_TRUE(harness.todos.items().empty());
+    }
+
+    TEST(AddTodoItem_ChecklistAsBareStrings, ToolCall_AcceptsTheLegacyShape)
+    {
+        ToolHarness harness;
+
+        auto const result = harness.executor.executeSync(
+          "add_todo_item", {{"title", "Wheel"}, {"checklist", {"Renders", "Fits the domain"}}},
+          harness.cancellation);
+
+        ASSERT_TRUE(result.value("success", false)) << result.dump();
+        ASSERT_EQ(harness.todos.items().size(), 1u);
+        EXPECT_EQ(harness.todos.items()[0].checklist.size(), 2u);
+        EXPECT_EQ(harness.todos.items()[0].checklist[0].kind, ChecklistKind::Manual);
+    }
+
+    TEST(UpdateTodoItem_CheckIndexOnDeterministicEntry, ToolCall_RefusesTheSelfCheck)
+    {
+        ToolHarness harness;
+
+        // Arrange: the model tries to certify its own geometry by flipping a flag
+        auto const created = harness.executor.executeSync(
+          "add_todo_item",
+          {{"title", "Wheel"}, {"checklist", {{{"label", "Renders"}, {"kind", "renderability"}}}}},
+          harness.cancellation);
+        ASSERT_TRUE(created.value("success", false)) << created.dump();
+        auto const todoId = created.at("todoId").get<std::string>();
+
+        // Act
+        auto const result = harness.executor.executeSync(
+          "update_todo_item", {{"todoId", todoId}, {"status", "done"}, {"checkIndex", 0}}, harness.cancellation);
+
+        // Assert: nothing is checked, and the error says who may check it
+        EXPECT_FALSE(result.value("success", true)) << result.dump();
+        EXPECT_NE(result.value("error", "").find("only by gates"), std::string::npos) << result.dump();
+        EXPECT_FALSE(harness.todos.items()[0].checklist[0].checked);
+    }
+
     TEST(ListLibraryItems_MultiWordQuery, ToolCall_MatchesAnyWordAndNotesEmptyResult)
     {
         // Arrange: a sandbox library whose item is named for one word of a natural phrase

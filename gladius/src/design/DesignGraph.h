@@ -94,6 +94,8 @@ namespace gladius::design
                                std::string & errorOut);
 
         [[nodiscard]] DesignNode const * findNode(std::string const & nodeId) const;
+        /// @brief Node whose children contain `nodeId`, nullptr when the node is a root
+        [[nodiscard]] DesignNode const * findParentNode(std::string const & nodeId) const;
         [[nodiscard]] DesignVariant const * findVariant(std::string const & variantId) const;
         [[nodiscard]] Configuration const * findConfiguration(std::string const & configId) const;
 
@@ -146,6 +148,15 @@ namespace gladius::design
         }
 
         [[nodiscard]] std::optional<Configuration> activeConfiguration() const;
+
+        /// @brief Tree lines for `nodeId` and its descendants only
+        /// @details A scoped agent must not pay for the whole graph; sibling branches are cost
+        ///          without signal for the component it has been given.
+        [[nodiscard]] std::string describeSubtree(std::string const & nodeId) const;
+
+        /// @brief Interface specifications of the variants of `nodeId`, one line per interface
+        /// @details Empty when the node has no interfaces: nothing was specified to obey yet.
+        [[nodiscard]] std::string describeInheritedContract(std::string const & nodeId) const;
 
         [[nodiscard]] nlohmann::json toJson() const;
         bool fromJson(nlohmann::json const & json);

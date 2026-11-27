@@ -217,6 +217,12 @@ namespace gladius::design
             {
                 auto const & b = *bounds->modelBounds;
                 facts.boundsUsable = bounds->isUsable();
+                facts.boundsNumeric = true;
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                {
+                    facts.boundsMinMax[axis] = b.min[axis];
+                    facts.boundsMinMax[axis + 3] = b.max[axis];
+                }
                 facts.modelBounds = fmt::format("[{:.1f},{:.1f},{:.1f}]..[{:.1f},{:.1f},{:.1f}]",
                                                 b.min[0],
                                                 b.min[1],

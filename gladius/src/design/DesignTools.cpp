@@ -8,6 +8,7 @@
 #include "../ProgramSnippetApplier.h"
 #include "../agent/Conversation.h"
 #include "AgentToolOutput.h"
+#include "CadGates.h"
 #include "ManufacturingValidator.h"
 #include "Renderability.h"
 #include "../io/3mf/Lib3mfLoader.h"
@@ -114,6 +115,42 @@ namespace gladius::design
         }
 
         /**
+         * @brief Validates a checklist argument before it reaches the TodoStore.
+         * @details The model may write entries as plain labels or as objects with a gate `kind`.
+         *          An unknown kind would silently degrade to a self-certifiable entry, so reject it.
+         * @return Empty string when valid, otherwise a message naming the offending entry
+         */
+        [[nodiscard]] std::string validateChecklist(nlohmann::json const & checklist)
+        {
+            if (checklist.is_null() || checklist.is_string())
+            {
+                return "";
+            }
+            if (!checklist.is_array())
+            {
+                return "checklist must be an array";
+            }
+            for (std::size_t i = 0; i < checklist.size(); ++i)
+            {
+                auto const & entry = checklist[i];
+                if (entry.is_string())
+                {
+                    continue;
+                }
+                if (!entry.is_object() || !entry.contains("label") || !entry["label"].is_string())
+                {
+                    return "checklist entry " + std::to_string(i) + " needs a string label";
+                }
+                if (entry.contains("kind") && !parseChecklistKind(entry.value("kind", "")))
+                {
+                    return "unknown checklist kind \"" + entry.value("kind", "") + "\" in entry " +
+                           std::to_string(i);
+                }
+            }
+            return "";
+        }
+
+        /**
          * @brief Reads a numeric argument, tolerating a numeric string.
          * @details A model that writes "qualityScore": "0.8" instead of 0.8 makes nlohmann throw a
          *          type error, so the whole tool call fails. The value is unambiguous either way.
@@ -210,6 +247,57 @@ namespace gladius::design
                                                               "list_library_items",
                                                               "set_program_snippet"};
 
+        /// @brief Requirement engineer: writes requirements and the acceptance checklist only
+        constexpr char const * const kRequirementsSurface[] = {"add_requirement",
+                                                               "create_todo_list",
+                                                               "add_todo_item",
+                                                               "update_todo_item",
+                                                               "list_todos",
+                                                               "get_design_summary",
+                                                               "get_model_summary"};
+
+        /// @brief Decomposer: builds the tree and its contracts, never touches geometry
+        constexpr char const * const kDecompositionSurface[] = {"add_function",
+                                                                "add_requirement",
+                                                                "create_variant",
+                                                                "define_interface",
+                                                                "freeze_component",
+                                                                "get_children",
+                                                                "get_design_summary",
+                                                                "get_model_summary",
+                                                                "get_node"};
+
+        /// @brief Component designer: models one scoped node, cannot complete the design
+        constexpr char const * const kComponentSurface[] = {"begin_edit",
+                                                            "capture_viewport",
+                                                            "commit_edit",
+                                                            "ensure_output_chain",
+                                                            "get_bounding_box",
+                                                            "get_children",
+                                                            "get_model_summary",
+                                                            "get_node",
+                                                            "get_program_snippet",
+                                                            "import_library_item",
+                                                            "list_library_items",
+                                                            "measure_thickness",
+                                                            "set_program_snippet",
+                                                            "update_todo_item"};
+
+        /// @brief Review gate: reads, one capture and verdicts; geometry stays untouched
+        constexpr char const * const kReviewSurface[] = {"add_requirement",
+                                                         "add_variant_feedback",
+                                                         "capture_viewport",
+                                                         "check_printability",
+                                                         "get_bounding_box",
+                                                         "get_children",
+                                                         "get_design_summary",
+                                                         "get_model_summary",
+                                                         "get_node",
+                                                         "get_program_snippet",
+                                                         "measure_thickness",
+                                                         "reject_variant",
+                                                         "update_todo_item"};
+
         /**
          * @brief True when any word of the query occurs in the haystack.
          * @details A multi word query such as "lego brick" is how a caller naturally searches; the
@@ -228,6 +316,28 @@ namespace gladius::design
                 }
             }
             return false;
+        }
+
+        /**
+         * @brief Unproved checklist gaps as one line per entry, for the finish_design error.
+         */
+        [[nodiscard]] std::string gapsAsText(std::vector<ChecklistGap> const & gaps)
+        {
+            std::ostringstream out;
+            for (auto const & gap : gaps)
+            {
+                if (!out.str().empty())
+                {
+                    out << "; ";
+                }
+                out << gap.todoId << "[" << gap.index << "] " << toString(gap.kind);
+                if (!gap.scopeNodeId.empty())
+                {
+                    out << "@" << gap.scopeNodeId;
+                }
+                out << " '" << gap.label << "'";
+            }
+            return out.str();
         }
 
         /**
@@ -356,7 +466,7 @@ namespace gladius::design
         }
 
         /// @brief Half edge length of the default evaluation domain, in mm
-        constexpr float kDefaultDomainHalfExtent = 50.0f;
+        constexpr float kDefaultDomainHalfExtent = static_cast<float>(kDomainHalfExtentMm);
 
         /**
          * @brief Reads an optional [x,y,z] corner of the evaluation domain.
@@ -387,11 +497,31 @@ namespace gladius::design
         }
     } // namespace
 
+    std::span<char const * const> toolSurfaceAllowlist(DesignToolSurface surface)
+    {
+        switch (surface)
+        {
+        case DesignToolSurface::Full:
+            return {};
+        case DesignToolSurface::GeometryOnly:
+            return kGeometryOnlySurface;
+        case DesignToolSurface::Requirements:
+            return kRequirementsSurface;
+        case DesignToolSurface::Decomposition:
+            return kDecompositionSurface;
+        case DesignToolSurface::Component:
+            return kComponentSurface;
+        case DesignToolSurface::Review:
+            return kReviewSurface;
+        }
+        return {};
+    }
+
     void registerDesignTools(tools::ToolRegistry & registry,
                              DesignToolContext & ctx,
                              DesignToolSurface surface)
     {
-        bool const full = surface != DesignToolSurface::GeometryOnly;
+        std::span<char const * const> const allowlist = toolSurfaceAllowlist(surface);
 
         registry.registerSyncTool(
           {"get_design_summary",
@@ -861,13 +991,26 @@ namespace gladius::design
               // The document is the only thing that can prove something was actually built. Graph
               // bookkeeping and snippet compilation both succeed on a document that renders
               // nothing, so the scene itself has to be checked before the design may be complete.
+              RenderabilityFacts facts;
+              bool factsCollected = false;
+              auto const collectFacts = [&ctx, &facts, &factsCollected]() -> RenderabilityFacts const & {
+                  if (!factsCollected)
+                  {
+                      // Measuring bounds blocks on the render thread, so the run collects them once
+                      // and shares them with every checklist gate.
+                      facts = collectRenderabilityFacts(ctx.document, true);
+                      factsCollected = true;
+                  }
+                  return facts;
+              };
+
               if (ctx.document != nullptr)
               {
-                  auto const facts = collectRenderabilityFacts(ctx.document, true);
-                  if (!facts.isRenderable())
+                  auto const & renderFacts = collectFacts();
+                  if (!renderFacts.isRenderable())
                   {
                       nlohmann::json blockers = nlohmann::json::array();
-                      for (auto const & blocker : facts.blockers)
+                      for (auto const & blocker : renderFacts.blockers)
                       {
                           blockers.push_back({{"code", blocker.code},
                                               {"message", blocker.message},
@@ -876,7 +1019,7 @@ namespace gladius::design
                       return {{"success", false},
                               {"valid", false},
                               {"error",
-                               "The design does not render: " + facts.blockersAsText()},
+                               "The design does not render: " + renderFacts.blockersAsText()},
                               {"renderabilityBlockers", std::move(blockers)},
                               {"hint", "Apply the named fix (ensure_output_chain wires the root "
                                        "function into a level set and build item), verify with "
@@ -905,6 +1048,33 @@ namespace gladius::design
                           {"valid", false},
                           {"passed", eval.deterministicPassed},
                           {"warnings", eval.deterministicWarnings}};
+              }
+              // A checklist entry is the definition of done, so completion is only allowed once a
+              // deterministic gate has proved each one. The model cannot flip those flags itself.
+              if (ctx.todos != nullptr)
+              {
+                  auto const gaps = ctx.todos->uncheckedDeterministicEntries(
+                    buildChecklistGateEvaluator(ctx.graph, *active, ctx.document, collectFacts()));
+                  if (!gaps.empty())
+                  {
+                      nlohmann::json json = nlohmann::json::array();
+                      for (auto const & gap : gaps)
+                      {
+                          json.push_back({{"todoId", gap.todoId},
+                                          {"index", gap.index},
+                                          {"label", gap.label},
+                                          {"kind", toString(gap.kind)},
+                                          {"scopeNodeId", gap.scopeNodeId}});
+                      }
+                      return {{"success", false},
+                              {"valid", false},
+                              {"uncheckedChecklistEntries", std::move(json)},
+                              {"error", "Deterministic checklist entries are still unproved: " +
+                                          gapsAsText(gaps)},
+                              {"hint", "Each entry is proved by its own gate on the live model. "
+                                       "Fix the geometry it describes, then call finish_design "
+                                       "again; passing gates checks the entries automatically."}};
+                  }
               }
               ctx.graph.setPhase(DesignPhase::Complete);
               if (ctx.captureViewport)
@@ -1828,7 +1998,7 @@ namespace gladius::design
                   {"properties",
                    {{"title", {{"type", "string"}}},
                     {"description", {{"type", "string"}}},
-                    {"checklist", {{"type", "array"}, {"items", {{"type", "string"}}}}}}}}}}}}}},
+                    {"checklist", TodoStore::checklistSchema()}}}}}}}}}},
            tools::ToolPolicy::DesignGraphModification},
           [&ctx](nlohmann::json const & args) -> nlohmann::json {
               if (!ctx.todos)
@@ -1841,10 +2011,15 @@ namespace gladius::design
               {
                   for (auto const & item : args["items"])
                   {
-                      std::vector<ChecklistEntry> checks;
-                      for (auto const & c : readStringArray(item, "checklist"))
+                      std::string const error = validateChecklist(item.value("checklist", nlohmann::json{}));
+                      if (!error.empty())
                       {
-                          checks.push_back(ChecklistEntry{c, false});
+                          return {{"success", false}, {"error", error}};
+                      }
+                      std::vector<ChecklistEntry> checks;
+                      for (auto const & c : item.value("checklist", nlohmann::json::array()))
+                      {
+                          checks.push_back(checklistEntryFromJson(c));
                       }
                       std::string const id = ctx.todos->addItem(
                         item.value("title", ""), item.value("description", ""), std::move(checks));
@@ -1862,17 +2037,22 @@ namespace gladius::design
             {"properties",
              {{"title", {{"type", "string"}}},
               {"description", {{"type", "string"}}},
-              {"checklist", {{"type", "array"}, {"items", {{"type", "string"}}}}}}}},
+              {"checklist", TodoStore::checklistSchema()}}}},
            tools::ToolPolicy::DesignGraphModification},
           [&ctx](nlohmann::json const & args) -> nlohmann::json {
               if (!ctx.todos)
               {
                   return {{"success", false}, {"error", "TodoStore unavailable"}};
               }
-              std::vector<ChecklistEntry> checks;
-              for (auto const & c : readStringArray(args, "checklist"))
+              std::string const error = validateChecklist(args.value("checklist", nlohmann::json{}));
+              if (!error.empty())
               {
-                  checks.push_back(ChecklistEntry{c, false});
+                  return {{"success", false}, {"error", error}};
+              }
+              std::vector<ChecklistEntry> checks;
+              for (auto const & c : args.value("checklist", nlohmann::json::array()))
+              {
+                  checks.push_back(checklistEntryFromJson(c));
               }
               std::string const id = ctx.todos->addItem(
                 args.value("title", ""), args.value("description", ""), std::move(checks));
@@ -1888,6 +2068,7 @@ namespace gladius::design
              {{"todoId", {{"type", "string"}}},
               {"status", {{"type", "string"}, {"enum", {"pending", "in_progress", "done", "blocked"}}}},
               {"description", {{"type", "string"}}},
+              {"checklist", TodoStore::checklistSchema()},
               {"checkIndex", {{"type", "integer"}}},
               {"checked", {{"type", "boolean"}}}}}},
            tools::ToolPolicy::DesignGraphModification},
@@ -1898,11 +2079,33 @@ namespace gladius::design
               }
               std::string const id = args.value("todoId", "");
               TodoStatus const st = todoStatusFromString(args.value("status", "pending"));
-              bool ok = ctx.todos->updateItem(id, st, args.value("description", ""));
+              std::vector<ChecklistEntry> checks;
+              std::vector<ChecklistEntry> const * checklist = nullptr;
+              if (args.contains("checklist"))
+              {
+                  std::string const error = validateChecklist(args["checklist"]);
+                  if (!error.empty())
+                  {
+                      return {{"success", false}, {"error", error}};
+                  }
+                  for (auto const & c : args["checklist"])
+                  {
+                      checks.push_back(checklistEntryFromJson(c));
+                  }
+                  checklist = &checks;
+              }
+              bool ok = ctx.todos->updateItem(id, st, args.value("description", ""), checklist);
               if (ok && args.contains("checkIndex"))
               {
                   ok = ctx.todos->toggleChecklistEntry(
                     id, args.value("checkIndex", 0u), args.value("checked", true));
+                  if (!ok)
+                  {
+                      return {{"success", false},
+                              {"todoId", id},
+                              {"error",
+                               "deterministic checklist entries are checked only by gates, not by you"}};
+                  }
               }
               return {{"success", ok}, {"todoId", id}};
           });
@@ -2018,7 +2221,8 @@ namespace gladius::design
               return {{"success", ctx.knowledge->remove(args.value("id", ""))}};
           });
 
-        if (full)
+        // Everything is registered, then the surface prunes: role surfaces need read-only tools
+        // (get_node, measure_thickness, ...) that the monolithic agent also gets.
         {
             registry.registerSyncTool(
               {"get_node",
@@ -2527,13 +2731,13 @@ namespace gladius::design
             registry.registerTool(std::make_shared<GenerateReferenceImageTool>(ctx));
         }
 
-        if (!full)
+        if (!allowlist.empty())
         {
             std::vector<std::string> dropped;
             for (auto const & def : registry.definitions())
             {
-                bool const keep = std::any_of(std::begin(kGeometryOnlySurface),
-                                              std::end(kGeometryOnlySurface),
+                bool const keep = std::any_of(allowlist.begin(),
+                                              allowlist.end(),
                                               [&def](char const * const name)
                                               { return def.name == name; });
                 if (!keep)

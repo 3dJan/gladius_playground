@@ -6,33 +6,29 @@
 
 namespace gladius::agent
 {
-    std::string ContextBuilder::defaultSystemPrompt(bool geometryToolSurface)
+    char const * agentRoleName(AgentRole role) noexcept
     {
-        std::string prompt
-          = "You are the Gladius Native Design Agent for hierarchical, variant-driven 3D engineering design.\n\n"
-            "WORKFLOW:\n"
-            "1. Inspect the open document (get_model_summary, get_program_snippet). When continuing on an\n"
-            "   existing model, preserve and extend existing functions unless asked to replace them.\n"
-            "2. A new user message is never already solved. Even if an earlier request completed and was\n"
-            "   validated, treat every new message as a change request and iterate again.\n"
-            "3. Check the library before writing math: list_library_items, then import_library_item for\n"
-            "   anything that already exists (lattices, primitives, mechanical parts).\n"
-            "4. Apply geometry with begin_edit / set_program_snippet / commit_edit, then verify.\n"
-            "5. Inspect with capture_viewport at most once or twice; extra views rarely change the answer.\n"
-            "6. Call finish_design when the geometry matches the request.\n";
-
-        if (!geometryToolSurface)
+        switch (role)
         {
-            prompt +=
-              "7. For non-trivial tasks, plan with create_todo_list / add_todo_item and track progress with update_todo_item.\n"
-              "8. Inventory required parts with add_function, explore solution principles (create_variant) and\n"
-              "   form configurations (create_configuration, activate_configuration, hybridize_configurations).\n"
-              "9. When a reusable component is finished, score it (score_component_reusability); at >= 0.75 export\n"
-              "   it with export_library_item (non-destructive to the main document).\n"
-              "10. Store concise reusable learnings with store_knowledge (search_knowledge when needed).\n";
+        case AgentRole::Default:
+            return "default";
+        case AgentRole::Requirements:
+            return "requirements";
+        case AgentRole::Decomposition:
+            return "decomposition";
+        case AgentRole::Component:
+            return "component";
+        case AgentRole::Review:
+            return "review";
         }
+        return "default";
+    }
 
-        prompt +=
+    namespace
+    {
+        /// @brief Implicit-CAD snippet language and tool-argument rules shared by every role that writes geometry
+        char const * const kSnippetRules
+          =
             "\nGLADIUS SNIPPET LANGUAGE RULES (follow strictly):\n"
             "- Every snippet you send to set_program_snippet lists one block per function, and each block MUST start with the "
             "header comment `// Function: <name> (ID: <n>)` on the line directly above its signature. A snippet without these "
@@ -55,6 +51,44 @@ namespace gladius::agent
             "- Match the declared argument type exactly. A field declared as an array must be a JSON array even for a single "
             "element (`\"tags\": [\"gyroid\"]`, never `\"tags\": \"gyroid\"`), an object must be an object, and an integer must be "
             "an integer. Omit optional fields instead of passing a value of the wrong type.\n";
+    } // namespace
+
+    namespace
+    {
+        /// @brief Workflow preamble of the monolithic (default) design agent
+        std::string defaultRolePreamble(bool geometryToolSurface)
+        {
+            std::string prompt
+              = "You are the Gladius Native Design Agent for hierarchical, variant-driven 3D engineering design.\n\n"
+                "WORKFLOW:\n"
+                "1. Inspect the open document (get_model_summary, get_program_snippet). When continuing on an\n"
+                "   existing model, preserve and extend existing functions unless asked to replace them.\n"
+                "2. A new user message is never already solved. Even if an earlier request completed and was\n"
+                "   validated, treat every new message as a change request and iterate again.\n"
+                "3. Check the library before writing math: list_library_items, then import_library_item for\n"
+                "   anything that already exists (lattices, primitives, mechanical parts).\n"
+                "4. Apply geometry with begin_edit / set_program_snippet / commit_edit, then verify.\n"
+                "5. Inspect with capture_viewport at most once or twice; extra views rarely change the answer.\n"
+                "6. Call finish_design when the geometry matches the request.\n";
+
+            if (!geometryToolSurface)
+            {
+                prompt +=
+                  "7. For non-trivial tasks, plan with create_todo_list / add_todo_item and track progress with update_todo_item.\n"
+                  "8. Inventory required parts with add_function, explore solution principles (create_variant) and\n"
+                  "   form configurations (create_configuration, activate_configuration, hybridize_configurations).\n"
+                  "9. When a reusable component is finished, score it (score_component_reusability); at >= 0.75 export\n"
+                  "   it with export_library_item (non-destructive to the main document).\n"
+                  "10. Store concise reusable learnings with store_knowledge (search_knowledge when needed).\n";
+            }
+            return prompt;
+        }
+    } // namespace
+
+    std::string ContextBuilder::defaultSystemPrompt(bool geometryToolSurface)
+    {
+        std::string prompt = defaultRolePreamble(geometryToolSurface);
+        prompt += kSnippetRules;
 
         if (!geometryToolSurface)
         {
@@ -70,6 +104,83 @@ namespace gladius::agent
               "\nfinish_design fills in the design-graph bookkeeping itself; do not plan around it.\n";
         }
         return prompt;
+    }
+
+
+    std::string ContextBuilder::defaultSystemPrompt(RolePrompt const & prompt)
+    {
+        if (prompt.role == AgentRole::Default)
+        {
+            return defaultSystemPrompt(prompt.geometryToolSurface);
+        }
+
+        std::string out = "You are one specialised agent inside the Gladius Native Design Agent pipeline.\n"
+                          "The orchestrator owns the overall design, the schedule, and the final finish_design call.\n"
+                          "Never call finish_design, never restate the whole design task, and stop as soon as your own\n"
+                          "sub-task is answered. Work only on the state given in CURRENT STATE.\n\n";
+
+        switch (prompt.role)
+        {
+        case AgentRole::Default:
+            break;
+        case AgentRole::Requirements:
+            out +=
+              "ROLE - REQUIREMENT ENGINEER:\n"
+              "Turn the user's wish into an explicit, verifiable requirement set and one acceptance checklist.\n"
+              "- add_requirement per atomic requirement (functional / aesthetic / manufacturing), mandatory only where the\n"
+              "  user actually insisted; it is the only write you need besides create_todo_list.\n"
+              "- Every requirement must be checkable on an implicit field: a dimension, a tolerance, a topology property,\n"
+              "  or a look. Vague wishes become assumptions you state explicitly.\n"
+              "- Then create_todo_list with one checklist item per acceptance criterion, naming the concrete measurement\n"
+              "  (span in mm, wall thickness, void volume, surface pattern) instead of \"looks right\".\n"
+              "- Do not design geometry, do not write snippets, do not decompose. Report and stop.\n";
+            break;
+        case AgentRole::Decomposition:
+            out +=
+              "ROLE - DECOMPOSITION AGENT:\n"
+              "Split the requirement set into a recursion tree of components small enough to model in one step.\n"
+              "- add_function creates one design node per component (type System / Assembly / Component / Function);\n"
+              "  pass parentNodeId so nesting matches reality, and addressedRequirements to record coverage.\n"
+              "- Split deeper while a child would still need more than one independent shape; stop at leaves a single\n"
+              "  signed-distance function can express. Implicit-CAD limits decide the leaf: repetition has no loops, so\n"
+              "  a periodic or lattice pattern is ONE leaf, never N copies.\n"
+              "- define_interface on every variant that touches another component: state the mating specification as\n"
+              "  numbers (axis/frame, envelope box in mm, bore or stud dimensions, sign discipline), because the\n"
+              "  orchestrator checks compatibility against exactly those values.\n"
+              "- Where several solution principles are legitimately possible (combustion vs electric engine, spokes vs\n"
+              "  disc wheel), create_variant per principle instead of deciding for the user.\n"
+              "- Do not write geometry snippets. Report the tree and stop.\n";
+            break;
+        case AgentRole::Component:
+            out +=
+              "ROLE - COMPONENT DESIGNER:\n"
+              "Model exactly one design node, the one named in CURRENT STATE, as signed-distance math.\n"
+              "- Honour its inherited interface contract: mating dimensions, envelope, frame origin, and sign discipline\n"
+              "  are hard constraints, not suggestions. Never change another component's geometry.\n"
+              "- Begin with list_library_items / import_library_item; only write math for what the library cannot give you.\n"
+              "- Apply it in one begin_edit / set_program_snippet / commit_edit cycle, then capture_viewport once to check.\n"
+              "- Keep the function modifiable: take dimensions as parameters, keep the field continuous, and stay inside\n"
+              "  the stated flat-node budget (inline helpers are cheap, long chains of them are not).\n"
+              "- Report what you produced against each requirement and stop. Do not touch other nodes.\n";
+            break;
+        case AgentRole::Review:
+            out +=
+              "ROLE - REVIEW GATE:\n"
+              "Judge the component named in CURRENT STATE against its contract and checklist. You are an evaluator,\n"
+              "not a designer: never edit geometry, never write snippets.\n"
+              "- Read the model (get_model_summary, get_program_snippet, get_node) and capture_viewport at most once.\n"
+              "- add_variant_feedback or reject_variant on evidence; update the requirement when the requirement itself\n"
+              "  is what failed. Say precisely which dimension or property deviates and by how much.\n"
+              "- End with a short verdict line: PASS, or REDO with the concrete correction the designer must apply.\n";
+            break;
+        }
+
+        // Component designers always write snippets, on either surface; the other roles never do.
+        if (prompt.geometryToolSurface || prompt.role == AgentRole::Component)
+        {
+            out += kSnippetRules;
+        }
+        return out;
     }
 
 
@@ -114,7 +225,7 @@ namespace gladius::agent
                                                         PrivacySettings const & privacy) const
     {
         std::ostringstream sys;
-        sys << defaultSystemPrompt(m_geometryToolSurface);
+        sys << defaultSystemPrompt(RolePrompt{m_role, m_geometryToolSurface});
         if (snapshot.autonomy == AutonomyLevel::WorkAutonomously)
         {
             sys << "\nAUTONOMOUS MODE ACTIVE:\n"
@@ -141,10 +252,25 @@ namespace gladius::agent
                                                  PrivacySettings const & privacy) const
     {
         std::ostringstream live;
+        // A scoped run sees only its own component: the rest of the tree is cost without signal.
+        bool const scoped = !snapshot.scopeNodeId.empty();
         live << "CURRENT STATE (authoritative, most recent):\n"
              << "- Design phase: " << snapshot.designPhase << "\n";
 
-        if (snapshot.isFollowUpRequest)
+        if (scoped)
+        {
+            live << "- Assigned component: " << snapshot.scopeNodeId << "\n";
+            if (!snapshot.inheritedContract.empty())
+            {
+                live << "- Inherited interface contract (hard constraints):\n" << snapshot.inheritedContract;
+            }
+            if (!snapshot.subtreeSummary.empty())
+            {
+                live << "- Your component subtree:\n" << snapshot.subtreeSummary;
+            }
+        }
+
+        if (snapshot.isFollowUpRequest && !scoped)
         {
             live << "FOLLOW-UP REQUEST ON A FINISHED DESIGN:\n"
                     "A previous design was already completed and validated. The user's newest message "
@@ -177,11 +303,11 @@ namespace gladius::agent
                 live << "- Current model functions:\n" << snapshot.existingModelSummary;
             }
             // On the geometry-only surface the graph only exists to be validated by finish_design.
-            if (!m_geometryToolSurface && !snapshot.designGraphSummary.empty())
+            if (!m_geometryToolSurface && !scoped && !snapshot.designGraphSummary.empty())
             {
                 live << "- Design graph summary:\n" << snapshot.designGraphSummary;
             }
-            if (!snapshot.activeConfigurationSummary.empty())
+            if (!scoped && !snapshot.activeConfigurationSummary.empty())
             {
                 live << "- Active configuration:\n" << snapshot.activeConfigurationSummary;
             }
@@ -190,20 +316,25 @@ namespace gladius::agent
         {
             live << "- Deterministic validation results:\n" << snapshot.validationSummary;
         }
-        if (!snapshot.relevantCatalogueSummary.empty())
+        if (!scoped && !snapshot.relevantCatalogueSummary.empty())
         {
             live << "- Relevant catalogue entries:\n" << snapshot.relevantCatalogueSummary;
         }
-        if (!m_geometryToolSurface && !snapshot.availableSkillsSummary.empty())
+        if (!m_geometryToolSurface && !scoped && !snapshot.availableSkillsSummary.empty())
         {
             live << "- Available skills (use load_skill to read detailed guidance):\n"
                  << snapshot.availableSkillsSummary;
         }
-        if (!m_geometryToolSurface && !snapshot.todoSummary.empty())
+        if (!m_geometryToolSurface && !scoped && !snapshot.todoSummary.empty())
         {
             live << "- Current planning todos:\n" << snapshot.todoSummary;
         }
-        if (!m_geometryToolSurface && !snapshot.knowledgeSummary.empty())
+        if (scoped && !snapshot.assignedChecklistSummary.empty())
+        {
+            live << "- Assigned acceptance checklist (all must pass before you report back):\n"
+                 << snapshot.assignedChecklistSummary;
+        }
+        if (!m_geometryToolSurface && !scoped && !snapshot.knowledgeSummary.empty())
         {
             live << "- Relevant past learnings (from KnowledgeStore):\n" << snapshot.knowledgeSummary;
         }

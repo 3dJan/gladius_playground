@@ -385,4 +385,160 @@ TEST(ContextBuilder, Build_VolatileSnapshotChanges_SystemPromptIsByteIdentical)
             }
         }
     }
+
+    TEST(ContextBuilder, AgentRoleName_IsStableLowercaseIdentifier)
+    {
+        // Arrange / Act
+        auto const defaultName = gladius::agent::agentRoleName(gladius::agent::AgentRole::Default);
+        auto const componentName = gladius::agent::agentRoleName(gladius::agent::AgentRole::Component);
+
+        // Assert: names are trace fields, so they must be lowercase and distinct
+        EXPECT_STREQ(defaultName, "default");
+        EXPECT_STREQ(componentName, "component");
+        EXPECT_STREQ(gladius::agent::agentRoleName(gladius::agent::AgentRole::Requirements), "requirements");
+        EXPECT_STREQ(gladius::agent::agentRoleName(gladius::agent::AgentRole::Decomposition), "decomposition");
+        EXPECT_STREQ(gladius::agent::agentRoleName(gladius::agent::AgentRole::Review), "review");
+    }
+
+    TEST(ContextBuilder, ScopedSnapshot_RendersSubtreeSummary)
+    {
+        // Arrange
+        ContextBuilder builder;
+        Conversation conversation;
+        conversation.appendUserText("Model the rim only.");
+        ToolRegistry registry;
+        PrivacySettings privacy;
+        auto scoped = makeSnapshot("0/5 done");
+        scoped.scopeNodeId = "n3";
+        scoped.subtreeSummary = "- n3 Rim (Function, Proposed)\n  variant v7 Outer spoke\n";
+
+        // Act
+        auto const request = builder.build(conversation, registry, privacy, scoped);
+        auto const live = liveContextText(request, request.messages.size() - 1);
+
+        // Assert
+        EXPECT_NE(live.find("Your component subtree:"), std::string::npos);
+        EXPECT_NE(live.find("variant v7 Outer spoke"), std::string::npos);
+    }
+
+    TEST(ContextBuilder, ScopedSnapshot_ShowOnlyAssignedChecklist)
+    {
+        // Arrange
+        ContextBuilder builder;
+        Conversation conversation;
+        conversation.appendUserText("Model the rim only.");
+        ToolRegistry registry;
+        PrivacySettings privacy;
+        auto scoped = makeSnapshot("2/9 done");
+        scoped.scopeNodeId = "n3";
+        scoped.assignedChecklistSummary = "- [ ] tread period 2mm\n- [x] bore diameter 4.8mm\n";
+
+        // Act
+        auto const request = builder.build(conversation, registry, privacy, scoped);
+        auto const live = liveContextText(request, request.messages.size() - 1);
+
+        // Assert: own criteria in, orchestrator plan out
+        EXPECT_NE(live.find("Assigned acceptance checklist"), std::string::npos);
+        EXPECT_NE(live.find("tread period 2mm"), std::string::npos);
+        EXPECT_EQ(live.find("2/9 done"), std::string::npos) << "orchestrator todos must be withheld";
+    }
+
+    TEST(ContextBuilder, DefaultRolePrompt_LegacyOverloadIsByteIdentical)
+    {
+        // Arrange / Act: the monolithic prompt is what the existing cache and bench baselines were
+        // recorded against, so the role overload must not change it
+        auto const legacy = ContextBuilder::defaultSystemPrompt(false);
+        auto const viaRole = ContextBuilder::defaultSystemPrompt(gladius::agent::RolePrompt{});
+        auto const legacyGeometry = ContextBuilder::defaultSystemPrompt(true);
+        auto const geometryViaRole
+          = ContextBuilder::defaultSystemPrompt(gladius::agent::RolePrompt{
+            gladius::agent::AgentRole::Default, true});
+
+        // Assert
+        EXPECT_EQ(legacy, viaRole);
+        EXPECT_EQ(legacyGeometry, geometryViaRole);
+    }
+
+    TEST(ContextBuilder, RolePrompts_AreDistinctAndNeverOwnFinishDesign)
+    {
+        // Arrange / Act
+        std::vector<std::string> prompts;
+        for (auto const role : {gladius::agent::AgentRole::Requirements,
+                                gladius::agent::AgentRole::Decomposition,
+                                gladius::agent::AgentRole::Component,
+                                gladius::agent::AgentRole::Review})
+        {
+            prompts.push_back(ContextBuilder::defaultSystemPrompt(gladius::agent::RolePrompt{role, false}));
+        }
+
+        // Assert: one prompt per role, and only the orchestrator may complete the design
+        for (std::size_t i = 0; i < prompts.size(); ++i)
+        {
+            EXPECT_NE(prompts[i].find("finish_design"), std::string::npos) << "role must be told not to finish";
+            EXPECT_NE(prompts[i].find("Never call finish_design"), std::string::npos);
+            for (std::size_t j = i + 1; j < prompts.size(); ++j)
+            {
+                EXPECT_NE(prompts[i], prompts[j]);
+            }
+        }
+    }
+
+    TEST(ContextBuilder, ComponentRolePrompt_CarriesSnippetRules)
+    {
+        // Arrange / Act: a component designer writes snippets on either surface, a reviewer does not
+        auto const component
+          = ContextBuilder::defaultSystemPrompt(gladius::agent::RolePrompt{gladius::agent::AgentRole::Component, true});
+        auto const scopedComponent
+          = ContextBuilder::defaultSystemPrompt(gladius::agent::RolePrompt{gladius::agent::AgentRole::Component, false});
+        auto const review
+          = ContextBuilder::defaultSystemPrompt(gladius::agent::RolePrompt{gladius::agent::AgentRole::Review, false});
+
+        // Assert
+        EXPECT_NE(component.find("SNIPPET LANGUAGE RULES"), std::string::npos);
+        EXPECT_NE(scopedComponent.find("SNIPPET LANGUAGE RULES"), std::string::npos);
+        EXPECT_EQ(review.find("SNIPPET LANGUAGE RULES"), std::string::npos);
+    }
+
+    TEST(ContextBuilder, ScopedSnapshot_WithholdsOrchestratorState)
+    {
+        // Arrange
+        ContextBuilder builder;
+        Conversation conversation;
+        conversation.appendUserText("Model the rim only.");
+        ToolRegistry registry;
+        PrivacySettings privacy;
+        auto scoped = makeSnapshot("2/5 done");
+        scoped.scopeNodeId = "n3";
+        scoped.inheritedContract = "- bore diameter 4.8mm, frame origin at tyre centre\n";
+
+        // Act
+        auto const request = builder.build(conversation, registry, privacy, scoped);
+        auto const live = liveContextText(request, request.messages.size() - 1);
+
+        // Assert: the component agent sees its contract, not the whole design
+        EXPECT_NE(live.find("Assigned component: n3"), std::string::npos);
+        EXPECT_NE(live.find("bore diameter 4.8mm"), std::string::npos);
+        EXPECT_EQ(live.find("helper_sphere_9"), std::string::npos) << "design graph summary must be withheld";
+        EXPECT_EQ(live.find("2/5 done"), std::string::npos) << "orchestrator todos must be withheld";
+        EXPECT_EQ(live.find("remember: root is main_3"), std::string::npos);
+    }
+
+    TEST(ContextBuilder, ScopedAndUnscopedSnapshots_ShareOneSystemPrompt)
+    {
+        // Arrange
+        ContextBuilder builder;
+        Conversation conversation;
+        conversation.appendUserText("Model the rim only.");
+        ToolRegistry registry;
+        PrivacySettings privacy;
+        auto scoped = makeSnapshot("0/5 done");
+        scoped.scopeNodeId = "n3";
+
+        // Act
+        auto const unscoped = builder.build(conversation, registry, privacy, makeSnapshot("0/5 done"));
+        auto const request = builder.build(conversation, registry, privacy, scoped);
+
+        // Assert: scoping is live state only, so the cached prefix stays valid for the whole run
+        EXPECT_EQ(unscoped.systemPrompt, request.systemPrompt);
+    }
 } // namespace agent::tests

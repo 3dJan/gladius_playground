@@ -220,6 +220,56 @@ namespace gladius::design::tests
         EXPECT_EQ(graph.activeConfiguration()->selectedVariants.at(shadeId), shadeA);
     }
 
+    TEST(DesignGraph, DescribeSubtree_ScopedNode_ExcludesSiblingsAndTheirVariants)
+    {
+        // Arrange: wheel branch (with a tyre leaf) and an unrelated chassis branch
+        DesignGraph graph;
+        auto const carId = graph.addNode(DesignNodeType::Component, "Car");
+        auto const wheelId = graph.addNode(DesignNodeType::Component, "Wheel", carId);
+        auto const tyreId = graph.addNode(DesignNodeType::Function, "Tyre", wheelId);
+        auto const chassisId = graph.addNode(DesignNodeType::Component, "Chassis", carId);
+
+        auto const tyreVariant = graph.createVariant(tyreId, "Slick", "Plain tread", FidelityLevel::Envelope);
+        auto const chassisVariant = graph.createVariant(chassisId, "Plate", "Flat plate", FidelityLevel::Envelope);
+        ASSERT_TRUE(graph.setVariantResource(tyreVariant, 7, "tyre_slick"));
+
+        // Act
+        auto const subtree = graph.describeSubtree(wheelId);
+        auto const chassis = graph.describeSubtree(chassisId);
+
+        // Assert: the scoped branch is complete, sibling branches are absent
+        EXPECT_NE(subtree.find("Wheel"), std::string::npos);
+        EXPECT_NE(subtree.find("Tyre"), std::string::npos);
+        EXPECT_NE(subtree.find("tyre_slick"), std::string::npos);
+        EXPECT_EQ(subtree.find("Chassis"), std::string::npos);
+        EXPECT_EQ(subtree.find("Plate"), std::string::npos);
+        EXPECT_NE(chassis.find("Plate"), std::string::npos);
+        EXPECT_EQ(chassis.find("Tyre"), std::string::npos);
+        EXPECT_TRUE(graph.describeSubtree("missing_node").empty());
+    }
+
+    TEST(DesignGraph, DescribeInheritedContract_ListsVariantInterfacesAndStaysEmptyWithoutThem)
+    {
+        // Arrange
+        DesignGraph graph;
+        auto const rimId = graph.addNode(DesignNodeType::Component, "Rim");
+        auto const hubId = graph.addNode(DesignNodeType::Component, "Hub");
+        auto const plainId = graph.createVariant(rimId, "Plain", "No ports", FidelityLevel::Envelope);
+        auto const boredId = graph.createVariant(rimId, "Bored", "With bore", FidelityLevel::Envelope);
+        ASSERT_TRUE(graph.defineInterface(boredId, {"if1", "hubBore", "circular", {{"diameterMm", 4.8}}}));
+        ASSERT_TRUE(graph.findVariant(plainId)->interfaces.empty());
+
+        // Act
+        auto const contract = graph.describeInheritedContract(rimId);
+
+        // Assert
+        EXPECT_NE(contract.find("hubBore"), std::string::npos);
+        EXPECT_NE(contract.find("4.8"), std::string::npos);
+        EXPECT_EQ(contract.find("Plain"), std::string::npos) << "a variant without interfaces adds nothing";
+        EXPECT_TRUE(graph.describeInheritedContract(hubId).empty());
+        EXPECT_TRUE(graph.describeInheritedContract("missing_node").empty());
+    }
+
     TEST(DesignCatalogue, LoadDefaultCatalogue_PopulatesEntriesAndCompatibilityRules)
     {
         // Arrange

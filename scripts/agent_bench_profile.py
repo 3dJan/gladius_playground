@@ -105,6 +105,8 @@ def analyze(records, wall_ms=0):
         "largestToolResult": (0, 0),
         "tools": {},
         "truncatedTurns": 0,
+        "emptyTurns": 0,
+        "emptyCompletionRetries": 0,
         "failedToolCalls": 0,
         "deniedToolCalls": 0,
         "turnsAfterFailure": 0,
@@ -131,6 +133,8 @@ def analyze(records, wall_ms=0):
             out["autonomousNudges"] += 1
         elif kind == "truncation_nudge":
             out["truncationNudges"] += 1
+        elif kind == "empty_completion_retry":
+            out["emptyCompletionRetries"] += 1
 
     seen_hash_state: dict = {}
     turn_durations = []
@@ -205,6 +209,11 @@ def analyze(records, wall_ms=0):
             out["toolJsonChars"] += rec.get("toolJsonChars", 0)
             if rec.get("stopReason") in ("max_tokens", "length"):
                 out["truncatedTurns"] += 1
+            # A turn with no visible text, no reasoning and no tool call is one the loop could not
+            # act on; counting it here catches endpoints that report it without the retry note.
+            if (rec.get("toolCallsIssued", 0) == 0 and rec.get("textChars", 0) == 0
+                    and rec.get("thinkingChars", 0) == 0):
+                out["emptyTurns"] += 1
             if rec.get("toolCallsIssued", 0) == 0:
                 out["turnsWithoutToolCalls"] += 1
                 out["readOnlyTurnsMs"] += duration

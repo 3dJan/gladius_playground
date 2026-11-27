@@ -46,6 +46,7 @@ SECONDARY_METRICS = (
     ("metrics", "providerFailures", False),
     ("metrics", "unknownToolCalls", False),
     ("metrics", "truncatedTurns", False),
+    ("metrics", "emptyTurns", False),
     ("usageWithJudge", "outputTokens", False),
 )
 
