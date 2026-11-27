@@ -9,6 +9,7 @@
 #include "Parameter.h"
 #include "NumericWidgets.h"
 #include "Style.h"
+#include "SignalColors.h"
 #include "Widgets.h"
 #include "nodes/DerivedNodes.h"
 #include "nodes/LowerFunctionGradient.h"
@@ -688,8 +689,8 @@ namespace gladius::ui
         ImGui::Spacing();
         ImGui::TextUnformatted("Normalize Distance Field");
 
-        auto const errorColor = ImVec4(1.f, 0.4f, 0.4f, 1.f);
-        auto const warningColor = ImVec4(1.f, 0.6f, 0.2f, 1.f);
+        auto const errorColor = colorError();
+        auto const warningColor = colorWarn();
 
         bool canConfigure = true;
         if (!m_assembly)
@@ -1008,8 +1009,7 @@ namespace gladius::ui
 
         if (!m_lowerNormalizeMessage.empty())
         {
-            auto const color = m_lowerNormalizeMessageIsError ? ImVec4(1.f, 0.4f, 0.4f, 1.f)
-                                                              : ImVec4(0.6f, 0.8f, 1.f, 1.f);
+            auto const color = m_lowerNormalizeMessageIsError ? colorError() : colorInfo();
             ImGui::TextColored(color, "%s", m_lowerNormalizeMessage.c_str());
         }
     }
@@ -1021,7 +1021,7 @@ namespace gladius::ui
 
         if (m_assembly == nullptr)
         {
-            ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f),
+            ImGui::TextColored(colorError(),
                                "Assembly not available – cannot resolve function outputs.");
             return;
         }
@@ -1030,16 +1030,14 @@ namespace gladius::ui
         auto const functionId = node.getFunctionId();
         if (functionId == 0)
         {
-            ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
-                               "Select a function to compute its gradient.");
+            ImGui::TextColored(colorWarn(), "Select a function to compute its gradient.");
             return;
         }
 
         auto referencedModel = m_assembly->findModel(functionId);
         if (!referencedModel)
         {
-            ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f),
-                               "Referenced function not found in the assembly.");
+            ImGui::TextColored(colorError(), "Referenced function not found in the assembly.");
             return;
         }
 
@@ -1068,7 +1066,7 @@ namespace gladius::ui
             }
         }
 
-        auto const warningColor = ImVec4(1.f, 0.6f, 0.2f, 1.f);
+        auto const warningColor = colorWarn();
 
         bool selectionChanged = false;
 
@@ -1327,8 +1325,7 @@ namespace gladius::ui
 
         if (!m_lowerGradientMessage.empty())
         {
-            auto const color = m_lowerGradientMessageIsError ? ImVec4(1.f, 0.4f, 0.4f, 1.f)
-                                                             : ImVec4(0.6f, 0.8f, 1.f, 1.f);
+            auto const color = m_lowerGradientMessageIsError ? colorError() : colorInfo();
             ImGui::TextColored(color, "%s", m_lowerGradientMessage.c_str());
         }
     }

@@ -34,6 +34,7 @@
 #include "NodeView.h"
 #include "Port.h"
 #include "ResourceView.h"
+#include "SignalColors.h"
 #include "Style.h"
 #include "ValidationUtils.h"
 #include "ValidationOverlay.h"
@@ -605,7 +606,7 @@ namespace gladius::ui
 
             if (!model.second->isValid())
             {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.f, 0.f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_Text, colorError());
             }
 
             ImGui::BeginGroup();
@@ -691,8 +692,7 @@ namespace gladius::ui
                         {
                             ImGui::BeginTooltip();
                             ImGui::TextColored(
-                              ImVec4(1.0f, 0.0f, 0.0f, 1.0f),
-                              "Cannot delete, the function is referenced by another item:");
+                              colorWarn(), "Cannot delete, the function is referenced by another item:");
                             for (auto const & depRes : safeResult.dependentResources)
                             {
                                 ImGui::BulletText("Resource ID: %u", depRes->GetModelResourceID());
@@ -779,7 +779,7 @@ namespace gladius::ui
                 if (nameExists)
                 {
                     ImGui::Spacing();
-                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
+                    ImGui::TextColored(colorWarn(),
                                        "Warning: This name is already used for another function.");
                 }
 
@@ -811,8 +811,7 @@ namespace gladius::ui
                     availableFunctionCount = static_cast<int>(availableFunctions.size());
                     if (availableFunctionCount == 0)
                     {
-                        ImGui::TextColored(ImVec4(1, 0, 0, 1),
-                                           "No user functions available to copy.");
+                        ImGui::TextColored(colorWarn(), "No user functions available to copy.");
                     }
                     else
                     {
@@ -2622,7 +2621,7 @@ namespace gladius::ui
                         if (!inputValid[i])
                         {
                             ImGui::SameLine();
-                            ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "invalid");
+                            ImGui::TextColored(colorError(), "invalid");
                         }
                         ImGui::PopItemWidth();
                         ImGui::PopID();
@@ -2651,7 +2650,7 @@ namespace gladius::ui
                 bool valid = !m_extractFunctionName.empty();
                 if (!valid)
                 {
-                    ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "Please enter a function name.");
+                    ImGui::TextColored(colorWarn(), "Please enter a function name.");
                 }
                 if (valid && ImGui::Button("Extract", ImVec2(120, 0)))
                 {

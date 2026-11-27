@@ -1,6 +1,7 @@
 #include "MetaDataView.h"
 
 #include "Document.h"
+#include "SignalColors.h"
 #include "Widgets.h"
 #include "imgui.h"
 #include <imgui_stdlib.h>
@@ -288,7 +289,7 @@ namespace gladius::ui
             catch (const std::exception & e)
             {
                 ImGui::TextColored(
-                  ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error displaying metadata: %s", e.what());
+                  colorError(), "Error displaying metadata: %s", e.what());
             }
 
             return modified;
@@ -308,7 +309,7 @@ namespace gladius::ui
         Lib3MF::PModel model3mf = document->get3mfModel();
         if (!model3mf)
         {
-            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "No 3MF model loaded");
+            ImGui::TextColored(colorWarn(), "No 3MF model loaded");
             return false;
         }
 
@@ -330,7 +331,7 @@ namespace gladius::ui
             Lib3MF::PMetaDataGroup metaDataGroup = model3mf->GetMetaDataGroup();
             if (!metaDataGroup)
             {
-                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "No metadata group found");
+                ImGui::TextColored(colorWarn(), "No metadata group found");
                 return false;
             }
 
@@ -424,7 +425,7 @@ namespace gladius::ui
         catch (const std::exception & e)
         {
             ImGui::TextColored(
-              ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error accessing metadata: %s", e.what());
+              colorError(), "Error accessing metadata: %s", e.what());
         }
 
         return modified;
@@ -481,8 +482,7 @@ namespace gladius::ui
             if (isCustomName && newNamespace.empty())
             {
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.0f, 1.0f),
-                                   "(Namespace required for custom names)");
+                ImGui::TextColored(colorWarn(), "(Namespace required for custom names)");
             }
 
             ImGui::AlignTextToFramePadding();
@@ -529,8 +529,7 @@ namespace gladius::ui
                     {
                         // Display an error that namespace is required for custom names
                         ImGui::TextColored(
-                          ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
-                          "Error: Namespace is required for custom metadata names.");
+                          colorError(), "Error: Namespace is required for custom metadata names.");
                     }
                     else
                     {
@@ -543,7 +542,7 @@ namespace gladius::ui
                                 // Check if metadata with same name and namespace already exists
                                 if (metadataExists(metaDataGroup, newNamespace, newName))
                                 {
-                                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                                    ImGui::TextColored(colorError(),
                                                        "Error: Metadata with this name and "
                                                        "namespace already exists.");
                                 }
@@ -563,7 +562,7 @@ namespace gladius::ui
                         }
                         catch (const std::exception & e)
                         {
-                            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                            ImGui::TextColored(colorError(),
                                                "Error adding metadata: %s",
                                                e.what());
                         }

@@ -3,6 +3,7 @@
 #include "../ExpressionToGraphConverter.h"
 #include "../ExpressionParser.h"
 #include "../FunctionArgument.h"
+#include "SignalColors.h"
 #include "../nodes/Assembly.h"
 #include "../nodes/Model.h"
 #include "../nodes/NodeBase.h"
@@ -174,12 +175,12 @@ namespace gladius::ui
                 m_lastError.clear();
             }
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Unsaved changes");
+            ImGui::TextColored(colorWarn(), "Unsaved changes");
         }
 
         if (!m_lastError.empty())
         {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, colorError());
             ImGui::TextWrapped("%s", m_lastError.c_str());
             ImGui::PopStyleColor();
         }

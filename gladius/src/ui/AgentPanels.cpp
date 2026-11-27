@@ -3,6 +3,7 @@
 
 #include "ClipboardImageHelper.h"
 #include "AgentDemoState.h"
+#include "SignalColors.h"
 #include "../ConfigManager.h"
 #include "../Document.h"
 #include "../ExpressionParser.h"
@@ -1522,7 +1523,7 @@ namespace gladius::ui
                                 m_credentialStore.backendName().c_str());
             if (!m_credentialWarning.empty())
             {
-                ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f), "%s", m_credentialWarning.c_str());
+                ImGui::TextColored(colorWarn(), "%s", m_credentialWarning.c_str());
             }
 
             ImGui::BeginDisabled(m_modelFetchRunning.load() || prof.endpoint.empty());

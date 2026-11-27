@@ -4,6 +4,7 @@
 #include "ComputeContext.h"
 #endif
 #include "io/3mf/Writer3mf.h"
+#include "SignalColors.h"
 #include "Theme.h"
 
 #include <algorithm>
@@ -3590,7 +3591,7 @@ namespace gladius::ui
         {
             ImGui::NewLine();
 
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, colorWarn());
             ImGui::TextUnformatted(ICON_FA_EXCLAMATION_TRIANGLE " Warning");
             ImGui::PopStyleColor();
 
@@ -3724,7 +3725,7 @@ namespace gladius::ui
             // Error indicator - clickable to show log view
             if (errorCount > 0)
             {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.3f, 0.3f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, colorError());
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.3f, 0.3f, 0.2f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.9f, 0.3f, 0.3f, 0.4f));
@@ -3753,7 +3754,7 @@ namespace gladius::ui
             // Warning indicator - clickable to show log view
             if (warningCount > 0)
             {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.7f, 0.3f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, colorWarn());
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.7f, 0.3f, 0.2f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.9f, 0.7f, 0.3f, 0.4f));

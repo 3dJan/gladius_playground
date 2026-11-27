@@ -3,11 +3,11 @@
 // AgentPanelsModelCombos.cpp; panel layout and the workflow tree stay in AgentPanelsUi.cpp, state
 // and run control in AgentPanels.cpp.
 
-#include "AgentPanelColors.h"
 #include "AgentPanelMetrics.h"
 #include "AgentPanelText.h"
 #include "AgentPanelWidgets.h"
 #include "AgentPanels.h"
+#include "SignalColors.h"
 
 #include <IconsFontAwesome5.h>
 #include <imgui.h>

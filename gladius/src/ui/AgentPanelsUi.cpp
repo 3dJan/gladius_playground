@@ -1,9 +1,9 @@
 // UI half of the Design Agent: the single consolidated panel, its persistent footer, and the
 // collapsible diagnostics. State, run control, and persistence stay in AgentPanels.cpp.
 
-#include "AgentPanelColors.h"
 #include "AgentPanelDocking.h"
 #include "AgentPanels.h"
+#include "SignalColors.h"
 
 #include "AgentPanelMetrics.h"
 #include "AgentPanelWidgets.h"
@@ -237,7 +237,7 @@ namespace gladius::ui
             {
                 auto const & entry = m_activityLog[idx];
                 ImGui::PushID(static_cast<int>(idx));
-                ImGui::TextColored(entry.success ? colorInfo() : colorWarn(),
+                ImGui::TextColored(entry.success ? colorInfo() : colorError(),
                                    "%s",
                                    entry.label.c_str());
                 ImGui::SameLine();
@@ -295,7 +295,7 @@ namespace gladius::ui
             }
             if (!m_lastError.empty())
             {
-                ImGui::TextColored(colorWarn(), "Last error: %s", m_lastError.c_str());
+                ImGui::TextColored(colorError(), "Last error: %s", m_lastError.c_str());
             }
             if (!m_streamingBuffer.empty())
             {

@@ -5,10 +5,10 @@
 
 #include "AgentConversationView.h"
 
-#include "AgentPanelColors.h"
 #include "AgentPanelMetrics.h"
 #include "AgentPanelText.h"
 #include "AgentPanelWidgets.h"
+#include "SignalColors.h"
 
 #include <IconsFontAwesome5.h>
 #include <imgui.h>
@@ -46,14 +46,19 @@ namespace gladius::ui
             return ICON_FA_COMMENT_DOTS;
         }
 
+        /**
+         * @brief Colour of a turn's role chip and role line.
+         * @details Who spoke is carried by the glyph and by the emphasis of the role line, not by
+         *          colour: a speaker is not a status, and an accent-coloured agent line competed
+         *          with the warning and error lines of the footer.
+         */
         ImVec4 roleColor(AgentConversationView::TurnKind kind)
         {
             switch (kind)
             {
             case AgentConversationView::TurnKind::Agent:
-                return agentWidgets::accent();
             case AgentConversationView::TurnKind::User:
-                return colorInfo();
+                return ImGui::GetStyleColorVec4(ImGuiCol_Text);
             case AgentConversationView::TurnKind::System:
             case AgentConversationView::TurnKind::Tool:
                 return ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
@@ -319,7 +324,8 @@ namespace gladius::ui
         agentWidgets::drawRowBand(row, false, row.hovered);
 
         ImDrawList & drawList = *ImGui::GetWindowDrawList();
-        ImVec4 const color = agentWidgets::accent();
+        // A disclosure control, not a status: the hover band already says it is clickable.
+        ImVec4 color = ImGui::GetStyleColorVec4(row.hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
         ImVec2 const pos(row.origin.x + ImGui::GetFontSize() * 0.25f, row.origin.y);
         drawList.AddText(pos, ImGui::GetColorU32(color), icon);
         drawList.AddText(ImVec2(pos.x + ImGui::CalcTextSize(icon).x

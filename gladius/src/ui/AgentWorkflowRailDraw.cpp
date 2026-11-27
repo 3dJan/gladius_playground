@@ -1,6 +1,7 @@
 #include "AgentWorkflowRailDraw.h"
 
 #include "AgentPanelMetrics.h"
+#include "SignalColors.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,9 +11,6 @@ namespace gladius::ui
 {
     namespace
     {
-        constexpr ImVec4 kCompletedColor = {0.36f, 0.66f, 0.42f, 1.00f};
-        constexpr ImVec4 kAttentionColor = {0.86f, 0.62f, 0.22f, 1.00f};
-
         ImVec4 scaled(ImVec4 color, float alpha)
         {
             color.w *= alpha;
@@ -32,12 +30,12 @@ namespace gladius::ui
 
     ImVec4 railCompletedColor()
     {
-        return kCompletedColor;
+        return colorOk();
     }
 
     ImVec4 railAttentionColor()
     {
-        return kAttentionColor;
+        return colorWarn();
     }
 
     float railCircleRadius(PhaseState state)
@@ -115,10 +113,10 @@ namespace gladius::ui
             drawList.AddCircle(c, r, ImGui::GetColorU32(ImGuiCol_Border), 36, ringThickness);
             break;
         case PhaseState::Completed:
-            drawList.AddCircle(c, r, ImGui::GetColorU32(kCompletedColor), 36, 2.0f * unit);
+            drawList.AddCircle(c, r, ImGui::GetColorU32(colorOk()), 36, 2.0f * unit);
             {
                 float const s = r * 0.62f;
-                ImU32 const ink = ImGui::GetColorU32(kCompletedColor);
+                ImU32 const ink = ImGui::GetColorU32(colorOk());
                 float const inkThickness = 1.8f * unit;
                 drawList.AddLine(ImVec2(c.x - s, c.y + s * 0.02f),
                                  ImVec2(c.x - s * 0.22f, c.y + s * 0.66f), ink, inkThickness);
@@ -127,9 +125,9 @@ namespace gladius::ui
             }
             break;
         case PhaseState::Attention:
-            drawList.AddCircle(c, r, ImGui::GetColorU32(kAttentionColor), 36, 2.0f * unit);
+            drawList.AddCircle(c, r, ImGui::GetColorU32(colorWarn()), 36, 2.0f * unit);
             {
-                ImU32 const ink = ImGui::GetColorU32(kAttentionColor);
+                ImU32 const ink = ImGui::GetColorU32(colorWarn());
                 drawList.AddLine(ImVec2(c.x, c.y - r * 0.48f),
                                  ImVec2(c.x, c.y + r * 0.14f), ink, 1.8f * unit);
                 drawList.AddCircleFilled(ImVec2(c.x, c.y + r * 0.46f), 1.5f * unit, ink);

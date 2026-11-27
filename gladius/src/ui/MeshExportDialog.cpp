@@ -4,6 +4,7 @@
 #include "ColorToThicknessDialog.h"
 #include "BrowserDownload.h"
 #include "FileSystemUtils.h"
+#include "SignalColors.h"
 #if defined(GLADIUS_ENABLE_OPENCL)
 #include "io/3mf/PaletteExtractor.h"
 #include "compute/ComputeCore.h"
@@ -794,8 +795,8 @@ namespace gladius::ui
         }
         if (m_targetApplication != io::TargetApplication::None)
         {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
-                "Warning: Portability to other slicers may be reduced.");
+            ImGui::TextColored(colorWarn(),
+                               "Warning: Portability to other slicers may be reduced.");
         }
 
         // Quantization mode

@@ -5,6 +5,7 @@
 
 #include "IconsFontAwesome4.h"
 #include "wordwarp.h"
+#include "SignalColors.h"
 
 namespace gladius::ui
 {
@@ -276,7 +277,7 @@ namespace gladius::ui
         }
         if (fatalErrorCount > 0)
         {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.0f, 0.f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, colorError());
             if (ImGui::SmallButton(
                   fmt::format(ICON_FA_EXCLAMATION " Fatal Errors: {}", fatalErrorCount).c_str()))
             {
@@ -303,7 +304,7 @@ namespace gladius::ui
                 ImGui::Separator();
 
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 50.0f);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.0f, 0.f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, colorError());
                 ImGui::TextUnformatted("Fatal Errors:");
                 ImGui::PopStyleColor();
                 ImGui::Separator();
@@ -324,7 +325,7 @@ namespace gladius::ui
 
         if (errorCount > 0)
         {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, colorError());
             if (ImGui::SmallButton(
                   fmt::format(ICON_FA_EXCLAMATION_TRIANGLE " Errors: {}", errorCount).c_str()))
             {
@@ -351,7 +352,7 @@ namespace gladius::ui
                 ImGui::Separator();
 
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 50.0f);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, colorError());
                 ImGui::TextUnformatted("Errors:");
                 ImGui::PopStyleColor();
                 ImGui::Separator();
@@ -372,7 +373,7 @@ namespace gladius::ui
 
         if (warningCount > 0)
         {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, colorWarn());
             if (ImGui::SmallButton(
                   fmt::format(ICON_FA_EXCLAMATION_CIRCLE " Warnings: {}", warningCount).c_str()))
             {
@@ -399,7 +400,7 @@ namespace gladius::ui
                 ImGui::Separator();
 
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 50.0f);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, colorWarn());
                 ImGui::TextUnformatted("Warnings:");
                 ImGui::PopStyleColor();
                 ImGui::Separator();
@@ -446,7 +447,7 @@ namespace gladius::ui
             if (lastFatalErrorIter != eventsEnd)
             {
                 ImGui::Begin("Something went terribly wrong");
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.0f, 0.f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, colorError());
                 ImGui::Text(reinterpret_cast<const char *>(ICON_FA_EXCLAMATION
                                                            "\t\tA fatal error has occurred\t"));
                 ImGui::PopStyleColor();
@@ -530,19 +531,19 @@ namespace gladius::ui
                     ImGui::PopStyleColor();
                     break;
                 case events::Severity::Warning:
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, colorWarn());
                     ImGui::Text(
                       reinterpret_cast<const char *>("\tWARNING\t" ICON_FA_EXCLAMATION_CIRCLE));
                     ImGui::PopStyleColor();
                     break;
                 case events::Severity::Error:
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, colorError());
                     ImGui::Text(
                       reinterpret_cast<const char *>("\tERROR\t" ICON_FA_EXCLAMATION_TRIANGLE));
                     ImGui::PopStyleColor();
                     break;
                 case events::Severity::FatalError:
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.0f, 0.f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, colorError());
                     ImGui::Text(
                       reinterpret_cast<const char *>("\t\tFATAL ERROR:\t" ICON_FA_EXCLAMATION));
                     ImGui::PopStyleColor();
@@ -571,7 +572,7 @@ namespace gladius::ui
         if (lastFatalErrorIter != logger.cend())
         {
             ImGui::Begin("Something went terribly wrong");
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.0f, 0.f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, colorError());
             ImGui::Text(reinterpret_cast<const char *>(ICON_FA_EXCLAMATION
                                                        "\t\tA fatal error has occurred\t"));
             ImGui::PopStyleColor();
