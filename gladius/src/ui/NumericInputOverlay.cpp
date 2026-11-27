@@ -1,5 +1,6 @@
 #include "NumericInputOverlay.h"
 #include "NumericExpressionEvaluator.h"
+#include "SignalColors.h"
 
 #include <IconFontCppHeaders/IconsFontAwesome5.h>
 #include <imgui_stdlib.h>
@@ -423,13 +424,11 @@ namespace gladius::ui
 
         if (!targetAvailable)
         {
-            ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
-                               "The target value is no longer available.");
+            ImGui::TextColored(colorWarn(), "The target value is no longer available.");
         }
         if (!m_hasValidValue)
         {
-            ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f),
-                               "Enter a valid finite number.");
+            ImGui::TextColored(colorError(), "Enter a valid finite number.");
         }
 
         ImGui::Separator();
@@ -948,7 +947,7 @@ namespace gladius::ui
                         else if (!m_calculatorError.empty())
                         {
                             ImGui::PushTextWrapPos(0.f);
-                            ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f),
+                            ImGui::TextColored(colorError(),
                                                "%s",
                                                m_calculatorError.c_str());
                             ImGui::PopTextWrapPos();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SurfaceProfile.h"
+
 namespace gladius::ui
 {
     /**
@@ -44,6 +46,37 @@ namespace gladius::ui
         /// @brief Rounding of the selection band behind list rows
         constexpr float rowRounding = 0.28f;
 
+        // --- Conversation transcript ---
+        // The chips sit on the rail column (railOffset) and the turn bodies on the phase title
+        // column (railOffset + railTextGap + chevronGutter), so the transcript reads as one
+        // continuation of the rail above it instead of a second, unrelated list.
+        /// @brief Radius of the role chip left of a turn
+        constexpr float roleChipRadius = 0.56f;
+        /// @brief Space above and below the turn content inside its hover band
+        constexpr float turnPadding = 0.30f;
+        /// @brief Space between two turns of the same speaker
+        constexpr float turnSpacing = 0.45f;
+        /// @brief Extra space where the speaker changes
+        constexpr float turnBreakSpacing = 0.55f;
+        /// @brief Gap between a turn's role line and its body
+        constexpr float turnRoleLineGap = 0.16f;
+        /// @brief Opacity of muted turn bodies (system notes, tool traces)
+        constexpr float mutedBodyAlpha = 0.72f;
+
+        // --- Status chips ---
+        // A chip reports a setting, not a problem, so it is outlined quietly instead of being
+        // painted in the accent colour. Its height follows the footer's icon buttons.
+        /// @brief Space between a chip's text and its border
+        constexpr float chipPaddingX = 0.45f;
+        constexpr float chipPaddingY = 0.14f;
+        /// @brief Rounding of a chip; tighter than rowRounding so it reads as a label
+        constexpr float chipRounding = 0.24f;
+        /// @brief Opacity of a chip that reports a harmless state
+        constexpr float chipMutedAlpha = 0.78f;
+        /// @brief Opacity of the chip fill and border
+        constexpr float chipFillAlpha = 0.08f;
+        constexpr float chipBorderAlpha = 0.34f;
+
         // --- Header ---
         constexpr float headerPadding = 0.55f;
         constexpr float headerTitleLine = 1.35f;
@@ -52,5 +85,28 @@ namespace gladius::ui
         constexpr float composerMinHeight = 1.95f;
         constexpr float sendButtonSize = 1.55f;
         constexpr float compactButtonHeight = 1.25f;
+
+        // --- Panel window (viewport relative / pixels, not font relative) ---
+        /// @brief Share of the dockspace width the panel asks for when docked
+        constexpr float panelDefaultWidthRatio = 0.30f;
+        constexpr float panelMinWidthPx = 360.f;
+        constexpr float panelMaxWidthPx = 520.f;
+
+        // --- Compact (phone) layout ---
+        /// @brief Share of a full screen width the panel keeps for its content rows
+        /// @details The rest stays free so rows do not sit under the physical screen edge.
+        constexpr float panelCompactContentMaxWidthRatio = 0.92f;
+        /// @brief Smallest height of a control that has to be tappable with a finger
+        constexpr float minTouchTargetPx = 44.f;
     } // namespace agentMetrics
+
+    /**
+     * @brief Height a control has to reach to stay comfortably tappable on the current surface.
+     * @return The touch target floor in compact layouts, 0 on desktop where font-derived sizing
+     *         already fits a pointer.
+     */
+    [[nodiscard]] inline float minTouchTargetHeight()
+    {
+        return SurfaceProfileStore::instance().isCompact() ? agentMetrics::minTouchTargetPx : 0.f;
+    }
 } // namespace gladius::ui

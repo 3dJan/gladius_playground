@@ -244,11 +244,9 @@ namespace gladius::ui
         ImGui::Spacing();
 
         // Inform user that the full project is included in the export
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
         ImGui::TextWrapped(
           "Note: The exported file will contain the complete project. "
           "Only the selected function will be importable via the library.");
-        ImGui::PopStyleColor();
 
         ImGui::Spacing();
         bool const canExport = m_fileNameBuf[0] != '\0';

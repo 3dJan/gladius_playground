@@ -210,13 +210,9 @@ namespace gladius::ui
                 ImGui::PushStyleColor(ImGuiCol_Button, transparent(accentTint()));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, accentTint());
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, accentTint(0.95f));
-                ImGui::PushStyleColor(ImGuiCol_Text,
-                                      m_lastInlineFocused
-                                        ? style.Colors[ImGuiCol_SliderGrab]
-                                        : style.Colors[ImGuiCol_Text]);
                 bool const sendClicked
                   = ImGui::Button(ICON_FA_PAPER_PLANE, ImVec2(m_config.iconButtonSize, rowHeight));
-                ImGui::PopStyleColor(4);
+                ImGui::PopStyleColor(3);
                 if (ImGui::IsItemHovered())
                 {
                     ImGui::SetTooltip("%s", sendChordHelp());

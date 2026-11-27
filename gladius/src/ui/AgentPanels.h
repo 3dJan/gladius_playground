@@ -24,6 +24,7 @@
 #include "../tools/ToolRegistry.h"
 #include "../tools/TransactionManager.h"
 #include "PromptInput.h"
+#include "AgentConversationView.h"
 #include "AgentPanelHeader.h"
 #include "AgentWorkflow.h"
 #include "AgentWorkflowAnimation.h"
@@ -68,18 +69,12 @@ namespace gladius::ui
         void bind(Document * document,
                   ConfigManager * configManager,
                   std::function<void()> onDocumentModified = nullptr);
-        void setVisible(bool visible) noexcept
-        {
-            m_visible = visible;
-        }
+        void setVisible(bool visible);
         [[nodiscard]] bool isVisible() const noexcept
         {
             return m_visible;
         }
-        void toggleVisible() noexcept
-        {
-            m_visible = !m_visible;
-        }
+        void toggleVisible();
 
         /// @brief True while the agent is actively executing and mutating the document
         [[nodiscard]] bool isDocumentLocked() const noexcept
@@ -96,6 +91,8 @@ namespace gladius::ui
         /// @brief Save/load agent state associated with the given .3mf document (sidecar/session)
         void saveSessionState();
         void loadSessionState();
+        /// @brief Fills an empty design graph and transcript with the demo session when requested
+        void applyDemoSession();
         /// @brief Clears the design state for a document that was just replaced
         void onNewDocument();
         void onDocumentSaved(std::filesystem::path const & docPath);
@@ -218,7 +215,6 @@ namespace gladius::ui
         void insertClipboardOrFileImageIntoDocument();
         void renderPendingAttachments();
         void renderModelCombos(PromptInput::ToolbarLayout const & layout);
-        [[nodiscard]] static std::string humaniseToolName(std::string const & toolName);
 
         void renderProviderSettingsPanel();
         void startModelFetch(std::string const & profileId,
@@ -240,7 +236,7 @@ namespace gladius::ui
                                      std::string cacheBreakpointMode);
 #endif
 
-        bool m_visible = false;
+        bool m_visible = true;
         bool m_showSettings = false;
         bool m_showDeveloperTrace = false;
         Document * m_document = nullptr;
@@ -272,9 +268,12 @@ namespace gladius::ui
         AgentWorkflowView m_workflowView;
         AgentWorkflowAnimationState m_workflowAnimation;
         AgentPanelHeader m_header;
+        AgentConversationView m_conversationView;
         WorkflowArtifacts m_artifacts;
         std::array<bool, kWorkflowPhaseCount> m_phaseExpanded{};
         bool m_conversationExpanded = false;
+        /// @brief False keeps the transcript to its newest turns with short bodies
+        bool m_transcriptExpanded = false;
         bool m_activityLogExpanded = false;
         bool m_diagnosticsExpanded = false;
         std::size_t m_lastActivePhaseIndex = kWorkflowPhaseCount;

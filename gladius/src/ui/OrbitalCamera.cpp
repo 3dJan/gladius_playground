@@ -62,15 +62,7 @@ namespace gladius::ui
         // Panning
         if (m_mouseButton == 2)
         {
-            Position const eyeToTarget = (m_lookAt - computeEyePosition()).normalized();
-            Position const upVector = {0., 0., 1.};
-
-            Position const cameraXAxis = eyeToTarget.cross(upVector);
-            Position const cameraYAxis = eyeToTarget.cross(cameraXAxis);
-
-            m_lookAtTarget =
-              m_lookAtTarget - cameraXAxis * deltaX * 0.3f - cameraYAxis * deltaY * 0.3f;
-
+            panBy(deltaX, deltaY);
             moving = true;
         }
 
@@ -78,6 +70,17 @@ namespace gladius::ui
         m_prevMousPosY = y;
 
         return moving;
+    }
+
+    void OrbitalCamera::panBy(float deltaX, float deltaY)
+    {
+        Position const eyeToTarget = (m_lookAt - computeEyePosition()).normalized();
+        Position const upVector = {0., 0., 1.};
+
+        Position const cameraXAxis = eyeToTarget.cross(upVector);
+        Position const cameraYAxis = eyeToTarget.cross(cameraXAxis);
+
+        m_lookAtTarget = m_lookAtTarget - cameraXAxis * deltaX * 0.3f - cameraYAxis * deltaY * 0.3f;
     }
 
     void OrbitalCamera::zoom(float increment)

@@ -1,4 +1,5 @@
 #include "MeshSdfSettingsDialog.h"
+#include "SignalColors.h"
 
 #include <algorithm>
 #include <imgui.h>
@@ -102,8 +103,7 @@ namespace gladius::ui
                 auto const qualityIssue = m_meshQualityIssueProvider();
                 if (qualityIssue.hasIssue)
                 {
-                    ImGui::TextColored(ImVec4(1.0f, 0.68f, 0.18f, 1.0f),
-                                       "Mesh topology diagnostics detected");
+                    ImGui::TextColored(colorWarn(), "Mesh topology diagnostics detected");
                     ImGui::PushTextWrapPos(ImGui::GetFontSize() * 46.0f);
                     ImGui::TextUnformatted(qualityIssue.message.c_str());
                     ImGui::PopTextWrapPos();
@@ -207,8 +207,7 @@ namespace gladius::ui
                     if (issue.hasIssue)
                     {
                         ImGui::Spacing();
-                        ImGui::TextColored(ImVec4(1.0f, 0.68f, 0.18f, 1.0f),
-                                           "NanoVDB is currently degraded");
+                        ImGui::TextColored(colorWarn(), "NanoVDB is currently degraded");
                         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 46.0f);
                         ImGui::TextUnformatted(issue.message.c_str());
                         ImGui::PopTextWrapPos();

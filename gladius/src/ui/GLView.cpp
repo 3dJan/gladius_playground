@@ -341,6 +341,9 @@ namespace gladius
     #endif
         initImgUI();
 
+        // Pointer device class decides the touch layout independently of window size.
+        detectInputEnvironment();
+
         // determine hdpi scaling
         determineUiScale();
         static auto staticWindowSizeCallback = [](GLFWwindow * window, int width, int height)
@@ -559,6 +562,7 @@ namespace gladius
                 navigator.clipboard.writeText(str).catch(() => {});
             }, value.data(), static_cast<int>(value.size()));
         };
+        installWebTouchCallbacks();
         EM_ASM({
             window.__gladiusClipboardView = $0;
             if (!window.__gladiusPasteInstalled) {
@@ -857,6 +861,9 @@ namespace gladius
 
 // ImGuiTestEngineHook_PreNewFrame is handled natively when IMGUI_ENABLE_TEST_ENGINE is defined.
 
+    // DisplaySize is final at this point on both backends, so the surface profile is per frame.
+    updateSurfaceProfile();
+
         ImGui::NewFrame();
 
 
@@ -911,6 +918,7 @@ namespace gladius
         ImGui::GetStyle() = m_originalStyle;
         ImGuiStyle & style = ImGui::GetStyle();
         style.ScaleAllSizes(m_uiScale);
+        applyCompactStyle(style);
 
         auto const viewCallbacksStart =
           m_uiFpsBenchmark ? ui::UiFpsBenchmark::Clock::now()
@@ -1076,6 +1084,154 @@ namespace gladius
         if (m_userScale > 5.0f)
             m_userScale = 5.0f;
         m_uiScale = m_baseScale * m_userScale;
+    }
+
+    void GLView::updateSurfaceProfile()
+    {
+        ui::SurfaceDescription surface;
+        surface.size = ImGui::GetIO().DisplaySize;
+        surface.coarsePointer = m_coarsePointer;
+
+        m_surfaceProfile = ui::resolveSurfaceProfile(surface, m_layoutModeOverride);
+        m_touchScale = ui::touchScaleFor(m_surfaceProfile, surface.size.x);
+        ui::SurfaceProfileStore::instance().publish(m_surfaceProfile, m_touchScale);
+    }
+
+    void GLView::detectInputEnvironment()
+    {
+#ifdef __EMSCRIPTEN__
+        // The shell publishes the input capability before the runtime starts; matchMedia is the
+        // fallback for a page that was built without the shell changes.
+        m_coarsePointer = EM_ASM_INT({
+            if (window.gladiusInputEnvironment)
+            {
+                return window.gladiusInputEnvironment.coarsePointer ? 1 : 0;
+            }
+            if (!window.matchMedia)
+            {
+                return 0;
+            }
+            return window.matchMedia('(pointer: coarse)').matches ? 1 : 0;
+        }) != 0;
+
+        // A query parameter lets a small desktop browser area be inspected in either layout.
+        char layoutName[16] = {0};
+        EM_ASM({
+            var match = /[?&]layout=([a-z]+)/.exec(window.location.search);
+            if (!match)
+            {
+                return;
+            }
+            var ptr = $0;
+            var name = match[1].substring(0, 15);
+            for (var i = 0; i < name.length; ++i)
+            {
+                HEAPU8[ptr + i] = name.charCodeAt(i);
+            }
+            HEAPU8[ptr + name.length] = 0;
+        },
+           layoutName);
+        m_layoutModeOverride = ui::layoutModeOverrideFromString(layoutName);
+        m_layoutOverrideFromEnvironment = m_layoutModeOverride != ui::LayoutModeOverride::Auto;
+#else
+        char const * const value = std::getenv("GLADIUS_LAYOUT");
+        if (value != nullptr && *value != '\0')
+        {
+            m_layoutModeOverride = ui::layoutModeOverrideFromString(value);
+            m_layoutOverrideFromEnvironment = m_layoutModeOverride != ui::LayoutModeOverride::Auto;
+        }
+#endif
+    }
+
+    void GLView::setStoredLayoutModeOverride(ui::LayoutModeOverride mode)
+    {
+        if (m_layoutOverrideFromEnvironment)
+        {
+            return;
+        }
+        setLayoutModeOverride(mode);
+    }
+
+    void GLView::setLayoutModeOverride(ui::LayoutModeOverride mode)
+    {
+        m_layoutModeOverride = mode;
+        updateSurfaceProfile();
+    }
+
+#ifdef __EMSCRIPTEN__
+    void GLView::installWebTouchCallbacks()
+    {
+        // GLFW maps only the first touch onto mouse input, which gives single finger orbit for
+        // free. Pinch and two-finger pan need the raw touch stream.
+        emscripten_set_touchstart_callback("#gladius-canvas", this, true, &GLView::webTouchCallback);
+        emscripten_set_touchmove_callback("#gladius-canvas", this, true, &GLView::webTouchCallback);
+        emscripten_set_touchend_callback("#gladius-canvas", this, true, &GLView::webTouchCallback);
+        emscripten_set_touchcancel_callback("#gladius-canvas", this, true,
+                                            &GLView::webTouchCallback);
+    }
+
+    EM_BOOL GLView::webTouchCallback(int eventType,
+                                     const EmscriptenTouchEvent * event,
+                                     void * userData)
+    {
+        auto * view = static_cast<GLView *>(userData);
+        if (view == nullptr || event == nullptr)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < event->numTouches; ++index)
+        {
+            EmscriptenTouchPoint const & touch = event->touches[index];
+            if (!touch.isChanged)
+            {
+                continue;
+            }
+
+            switch (eventType)
+            {
+              case EMSCRIPTEN_EVENT_TOUCHSTART:
+                view->m_touchGestures.beginTouch(touch.identifier,
+                                                 static_cast<float>(touch.clientX),
+                                                 static_cast<float>(touch.clientY));
+                break;
+              case EMSCRIPTEN_EVENT_TOUCHMOVE:
+                view->m_touchGestures.moveTouch(touch.identifier,
+                                                static_cast<float>(touch.clientX),
+                                                static_cast<float>(touch.clientY));
+                break;
+              case EMSCRIPTEN_EVENT_TOUCHEND:
+              case EMSCRIPTEN_EVENT_TOUCHCANCEL:
+                view->m_touchGestures.endTouch(touch.identifier);
+                break;
+              default:
+                break;
+            }
+        }
+        // Consuming the move is what stops the phone from scrolling or pinch-zooming the page
+        // underneath the canvas. A single tap still has to reach GLFW for orbit and UI input.
+        return eventType == EMSCRIPTEN_EVENT_TOUCHMOVE;
+    }
+#endif
+
+    void GLView::applyCompactStyle(ImGuiStyle & style)
+    {
+        float const scale = m_touchScale;
+        if (m_surfaceProfile != ui::SurfaceProfile::Compact || scale <= 1.0f)
+        {
+            return;
+        }
+
+        // Fingers need clear gaps between hit areas, and the scrollbar has to be grabbable. Only
+        // spacing grows; glyph size stays where the user put it so text does not overflow.
+        style.FramePadding.x *= scale;
+        style.FramePadding.y *= scale;
+        style.ItemSpacing.x *= scale;
+        style.ItemSpacing.y *= scale;
+        // The scrollbar is the only scroll affordance a finger can grab on the web build (there is
+        // no wheel and ImGui 1.91 has no touch flick), so it gets a touch-sized floor.
+        style.ScrollbarSize =
+          ui::scrollbarSizeFor(style.ScrollbarSize, m_surfaceProfile, scale);
     }
 
     void GLView::handleDropCallback(GLFWwindow * window, int count, const char ** paths)
@@ -1809,3 +1965,4 @@ extern "C" EMSCRIPTEN_KEEPALIVE void gladiusOnWebClipboardPaste(void * userData,
     view->setWebClipboardText(text);
 }
 #endif
+

@@ -7,6 +7,7 @@
 #include "ImageStackResource.h"
 #include "ModelEditor.h"
 #include "ResourceManager.h"
+#include "SignalColors.h"
 #include "nodes/DerivedNodes.h"
 #include "nodes/Model.h"
 
@@ -499,8 +500,7 @@ namespace gladius::ui
         auto * sampler = findImageSampler();
         if (!sampler)
         {
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
-                               "No ImageSampler found in this function");
+            ImGui::TextColored(colorWarn(), "No ImageSampler found in this function");
             return false;
         }
 

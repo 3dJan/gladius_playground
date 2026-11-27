@@ -3,6 +3,7 @@
 #include "FileChooser.h"
 #include "ResourceManager.h"
 #include "Widgets.h"
+#include "SignalColors.h"
 
 #include "imgui.h"
 #include <cstring>
@@ -158,8 +159,7 @@ namespace gladius::ui
                         {
                             ImGui::BeginTooltip();
                             ImGui::TextColored(
-                              ImVec4(1.0f, 0.0f, 0.0f, 1.0f),
-                              "Cannot delete, the resource is referenced by another item:");
+                              colorWarn(), "Cannot delete, the resource is referenced by another item:");
                             for (auto const & depRes : safeResult.dependentResources)
                             {
                                 ImGui::BulletText("Resource ID: %u", depRes->GetModelResourceID());

@@ -2,6 +2,8 @@
 #include "../design/ManufacturingValidator.h"
 
 #include "ClipboardImageHelper.h"
+#include "AgentDemoState.h"
+#include "SignalColors.h"
 #include "../ConfigManager.h"
 #include "../Document.h"
 #include "../ExpressionParser.h"
@@ -318,6 +320,21 @@ namespace gladius::ui
 #endif
     } // namespace
 
+    void AgentPanels::setVisible(bool visible)
+    {
+        m_visible = visible;
+        if (m_configManager != nullptr)
+        {
+            m_configManager->setValue<bool>("Agent", "panelVisible", m_visible);
+            m_configManager->save();
+        }
+    }
+
+    void AgentPanels::toggleVisible()
+    {
+        setVisible(!m_visible);
+    }
+
     void AgentPanels::bind(Document * document,
                            ConfigManager * configManager,
                            std::function<void()> onDocumentModified)
@@ -347,6 +364,7 @@ namespace gladius::ui
                          { return getOrCreatePreviewTexture(key, pngBytes, outW, outH); });
         loadSettings();
         loadSessionState();
+        applyDemoSession();
     }
 
     bool AgentPanels::attachImageFile(std::filesystem::path const & path)
@@ -426,6 +444,7 @@ namespace gladius::ui
         m_awaitingUserReply = false;
         m_replyExpanded = false;
         m_streamingBuffer.clear();
+        applyDemoSession();
     }
 
     void AgentPanels::loadSessionState()
@@ -478,6 +497,16 @@ namespace gladius::ui
         catch (...)
         {
         }
+    }
+
+    void AgentPanels::applyDemoSession()
+    {
+        if (!agentDemo::requested())
+        {
+            return;
+        }
+        agentDemo::populate(m_graph, m_conversation);
+        m_conversationExpanded = true;
     }
 
     void AgentPanels::onDocumentSaved(std::filesystem::path const & docPath)
@@ -576,6 +605,7 @@ namespace gladius::ui
         {
             return;
         }
+        m_visible = m_configManager->getValue<bool>("Agent", "panelVisible", true);
         m_providerIndex = m_configManager->getValue<int>("Agent", "providerIndex", 0);
         int const autonomyInt = std::clamp(
           m_configManager->getValue<int>(
@@ -1604,7 +1634,7 @@ namespace gladius::ui
                                 m_credentialStore.backendName().c_str());
             if (!m_credentialWarning.empty())
             {
-                ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f), "%s", m_credentialWarning.c_str());
+                ImGui::TextColored(colorWarn(), "%s", m_credentialWarning.c_str());
             }
 
             ImGui::BeginDisabled(m_modelFetchRunning.load() || prof.endpoint.empty());

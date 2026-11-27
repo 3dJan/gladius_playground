@@ -116,6 +116,17 @@ namespace gladius::ui
                                float radius,
                                unsigned int textureId);
 
+        /**
+         * @brief Draws the quiet outlined pill that frames an inline status label.
+         * @details Chips report a setting, never a problem, so they are outlined rather than painted
+         *          in the accent colour, and the pill brightens while the mouse is over it.
+         */
+        void drawChip(ImDrawList & drawList,
+                      ImVec2 min,
+                      ImVec2 max,
+                      ImVec4 color,
+                      bool hovered = false);
+
         /// @brief Filled circle chip with a centred capital letter (A, B, C ...)
         void drawLetterChip(ImDrawList & drawList,
                             ImVec2 center,

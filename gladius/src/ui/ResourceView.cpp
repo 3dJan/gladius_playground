@@ -9,6 +9,7 @@
 #include "MeshResourceBase.h"
 #include "ModelEditor.h"
 #include "ResourceManager.h"
+#include "SignalColors.h"
 #include "SpatialMeshResource.h"
 #include "Widgets.h"
 
@@ -376,8 +377,7 @@ namespace gladius::ui
                         {
                             ImGui::BeginTooltip();
                             ImGui::TextColored(
-                              ImVec4(1.0f, 0.0f, 0.0f, 1.0f),
-                              "Cannot delete, the resource is referenced by another item:");
+                              colorWarn(), "Cannot delete, the resource is referenced by another item:");
                             for (auto const & depRes : safeResult.dependentResources)
                             {
                                 ImGui::BulletText("Resource ID: %u", depRes->GetModelResourceID());
@@ -752,8 +752,7 @@ namespace gladius::ui
                         {
                             ImGui::BeginTooltip();
                             ImGui::TextColored(
-                              ImVec4(1.0f, 0.0f, 0.0f, 1.0f),
-                              "Cannot delete, the resource is referenced by another item:");
+                              colorWarn(), "Cannot delete, the resource is referenced by another item:");
                             for (auto const & depRes : safeResult.dependentResources)
                             {
                                 ImGui::BulletText("Resource ID: %u", depRes->GetModelResourceID());

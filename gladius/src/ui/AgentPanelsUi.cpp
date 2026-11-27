@@ -1,8 +1,9 @@
 // UI half of the Design Agent: the single consolidated panel, its persistent footer, and the
 // collapsible diagnostics. State, run control, and persistence stay in AgentPanels.cpp.
 
-#include "AgentPanelColors.h"
+#include "AgentPanelDocking.h"
 #include "AgentPanels.h"
+#include "SignalColors.h"
 
 #include "AgentPanelMetrics.h"
 #include "AgentPanelWidgets.h"
@@ -128,16 +129,26 @@ namespace gladius::ui
 
     void AgentPanels::renderWorkflowPanel()
     {
-        ImGuiViewport const * vp = ImGui::GetMainViewport();
-        float const panelWidth = std::clamp(vp->WorkSize.x * 0.30f, 360.f, 520.f);
-        ImGui::SetNextWindowPos(
-          ImVec2(vp->WorkPos.x + vp->WorkSize.x - panelWidth, vp->WorkPos.y),
-          ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(panelWidth, vp->WorkSize.y), ImGuiCond_FirstUseEver);
-
         // The panel draws its own header, so ImGui's title bar is replaced rather than styled.
-        if (!ImGui::Begin("Design Agent", &m_visible, ImGuiWindowFlags_NoTitleBar))
+        // No position or size is requested: while docked (the default) the dockspace owns both, and a
+        // SetNextWindowPos would undock the panel every frame.
+        // Full screen on a phone means rows would otherwise run into the physical screen edge.
+        bool const compact = SurfaceProfileStore::instance().isCompact();
+        if (compact)
         {
+            float const edgeMargin =
+              ImGui::GetIO().DisplaySize.x * (1.f - agentMetrics::panelCompactContentMaxWidthRatio) *
+              0.5f;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                                ImVec2(edgeMargin, ImGui::GetStyle().WindowPadding.y));
+        }
+
+        if (!ImGui::Begin(kAgentPanelWindowName, &m_visible, ImGuiWindowFlags_NoTitleBar))
+        {
+            if (compact)
+            {
+                ImGui::PopStyleVar();
+            }
             ImGui::End();
             return;
         }
@@ -203,26 +214,17 @@ namespace gladius::ui
 
         renderFooter();
         ImGui::End();
+        if (compact)
+        {
+            ImGui::PopStyleVar();
+        }
     }
 
     void AgentPanels::renderConversationSection()
     {
-        // The design state above is the primary record; the transcript stays short and readable.
-        bool const anyText = std::any_of(
-          m_conversation.messages().begin(),
-          m_conversation.messages().end(),
-          [](agent::Message const & msg) {
-              return std::any_of(msg.parts.begin(),
-                                 msg.parts.end(),
-                                 [](agent::Content const & part) {
-                                     return std::holds_alternative<agent::TextContent>(part);
-                                 });
-          });
-        if (!anyText)
-        {
-            return;
-        }
         // Flat toggle row instead of a CollapsingHeader: same visual family as the section rows.
+        // The row is always there, even with an empty transcript, so the section can be discovered
+        // before the first turn exists.
         if (!agentWidgets::toggleRow("##conversationSection",
                                      ICON_FA_COMMENTS,
                                      "Conversation",
@@ -230,27 +232,14 @@ namespace gladius::ui
         {
             return;
         }
-        for (auto const & msg : m_conversation.messages())
+        std::vector<AgentConversationView::Turn> const turns
+          = AgentConversationView::buildTurns(m_conversation, m_showDeveloperTrace);
+        if (turns.empty())
         {
-            char const * role = msg.role == agent::MessageRole::Assistant
-                                  ? "Agent"
-                                  : (msg.role == agent::MessageRole::Tool ? "Tool" : "You");
-            if (msg.role == agent::MessageRole::Tool && !m_showDeveloperTrace)
-            {
-                continue;
-            }
-            for (auto const & part : msg.parts)
-            {
-                if (auto const * text = std::get_if<agent::TextContent>(&part))
-                {
-                    ImGui::TextWrapped("[%s] %s", role, text->text.c_str());
-                }
-                else if (std::holds_alternative<agent::ImageContent>(part))
-                {
-                    ImGui::TextDisabled("[image attached]");
-                }
-            }
+            m_conversationView.renderEmptyHint();
+            return;
         }
+        m_conversationView.render(turns, m_transcriptExpanded);
     }
 
     void AgentPanels::renderDiagnosticsSection()
@@ -267,7 +256,7 @@ namespace gladius::ui
             {
                 auto const & entry = m_activityLog[idx];
                 ImGui::PushID(static_cast<int>(idx));
-                ImGui::TextColored(entry.success ? colorInfo() : colorWarn(),
+                ImGui::TextColored(entry.success ? colorInfo() : colorError(),
                                    "%s",
                                    entry.label.c_str());
                 ImGui::SameLine();
@@ -325,7 +314,7 @@ namespace gladius::ui
             }
             if (!m_lastError.empty())
             {
-                ImGui::TextColored(colorWarn(), "Last error: %s", m_lastError.c_str());
+                ImGui::TextColored(colorError(), "Last error: %s", m_lastError.c_str());
             }
             if (!m_streamingBuffer.empty())
             {
@@ -391,25 +380,5 @@ namespace gladius::ui
             trace += "[Error] " + m_lastError + "\n";
         }
         return trace;
-    }
-
-
-    std::string AgentPanels::humaniseToolName(std::string const & toolName)
-    {
-        // Tool ids are snake_case; the status line should read like an operation, not an identifier.
-        std::string out;
-        bool atWordStart = true;
-        for (char c : toolName)
-        {
-            if (c == '_')
-            {
-                atWordStart = true;
-                out += ' ';
-                continue;
-            }
-            out += atWordStart ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : c;
-            atWordStart = false;
-        }
-        return out;
     }
 } // namespace gladius::ui

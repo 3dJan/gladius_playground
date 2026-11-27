@@ -1081,12 +1081,25 @@ namespace gladius::ui
             return config;
         }
 
+        // A phone GPU cannot keep up with the realtime marcher, so an unset mode stays off on a
+        // compact surface; auto remains the desktop default.
+        std::string const unsetDefault = m_compactSurface ? "off" : "auto";
         auto const mode = m_configManager->getValue<std::string>(
-          "renderWindow", "realtimeRaymarchMode", "auto");
+          "renderWindow", "realtimeRaymarchMode", unsetDefault);
         config.mode = async_rendering::realtimeRaymarchModeFromString(mode);
         config.targetFrameTimeMs =
           m_configManager->getValue<float>("renderWindow", "realtimeRaymarchTargetMs", 25.0f);
         return config;
+    }
+
+    void RenderWindow::setCompactSurface(bool compact)
+    {
+        if (compact == m_compactSurface)
+        {
+            return;
+        }
+        m_compactSurface = compact;
+        m_renderUpdateCoordinator.configureRealtime(loadRealtimeRaymarchConfig());
     }
 
     void RenderWindow::saveRealtimeRaymarchMode(

@@ -3,6 +3,7 @@
 #include "AgentPanelMetrics.h"
 #include "AgentPanelWidgets.h"
 #include "AgentWorkflowAnimation.h"
+#include "SignalColors.h"
 
 #include <IconsFontAwesome5.h>
 
@@ -19,9 +20,6 @@ namespace gladius::ui
 {
     namespace
     {
-        constexpr ImVec4 kMeasuredColor = {0.40f, 0.78f, 0.46f, 1.00f};
-        constexpr ImVec4 kWarningColor = {1.00f, 0.72f, 0.32f, 1.00f};
-
         /// @brief ImGui has no ImVec4+alpha overload of GetColorU32
         ImU32 tinted(ImVec4 color, float alpha)
         {
@@ -154,8 +152,9 @@ namespace gladius::ui
           = ImGui::InvisibleButton("##class", ImVec2(columns.classWidth, ImGui::GetTextLineHeight()))
           != false;
         char const * label = mandatory ? "Required" : "Optional";
-        ImVec4 color = mandatory ? agentWidgets::accent()
-                                 : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+        // A requirement class is a property of the row, not a problem: emphasis carries the
+        // difference, colour would make every constraint look like a failure.
+        ImVec4 color = ImGui::GetStyleColorVec4(mandatory ? ImGuiCol_Text : ImGuiCol_TextDisabled);
         // The rect of the submitted button is in screen coordinates; the measured columns are
         // window-local, so the glyph position has to be derived from the rect, not from the column.
         ImVec2 const rectMin = ImGui::GetItemRectMin();
@@ -461,23 +460,23 @@ namespace gladius::ui
         case design::DesignStatus::Rejected:
             drawList.AddCircle(statusCenter,
                                lineHeight * 0.42f,
-                               ImGui::GetColorU32(kWarningColor),
+                               ImGui::GetColorU32(colorWarn()),
                                24,
                                1.4f);
             statusText = "Rejected";
-            statusColor = kWarningColor;
+            statusColor = colorWarn();
             break;
         case design::DesignStatus::Active:
         case design::DesignStatus::Frozen:
             drawList.AddCircleFilled(statusCenter,
                                      lineHeight * 0.42f,
-                                     tinted(kMeasuredColor, 0.16f),
+                                     tinted(colorOk(), 0.16f),
                                      24);
             drawList.AddText(ImVec2(statusCenter.x - lineHeight * 0.24f, statusY),
-                             ImGui::GetColorU32(kMeasuredColor),
+                             ImGui::GetColorU32(colorOk()),
                              ICON_FA_CHECK);
             statusText = "Preview ready";
-            statusColor = kMeasuredColor;
+            statusColor = colorOk();
             break;
         case design::DesignStatus::Proposed:
             drawList.AddCircle(statusCenter,
@@ -1075,14 +1074,14 @@ namespace gladius::ui
             {
             case design::TodoStatus::Done:
                 marker = "✓";
-                todoColor = kMeasuredColor;
+                todoColor = colorOk();
                 break;
             case design::TodoStatus::InProgress:
                 marker = "◉";
                 break;
             case design::TodoStatus::Blocked:
                 marker = "!";
-                todoColor = kWarningColor;
+                todoColor = colorWarn();
                 break;
             case design::TodoStatus::Pending:
                 break;
@@ -1121,11 +1120,11 @@ namespace gladius::ui
             }
             for (auto const & pass : active->evaluation.deterministicPassed)
             {
-                ImGui::TextColored(kMeasuredColor, "✓ %s", pass.c_str());
+                ImGui::TextColored(colorOk(), "✓ %s", pass.c_str());
             }
             for (auto const & warn : active->evaluation.deterministicWarnings)
             {
-                ImGui::TextColored(kWarningColor, "! %s", warn.c_str());
+                ImGui::TextColored(colorWarn(), "! %s", warn.c_str());
             }
         }
 

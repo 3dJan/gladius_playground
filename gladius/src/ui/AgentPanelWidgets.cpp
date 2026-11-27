@@ -209,9 +209,11 @@ namespace gladius::ui
         {
             float const fontSize = ImGui::GetFontSize();
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + fontSize * 0.10f);
+            // The whole row is the hit area, so it has to stay finger sized on a compact surface.
+            float const rowHeight
+              = std::max(ImGui::GetTextLineHeight(), minTouchTargetHeight());
             bool const clicked
-              = ImGui::InvisibleButton(id, ImVec2(ImGui::GetContentRegionAvail().x,
-                                                  ImGui::GetTextLineHeight()));
+              = ImGui::InvisibleButton(id, ImVec2(ImGui::GetContentRegionAvail().x, rowHeight));
             if (clicked)
             {
                 open = !open;
@@ -357,6 +359,25 @@ namespace gladius::ui
             drawList.AddText(ImVec2(center.x - markSize.x * 0.5f, center.y - markSize.y * 0.5f),
                              ImGui::GetColorU32(ImGuiCol_TextDisabled),
                              mark);
+        }
+
+        void drawChip(ImDrawList & drawList, ImVec2 min, ImVec2 max, ImVec4 color, bool hovered)
+        {
+            using namespace agentMetrics;
+            float const fontSize = ImGui::GetFontSize();
+            // A chip is a label with a border, not a status flag: the colour only tints the frame,
+            // so a mode readout never competes with the warning lines around it.
+            float const boost = hovered ? 1.8f : 1.f;
+            drawList.AddRectFilled(min,
+                                   max,
+                                   tinted(color, std::min(1.f, chipFillAlpha * boost)),
+                                   fontSize * chipRounding);
+            drawList.AddRect(min,
+                             max,
+                             tinted(color, std::min(1.f, chipBorderAlpha * boost)),
+                             fontSize * chipRounding,
+                             0,
+                             1.f);
         }
 
         void drawLetterChip(ImDrawList & drawList,

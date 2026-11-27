@@ -2,6 +2,7 @@
 #include "../ExpressionParser.h"
 #include "../ExpressionToGraphConverter.h"
 #include "../FunctionArgument.h"
+#include "SignalColors.h"
 
 #include "imgui.h"
 #include <algorithm>
@@ -261,7 +262,7 @@ namespace gladius::ui
             ImGui::SameLine();
             if (!ArgumentUtils::isValidArgumentName(newArgName))
             {
-                ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "Invalid name");
+                ImGui::TextColored(colorError(), "Invalid name");
                 if (ImGui::IsItemHovered())
                 {
                     ImGui::SetTooltip("Argument names must be valid identifiers\n(letters, "
@@ -270,7 +271,7 @@ namespace gladius::ui
             }
             else
             {
-                ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.4f, 1.0f), "Already exists");
+                ImGui::TextColored(colorError(), "Already exists");
                 if (ImGui::IsItemHovered())
                 {
                     ImGui::SetTooltip("An argument with this name already exists.\nArgument names "
@@ -1467,7 +1468,7 @@ namespace gladius::ui
         }
         else
         {
-            ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "[ERROR] Expression has errors");
+            ImGui::TextColored(colorError(), "[ERROR] Expression has errors");
 
             std::string error = m_parser->getLastError();
             if (!error.empty())

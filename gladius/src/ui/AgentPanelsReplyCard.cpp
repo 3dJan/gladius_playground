@@ -2,10 +2,10 @@
 // ends without a tool call ended because the model wants something from the user, and that answer
 // used to be reachable only through the collapsed conversation log.
 
-#include "AgentPanelColors.h"
 #include "AgentPanelMetrics.h"
 #include "AgentPanelWidgets.h"
 #include "AgentPanels.h"
+#include "SignalColors.h"
 
 #include <IconsFontAwesome5.h>
 #include <imgui.h>
