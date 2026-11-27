@@ -67,6 +67,7 @@ namespace gladius::agent::bench
                 {"toolFailures", toolFailures},
                 {"unknownToolCalls", unknownToolCalls},
                 {"truncatedTurns", truncatedTurns},
+                {"emptyTurns", emptyTurns},
                 {"providerFailures", providerFailures},
                 {"viewportCaptures", viewportCaptures},
                 {"librarySearches", librarySearches},
@@ -189,6 +190,7 @@ namespace gladius::agent::bench
         m_metrics.finalMessage = result.finalMessage;
         m_metrics.providerFailures = providerFailures;
         m_metrics.truncatedTurns = result.truncatedTurns;
+        m_metrics.emptyTurns = result.emptyTurns;
         m_metrics.wallMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - m_startTime)
                              .count();

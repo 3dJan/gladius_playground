@@ -36,6 +36,8 @@ namespace gladius::agent::bench
         std::size_t providerFailures = 0;
         /// @brief Model turns cut off at the provider output limit
         std::size_t truncatedTurns = 0;
+        /// @brief Model turns that came back with neither text nor tool calls
+        std::size_t emptyTurns = 0;
         std::size_t viewportCaptures = 0;
         std::size_t librarySearches = 0;
         std::size_t libraryImports = 0;
