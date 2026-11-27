@@ -201,6 +201,7 @@ namespace gladius::agent::bench
           envOr("GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH", "1") != "0";
         config.maxViewportReviews = std::max(0, envInt("GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS", 2));
         config.decisionScript = envList("GLADIUS_AGENT_BENCH_DECISIONS");
+        config.topology = envOr("GLADIUS_AGENT_BENCH_TOPOLOGY", std::string{"single"});
         return config;
     }
 
@@ -366,6 +367,7 @@ namespace gladius::agent::bench
                                 {"maxToolCalls", m_config.maxToolCalls},
                                 {"renderSize", m_config.renderWidth},
                                 {"toolSurface", m_config.toolSurface},
+                                {"topology", m_config.topology},
                                 {"role", agentRoleName(m_role)},
                                 {"scopeNodeId", m_config.scopeNodeId},
                                 {"autoCompleteDesignGraph", m_config.autoCompleteDesignGraph},

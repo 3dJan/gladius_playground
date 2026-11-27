@@ -45,6 +45,16 @@ namespace gladius::agent::bench
         std::size_t userQuestionsAnswered = 0;
         /// @brief How each question was resolved, oldest first; empty when nothing was asked
         std::vector<agent::ScriptedDecision> decisions;
+        std::size_t subAgentRuns = 0;
+        std::size_t redesigns = 0;
+        std::map<std::string, std::size_t> perRoleTurns;
+        std::map<std::string, TokenUsage> perRoleUsage;
+        std::size_t checklistEntriesTotal = 0;
+        std::size_t checkedWithEvidence = 0;
+        std::size_t interfacesVerified = 0;
+        std::size_t interfaceMismatches = 0;
+        std::size_t flatNodeCount = 0;
+        bool domainClipped = false;
         std::size_t librarySearches = 0;
         std::size_t libraryImports = 0;
         std::size_t libraryExports = 0;

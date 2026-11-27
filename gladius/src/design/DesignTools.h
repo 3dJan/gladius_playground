@@ -66,6 +66,15 @@ namespace gladius::design
     ///          orchestrator, and a definition the agent cannot legitimately use is pure prompt cost.
     [[nodiscard]] std::span<char const * const> toolSurfaceAllowlist(DesignToolSurface surface);
 
+    /// @brief Self-report submitted by a component designer at the end of its scoped run
+    struct ComponentReport
+    {
+        std::string nodeId;
+        std::vector<std::string> satisfied;
+        std::vector<std::string> unsatisfied;
+        nlohmann::json evidence = nlohmann::json::object();
+    };
+
     /// @brief Shared context for design-space, transaction, checkpoint, and evaluation tools
     struct DesignToolContext
     {
@@ -101,6 +110,8 @@ namespace gladius::design
         agent::AskUserCallback askUser;
         /// @brief Questions asked so far in this run; the host resets this per run
         std::size_t userQuestionsAsked = 0;
+        /// @brief Component self-reports keyed by `nodeId` (missing report ⇒ work incomplete)
+        std::unordered_map<std::string, ComponentReport> componentReports;
     };
 
     /// @brief Register the canonical design-space, lifecycle, evaluation, and viewport tools

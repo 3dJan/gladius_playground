@@ -70,6 +70,18 @@ namespace gladius::agent::bench
                                     {"assumed", decision.assumed},
                                     {"refused", decision.refused}});
         }
+        nlohmann::json roleTurns = nlohmann::json::object();
+        for (auto const & [role, turns] : perRoleTurns)
+        {
+            roleTurns[role] = turns;
+        }
+        nlohmann::json roleTokens = nlohmann::json::object();
+        for (auto const & [role, roleUsage] : perRoleUsage)
+        {
+            roleTokens[role] = {{"inputTokens", roleUsage.inputTokens},
+                                {"outputTokens", roleUsage.outputTokens},
+                                {"totalPromptTokens", roleUsage.totalPromptTokens()}};
+        }
         return {{"taskId", taskId},
                 {"wallMs", wallMs},
                 {"modelTurns", modelTurns},
@@ -83,6 +95,16 @@ namespace gladius::agent::bench
                 {"userQuestionsAsked", userQuestionsAsked},
                 {"userQuestionsAnswered", userQuestionsAnswered},
                 {"decisions", std::move(decisionList)},
+                {"subAgentRuns", subAgentRuns},
+                {"redesigns", redesigns},
+                {"perRoleTurns", std::move(roleTurns)},
+                {"perRoleUsage", std::move(roleTokens)},
+                {"checklistEntriesTotal", checklistEntriesTotal},
+                {"checkedWithEvidence", checkedWithEvidence},
+                {"interfacesVerified", interfacesVerified},
+                {"interfaceMismatches", interfaceMismatches},
+                {"flatNodeCount", flatNodeCount},
+                {"domainClipped", domainClipped},
                 {"librarySearches", librarySearches},
                 {"libraryImports", libraryImports},
                 {"libraryExports", libraryExports},

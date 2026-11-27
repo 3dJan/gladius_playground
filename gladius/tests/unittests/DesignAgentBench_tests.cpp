@@ -28,6 +28,13 @@ namespace gladius::agent::bench::tests
                     return task;
                 }
             }
+            for (auto const & task : multiComponentBenchTasks())
+            {
+                if (task.id == id)
+                {
+                    return task;
+                }
+            }
             return {};
         }
 
@@ -179,6 +186,20 @@ namespace gladius::agent::bench::tests
 
         BenchRunRecord record;
         runTask("lego_brick_3x4", record);
+        publishRecord(record);
+        expectRunWasMeasured(record);
+    }
+
+    TEST(DesignAgentBench, WheelAssembly_ProducesMeasuredModel)
+    {
+        std::string skipReason;
+        if (!benchmarkAvailable(skipReason))
+        {
+            GTEST_SKIP() << skipReason;
+        }
+
+        BenchRunRecord record;
+        runTask("wheel_assembly", record);
         publishRecord(record);
         expectRunWasMeasured(record);
     }

@@ -96,6 +96,8 @@ namespace gladius::design
         [[nodiscard]] DesignNode const * findNode(std::string const & nodeId) const;
         /// @brief Node whose children contain `nodeId`, nullptr when the node is a root
         [[nodiscard]] DesignNode const * findParentNode(std::string const & nodeId) const;
+        /// @brief Nesting depth of `nodeId` (0 for root or unknown nodes)
+        [[nodiscard]] std::size_t nodeDepth(std::string const & nodeId) const;
         [[nodiscard]] DesignVariant const * findVariant(std::string const & variantId) const;
         [[nodiscard]] Configuration const * findConfiguration(std::string const & configId) const;
 

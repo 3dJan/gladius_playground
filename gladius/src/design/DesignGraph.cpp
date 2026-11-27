@@ -325,6 +325,18 @@ namespace gladius::design
         return it != m_nodes.end() ? &it->second : nullptr;
     }
 
+    std::size_t DesignGraph::nodeDepth(std::string const & nodeId) const
+    {
+        std::size_t depth = 0;
+        DesignNode const * current = findParentNode(nodeId);
+        while (current != nullptr && depth < m_nodes.size())
+        {
+            ++depth;
+            current = findParentNode(current->id);
+        }
+        return depth;
+    }
+
     DesignVariant const * DesignGraph::findVariant(std::string const & variantId) const
     {
         auto it = m_variants.find(variantId);

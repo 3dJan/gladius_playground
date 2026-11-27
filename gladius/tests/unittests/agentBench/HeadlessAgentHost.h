@@ -85,6 +85,8 @@ namespace gladius::agent::bench
         /// @details An image costs a fixed share of every following turn, so the budget matters more
         ///          than the image size.
         int maxViewportReviews = 0;
+        /// @brief Execution topology: "single" (one AgentLoop) or "hierarchical" (DesignOrchestrator)
+        std::string topology = "single";
         /// @brief Answers to `ask_user` questions, consumed in question order
         /// @details A headless run has no human, so decisions are scripted: an option index or option
         ///          text per question. Once the script is exhausted the recommended option is assumed,

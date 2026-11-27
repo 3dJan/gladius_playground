@@ -38,6 +38,8 @@ namespace gladius::agent::bench
         ///        1.0, a solid sphere about 0.52, a hollow shell or open lattice clearly less.
         ///        A range with max 0 disables the check.
         Range fillFraction{};
+        /// @brief Maximum allowed flattened graph node count (0 disables the check)
+        std::size_t maxFlatNodes = 0;
     };
 
     /// @brief Declarative definition of one design-agent benchmark task
@@ -107,6 +109,29 @@ namespace gladius::agent::bench
                                 // A brick is a shell around a cavity, so it fills well under three
                                 // quarters of its box. A solid block (no hollow underside) does not.
                                 Range{0.20, 0.75}}},
+        };
+    }
+
+    /// @brief Multi-component implicit-CAD benchmark tasks for comparing single vs hierarchical runs
+    [[nodiscard]] inline std::vector<AgentBenchTask> multiComponentBenchTasks()
+    {
+        return std::vector<AgentBenchTask>{
+          AgentBenchTask{
+            "wheel_assembly",
+            "Wheel assembly (tyre + rim)",
+            "Design a two-part wheel assembly (~40 mm outer diameter, ~14 mm width): an outer tyre "
+            "with periodic radial tread grooves around its circumference and an inner rim with a "
+            "central axle bore (6 mm diameter) that mates cleanly to the tyre inner bore.",
+            "The model must look like a wheel with a distinct outer tyre (showing periodic tread "
+            "pattern around the circumference) and an inner rim/hub with a central axle hole. "
+            "A plain solid cylinder or a featureless torus without tread and hub bore does not "
+            "satisfy the task.",
+            {"isometric", "front", "top"},
+            GeometryExpectation{{Range{34.0, 46.0}, Range{34.0, 46.0}, Range{10.0, 18.0}},
+                                Range{3000.0, 18000.0},
+                                1000u,
+                                Range{0.25, 0.75},
+                                600u}},
         };
     }
 } // namespace gladius::agent::bench

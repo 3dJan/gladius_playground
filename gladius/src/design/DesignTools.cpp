@@ -284,6 +284,7 @@ namespace gladius::design
                                                             "import_library_item",
                                                             "list_library_items",
                                                             "measure_thickness",
+                                                            "report_component",
                                                             "set_program_snippet",
                                                             "update_todo_item"};
 
@@ -293,14 +294,15 @@ namespace gladius::design
                                                          "ask_user",
                                                          "capture_viewport",
                                                          "check_printability",
-                                                         "get_bounding_box",
                                                          "get_children",
+                                                         "get_bounding_box",
                                                          "get_design_summary",
                                                          "get_model_summary",
                                                          "get_node",
                                                          "get_program_snippet",
                                                          "measure_thickness",
                                                          "reject_variant",
+                                                         "set_component_evaluation",
                                                          "update_todo_item"};
 
         /**
@@ -571,13 +573,39 @@ namespace gladius::design
             {"properties",
              {{"name", {{"type", "string"}}},
               {"type", {{"type", "string"}, {"enum", {"system", "function_group", "function", "component", "feature"}}}},
-              {"parentNodeId", {{"type", "string"}}}}}},
+              {"parentNodeId", {{"type", "string"}}},
+              {"justification", {{"type", "string"}}}}}},
            tools::ToolPolicy::DesignGraphModification},
           [&ctx](nlohmann::json const & args) -> nlohmann::json {
               std::string const name = args.value("name", "");
               if (name.empty())
               {
                   return {{"success", false}, {"error", "name is required"}};
+              }
+              std::string const parentId = args.value("parentNodeId", "");
+              if (!parentId.empty())
+              {
+                  if (ctx.graph.findNode(parentId) == nullptr)
+                  {
+                      return {{"success", false}, {"error", "Unknown parentNodeId: " + parentId}};
+                  }
+                  constexpr std::size_t kMaxDecompositionDepth = 4;
+                  constexpr std::size_t kHardDecompositionDepth = 6;
+                  std::size_t const newDepth = ctx.graph.nodeDepth(parentId) + 1;
+                  if (newDepth >= kHardDecompositionDepth)
+                  {
+                      return {{"success", false},
+                              {"error",
+                               "Decomposition depth limit (" + std::to_string(kHardDecompositionDepth)
+                                 + ") reached; model this leaf directly instead of splitting further"}};
+                  }
+                  if (newDepth >= kMaxDecompositionDepth && args.value("justification", "").empty())
+                  {
+                      return {{"success", false},
+                              {"error",
+                               "Decomposition at depth >= " + std::to_string(kMaxDecompositionDepth)
+                                 + " requires a non-empty 'justification' explaining why further splitting is needed"}};
+                  }
               }
               std::string const typeStr = args.value("type", "function");
               DesignNodeType nodeType = DesignNodeType::Function;
@@ -590,8 +618,8 @@ namespace gladius::design
               else if (typeStr == "feature")
                   nodeType = DesignNodeType::Feature;
 
-              std::string const id = ctx.graph.addNode(nodeType, name, args.value("parentNodeId", ""));
-              return {{"success", true}, {"nodeId", id}};
+              std::string const id = ctx.graph.addNode(nodeType, name, parentId);
+              return {{"success", true}, {"nodeId", id}, {"depth", ctx.graph.nodeDepth(id)}};
           });
 
         registry.registerSyncTool(
@@ -2949,6 +2977,121 @@ namespace gladius::design
 
                 DesignToolContext & m_ctx;
             };
+
+            registry.registerSyncTool(
+              {"report_component",
+               "Submit a structured self-report for a scoped component node before handing back to the orchestrator.",
+               {{"type", "object"},
+                {"required", {"nodeId"}},
+                {"properties",
+                 {{"nodeId", {{"type", "string"}}},
+                  {"satisfied", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                  {"unsatisfied", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                  {"evidence", {{"type", "object"}}}}}},
+               tools::ToolPolicy::DesignGraphModification},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json
+              {
+                  std::string const nodeId = args.value("nodeId", "");
+                  if (nodeId.empty() || ctx.graph.findNode(nodeId) == nullptr)
+                  {
+                      return {{"success", false}, {"error", "Unknown nodeId: " + nodeId}};
+                  }
+                  ComponentReport report;
+                  report.nodeId = nodeId;
+                  if (args.contains("satisfied") && args["satisfied"].is_array())
+                  {
+                      for (auto const & entry : args["satisfied"])
+                      {
+                          if (entry.is_string())
+                          {
+                              report.satisfied.push_back(entry.get<std::string>());
+                          }
+                      }
+                  }
+                  if (args.contains("unsatisfied") && args["unsatisfied"].is_array())
+                  {
+                      for (auto const & entry : args["unsatisfied"])
+                      {
+                          if (entry.is_string())
+                          {
+                              report.unsatisfied.push_back(entry.get<std::string>());
+                          }
+                      }
+                  }
+                  if (args.contains("evidence") && args["evidence"].is_object())
+                  {
+                      report.evidence = args["evidence"];
+                  }
+                  ctx.componentReports[nodeId] = std::move(report);
+                  return {{"success", true}, {"nodeId", nodeId}};
+              });
+
+            registry.registerSyncTool(
+              {"set_component_evaluation",
+               "Record deterministic/heuristic/subjective evaluation notes on the active variant of a component node.",
+               {{"type", "object"},
+                {"required", {"nodeId"}},
+                {"properties",
+                 {{"nodeId", {{"type", "string"}}},
+                  {"variantId", {{"type", "string"}}},
+                  {"deterministicPassed", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                  {"deterministicWarnings", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                  {"heuristicNotes", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                  {"subjectiveNotes", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                  {"pruningScore", {{"type", "number"}}}}}},
+               tools::ToolPolicy::DesignGraphModification},
+              [&ctx](nlohmann::json const & args) -> nlohmann::json
+              {
+                  std::string const nodeId = args.value("nodeId", "");
+                  auto const * node = ctx.graph.findNode(nodeId);
+                  if (node == nullptr)
+                  {
+                      return {{"success", false}, {"error", "Unknown nodeId: " + nodeId}};
+                  }
+                  std::string variantId = args.value("variantId", "");
+                  if (variantId.empty())
+                  {
+                      if (auto const cfg = ctx.graph.activeConfiguration())
+                      {
+                          auto const it = cfg->selectedVariants.find(nodeId);
+                          if (it != cfg->selectedVariants.end())
+                          {
+                              variantId = it->second;
+                          }
+                      }
+                  }
+                  if (variantId.empty() && !node->variantIds.empty())
+                  {
+                      variantId = node->variantIds.front();
+                  }
+                  if (variantId.empty())
+                  {
+                      return {{"success", false}, {"error", "No variant found for nodeId: " + nodeId}};
+                  }
+                  Evaluation eval;
+                  auto readStrings = [&](char const * key, std::vector<std::string> & out) {
+                      if (args.contains(key) && args[key].is_array())
+                      {
+                          for (auto const & s : args[key])
+                          {
+                              if (s.is_string())
+                              {
+                                  out.push_back(s.get<std::string>());
+                              }
+                          }
+                      }
+                  };
+                  readStrings("deterministicPassed", eval.deterministicPassed);
+                  readStrings("deterministicWarnings", eval.deterministicWarnings);
+                  readStrings("heuristicNotes", eval.heuristicNotes);
+                  readStrings("subjectiveNotes", eval.subjectiveNotes);
+                  eval.pruningScore = args.value("pruningScore", 0.0);
+                  if (!ctx.graph.setVariantEvaluation(variantId, std::move(eval)))
+                  {
+                      return {{"success", false}, {"error", "Unknown variantId: " + variantId}};
+                  }
+                  return {{"success", true}, {"nodeId", nodeId}, {"variantId", variantId}};
+              });
 
             registry.registerTool(std::make_shared<AskUserTool>(ctx));
             registry.registerTool(std::make_shared<GenerateReferenceImageTool>(ctx));
