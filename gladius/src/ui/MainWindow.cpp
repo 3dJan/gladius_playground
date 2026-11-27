@@ -478,6 +478,7 @@ namespace gladius::ui
             {
                 m_mainView.setCurrentTheme(static_cast<ThemeId>(currentIdx));
             }
+            renderLayoutModeSelector();
         }
 
         if (ImGui::CollapsingHeader("Keyboard Shortcuts"))
@@ -630,6 +631,7 @@ namespace gladius::ui
             LOG_SCOPE_DURATION_NAMED("MainWindow::setup() - ensureInitialized");
             m_mainView.ensureInitialized();
         }
+        applyStoredLayoutModeOverride();
 
         // Set up minimal UI immediately so window appears responsive
         {
@@ -1294,6 +1296,10 @@ namespace gladius::ui
         ProfileFunction;
         m_uiScale = ImGui::GetIO().FontGlobalScale * 2.0f;
 
+        // The preview derives its realtime default from the surface, so it has to know early.
+        m_renderWindow.setCompactSurface(m_mainView.getSurfaceProfile() ==
+                                         ui::SurfaceProfile::Compact);
+
         pollNativeSave();
 
         // Poll for async compute initialization completion
@@ -1511,74 +1517,99 @@ namespace gladius::ui
                 {
                     if (bigMenuItem(reinterpret_cast<const char *>(ICON_FA_BARS)))
                     {
-                        m_showMainMenu = true;
+                        m_showMainMenu = !m_showMainMenu;
                     }
 
-                    if (m_modelEditor.isVisible())
+                    // Compact surfaces have a single main-space slot, so every toggle swaps the
+                    // window that owns it instead of toggling visibility of a shared layout.
+                    bool const compact =
+                      m_surfaceProfile == ui::SurfaceProfile::Compact && m_mainDockspaceID != 0;
+
+                    if (compact)
                     {
-                        if (ImGui::Button(
-                              reinterpret_cast<const char *>(ICON_FA_PROJECT_DIAGRAM "\tGraph")))
+                        auto const compactToggle = [&](char const * icon,
+                                                       char const * label,
+                                                       char const * windowName)
                         {
-                            m_modelEditor.setVisibility(false);
-                        }
+                            std::string const text = std::string(icon) + "\t" + label;
+                            if (bigMenuItem(text.c_str()))
+                            {
+                                showCompactMainSpaceWindow(windowName);
+                            }
+                        };
+                        compactToggle(ICON_FA_PROJECT_DIAGRAM, "Graph", "Model Editor");
+                        compactToggle(ICON_FA_DESKTOP, "Preview", "Preview");
+                        compactToggle(ICON_FA_MAGIC, "AI", kAgentPanelWindowName);
+                        compactToggle(ICON_FA_LAYER_GROUP, "Slice", "Slice");
                     }
                     else
                     {
-                        if (bigMenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_PROJECT_DIAGRAM "\tGraph")))
+                        if (m_modelEditor.isVisible())
                         {
-                            m_modelEditor.setVisibility(true);
+                            if (ImGui::Button(
+                                  reinterpret_cast<const char *>(ICON_FA_PROJECT_DIAGRAM "\tGraph")))
+                            {
+                                m_modelEditor.setVisibility(false);
+                            }
                         }
-                    }
+                        else
+                        {
+                            if (bigMenuItem(
+                                  reinterpret_cast<const char *>(ICON_FA_PROJECT_DIAGRAM "\tGraph")))
+                            {
+                                m_modelEditor.setVisibility(true);
+                            }
+                        }
 
-                    if (m_renderWindow.isVisible())
-                    {
-                        if (ImGui::Button(
-                              reinterpret_cast<const char *>(ICON_FA_DESKTOP "\tPreview")))
+                        if (m_renderWindow.isVisible())
                         {
-                            m_renderWindow.hide();
+                            if (ImGui::Button(
+                                  reinterpret_cast<const char *>(ICON_FA_DESKTOP "\tPreview")))
+                            {
+                                m_renderWindow.hide();
+                            }
                         }
-                    }
-                    else
-                    {
-                        if (bigMenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_DESKTOP "\tPreview")))
+                        else
                         {
-                            m_renderWindow.show();
+                            if (bigMenuItem(
+                                  reinterpret_cast<const char *>(ICON_FA_DESKTOP "\tPreview")))
+                            {
+                                m_renderWindow.show();
+                            }
                         }
-                    }
 
-                    if (m_agentPanels.isVisible())
-                    {
-                        if (ImGui::Button(
-                              reinterpret_cast<const char *>(ICON_FA_MAGIC "\tAI")))
+                        if (m_agentPanels.isVisible())
                         {
-                            m_agentPanels.setVisible(false);
+                            if (ImGui::Button(
+                                  reinterpret_cast<const char *>(ICON_FA_MAGIC "\tAI")))
+                            {
+                                m_agentPanels.setVisible(false);
+                            }
                         }
-                    }
-                    else
-                    {
-                        if (bigMenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_MAGIC "\tAI")))
+                        else
                         {
-                            m_agentPanels.setVisible(true);
+                            if (bigMenuItem(
+                                  reinterpret_cast<const char *>(ICON_FA_MAGIC "\tAI")))
+                            {
+                                m_agentPanels.setVisible(true);
+                            }
                         }
-                    }
 
-                    if (m_isSlicePreviewVisible)
-                    {
-                        if (ImGui::Button(
-                              reinterpret_cast<const char *>(ICON_FA_LAYER_GROUP "\tSlice")))
+                        if (m_isSlicePreviewVisible)
                         {
-                            m_sliceView.hide();
+                            if (ImGui::Button(reinterpret_cast<const char *>(
+                                  ICON_FA_LAYER_GROUP "\tSlice")))
+                            {
+                                m_sliceView.hide();
+                            }
                         }
-                    }
-                    else
-                    {
-                        if (bigMenuItem(
-                              reinterpret_cast<const char *>(ICON_FA_LAYER_GROUP "\tSlice")))
+                        else
                         {
-                            m_sliceView.show();
+                            if (bigMenuItem(reinterpret_cast<const char *>(
+                                  ICON_FA_LAYER_GROUP "\tSlice")))
+                            {
+                                m_sliceView.show();
+                            }
                         }
                     }
 
@@ -1637,7 +1668,8 @@ namespace gladius::ui
                     }
 
                     // Add keyboard shortcuts button
-                    if (bigMenuItem(reinterpret_cast<const char *>(ICON_FA_KEYBOARD "\tShortcuts")))
+                    if (!compact &&
+                        bigMenuItem(reinterpret_cast<const char *>(ICON_FA_KEYBOARD "\tShortcuts")))
                     {
                         showShortcutSettings();
                     }
@@ -2071,6 +2103,7 @@ namespace gladius::ui
 
 #ifdef IMGUI_HAS_DOCK
         const auto dockspaceID = ImGui::GetID("MainDockingSpace");
+        m_mainDockspaceID = dockspaceID;
         ImGui::DockSpace(dockspaceID,
                          ImVec2(0.0f, 0.0f),
                          ImGuiDockNodeFlags_None |
@@ -2078,16 +2111,100 @@ namespace gladius::ui
 
         // First-run default: dock the Design Agent panel to the right edge. ImGui only stores window
         // settings for a panel the user actually had, so "no settings" means "no layout of their own".
+        // A surface profile switch (rotate, resize, manual override) is a stronger signal than a
+        // stored layout: the saved split belongs to a surface that no longer exists.
+        ui::SurfaceProfile const profile = m_mainView.getSurfaceProfile();
+        bool const profileChanged = profile != m_surfaceProfile;
+        if (profileChanged)
+        {
+            clearStoredLayout(dockspaceID, {kAgentPanelWindowName});
+            m_surfaceProfile = profile;
+            m_defaultAgentPanelLayoutApplied = false;
+        }
+
         if (!m_defaultAgentPanelLayoutApplied &&
             ImGui::FindWindowSettingsByID(ImHashStr(kAgentPanelWindowName)) == nullptr)
         {
-            applyAgentPanelDefaultLayout(dockspaceID);
+            applyLayoutForProfile(dockspaceID, profile);
             m_defaultAgentPanelLayoutApplied = true;
+
+            // On a phone the panel owns the main space, so the panels that compete for it start
+            // hidden; the top bar toggles bring them back one at a time.
+            if (profile == ui::SurfaceProfile::Compact)
+            {
+                m_modelEditor.setVisibility(false);
+                m_sliceView.hide();
+                m_isSlicePreviewVisible = false;
+                m_renderWindow.hide();
+                m_agentPanels.setVisible(true);
+            }
         }
 #endif
         ImGui::SetWindowPos("MainWindowDockingArea", {0, menuBarHeight}, ImGuiCond_Always);
         ImGui::End();
         ImGui::PopStyleVar();
+    }
+
+    void MainWindow::applyStoredLayoutModeOverride()
+    {
+        if (!m_configManager)
+        {
+            return;
+        }
+
+        auto const stored =
+          m_configManager->getValue<std::string>("ui", "layoutMode", "auto");
+        m_mainView.setStoredLayoutModeOverride(ui::layoutModeOverrideFromString(stored));
+    }
+
+    void MainWindow::renderLayoutModeSelector()
+    {
+        if (!m_configManager)
+        {
+            ImGui::TextDisabled("Layout mode settings are unavailable.");
+            return;
+        }
+
+        ui::LayoutModeOverride const current = m_mainView.getLayoutModeOverride();
+        int currentIdx = static_cast<int>(current);
+        char const * const names[] = {"Auto", "Desktop", "Compact"};
+        ImGui::TextDisabled("Auto picks the compact layout on phones and small windows.");
+        if (ImGui::Combo("Layout mode", &currentIdx, names, IM_ARRAYSIZE(names)))
+        {
+            auto const mode = static_cast<ui::LayoutModeOverride>(currentIdx);
+            m_mainView.setLayoutModeOverride(mode);
+            m_configManager->setValue<std::string>(
+              "ui", "layoutMode", ui::layoutModeOverrideToString(mode));
+            m_configManager->save();
+        }
+    }
+
+    void MainWindow::showCompactMainSpaceWindow(char const * windowName)
+    {
+        if (windowName == nullptr || m_mainDockspaceID == 0)
+        {
+            return;
+        }
+
+        // Exactly one window may own the main space on a phone, so the others are hidden rather
+        // than resized into a leftover sliver of the dock tree.
+        bool const showAgent = std::string_view(windowName) == kAgentPanelWindowName;
+        bool const showPreview = std::string_view(windowName) == "Preview";
+        bool const showGraph = std::string_view(windowName) == "Model Editor";
+        bool const showSlice = std::string_view(windowName) == "Slice";
+
+        m_agentPanels.setVisible(showAgent);
+        showPreview ? m_renderWindow.show() : m_renderWindow.hide();
+        m_modelEditor.setVisibility(showGraph);
+        showSlice ? m_sliceView.show() : m_sliceView.hide();
+        if (!showSlice)
+        {
+            m_isSlicePreviewVisible = false;
+        }
+
+        showWindowInMainSpace(m_mainDockspaceID,
+                              windowName,
+                              {kAgentPanelWindowName, "Preview", "Model Editor", "Slice"});
     }
 
     void MainWindow::newModel()
@@ -2154,7 +2271,10 @@ namespace gladius::ui
             return;
         }
 
-        ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize |
+        // NoDecoration would also drop the scrollbar, which hides the bottom entries of the list on
+        // a short screen. Keep the decoration off by name and leave the scrollbar available instead.
+        ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                                        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
 #ifdef IMGUI_HAS_DOCK
         window_flags |= ImGuiWindowFlags_NoDocking;
@@ -2163,7 +2283,7 @@ namespace gladius::ui
         const auto menuBarHeight = ImGui::GetWindowHeight();
         ImGui::EndMainMenuBar();
         auto & io = ImGui::GetIO();
-        const auto menuWidth = 400.f * m_uiScale;
+        auto const menuWidth = std::min(400.f * m_uiScale, io.DisplaySize.x);
         auto closeMenu = [&]()
         {
             m_showMainMenu = false;
@@ -2464,8 +2584,17 @@ namespace gladius::ui
             close();
         }
 
-        // Hide menu when anything else is clicked
-        if (!ImGui::IsWindowFocused())
+        // Hide the drawer when something outside of it is clicked. Neither a focus nor a hover test
+        // works here: the hamburger lives in the main menu bar, so that bar - never the drawer - is
+        // the focused window, and the drawer is repositioned every frame, which leaves hover stale on
+        // the web build. Hit testing the rects we already know is both cheap and reliable.
+        bool const clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        ImVec2 const clickPos = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
+        bool const clickInMenuBar = clickPos.y < menuBarHeight;
+        bool const clickInDrawer =
+          clickPos.x >= m_mainMenuPosX && clickPos.x <= m_mainMenuPosX + menuWidth &&
+          clickPos.y >= menuBarHeight;
+        if (clicked && !clickInMenuBar && !clickInDrawer)
         {
             closeMenu();
         }

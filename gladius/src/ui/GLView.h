@@ -1,7 +1,13 @@
 #pragma once
 
+#include "SurfaceProfile.h"
 #include "Theme.h"
 #include "UiFpsBenchmark.h"
+#include "render/OrbitalGestureController.h"
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten/html5.h>
+#endif
 
 #include <cstdint>
 #include <chrono>
@@ -93,6 +99,39 @@ namespace gladius
         }
 
         /**
+         * @brief Surface class the UI is currently drawn on (desktop or compact/phone)
+         * @details Updated once per frame from the window size and the pointer device, so layout
+         *          code can ask for it instead of measuring the window itself.
+         */
+        [[nodiscard]] ui::SurfaceProfile getSurfaceProfile() const noexcept
+        {
+            return m_surfaceProfile;
+        }
+
+        /// @brief Multiplier for touch sensitive sizing; 1.0 on desktop
+        [[nodiscard]] float getTouchScale() const noexcept
+        {
+            return m_touchScale;
+        }
+
+        /// @brief Manual layout selection, normally read from settings
+        void setLayoutModeOverride(ui::LayoutModeOverride mode);
+
+        /// @brief Manual layout selection currently in effect
+        [[nodiscard]] ui::LayoutModeOverride getLayoutModeOverride() const noexcept
+        {
+            return m_layoutModeOverride;
+        }
+
+        /**
+         * @brief Apply the layout override that came from persisted settings
+         * @param mode Stored layout mode
+         * @details Ignored when the surface already carries a layout query parameter or environment
+         *          variable, which are the way a desktop browser is coerced into either layout.
+         */
+        void setStoredLayoutModeOverride(ui::LayoutModeOverride mode);
+
+        /**
          * @brief Set the total UI scale factor (base * user)
          * @param scale The total UI scale factor to set
          */
@@ -161,6 +200,16 @@ namespace gladius
 #ifdef __EMSCRIPTEN__
         void setWebClipboardText(std::string text);
         [[nodiscard]] char const * getWebClipboardText() const noexcept;
+
+        /**
+         * @brief Two-finger camera gestures collected from the browser canvas
+         * @details GLFW maps only the first touch to mouse input, so pinch and two-finger pan have
+         *          to be tracked separately and only exist on the web build.
+         */
+        [[nodiscard]] ui::async_rendering::OrbitalGestureController & touchGestures() noexcept
+        {
+            return m_touchGestures;
+        }
 #endif
         void stopAnimationMode();
 
@@ -205,6 +254,24 @@ namespace gladius
         void determineUiScale();
         void determineUiScale(float xscale, float yscale);
         void recomputeTotalScale();
+
+        /// @brief Re-derives the surface profile and touch scale from the current display size
+        void updateSurfaceProfile();
+
+        /// @brief Reads the pointer device class and any layout override handed in by the platform
+        void detectInputEnvironment();
+
+#ifdef __EMSCRIPTEN__
+        /// @brief Registers the raw touch listeners that feed the two-finger camera gestures
+        void installWebTouchCallbacks();
+
+        static EM_BOOL webTouchCallback(int eventType,
+                                        const EmscriptenTouchEvent * event,
+                                        void * userData);
+#endif
+
+        /// @brief Grows the spacing that separates hit areas when running compact
+        void applyCompactStyle(ImGuiStyle & style);
         void processPendingScreenshot();
 
         static void noOp()
@@ -245,6 +312,11 @@ namespace gladius
         float m_uiScale = 1.0f;   // total = base * user
         float m_baseScale = 1.0f; // detected from OS/monitor/DPI
         float m_userScale = 1.0f; // user preference, persisted
+        ui::SurfaceProfile m_surfaceProfile{ui::SurfaceProfile::Desktop};
+        ui::LayoutModeOverride m_layoutModeOverride{ui::LayoutModeOverride::Auto};
+        float m_touchScale{1.0f};
+        bool m_coarsePointer{false};
+        bool m_layoutOverrideFromEnvironment{false};
         ThemeId m_currentTheme{ThemeId::Modern}; // active theme
         
 #ifdef ENABLE_UI_TESTING
@@ -252,6 +324,7 @@ namespace gladius
 #endif
 #ifdef __EMSCRIPTEN__
         std::string m_webClipboardText;
+        ui::async_rendering::OrbitalGestureController m_touchGestures;
 #endif
     };
 }

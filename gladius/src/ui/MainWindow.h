@@ -353,6 +353,23 @@ namespace gladius::ui
         bool m_showSaveBeforeFileOperation{false};
         /// @brief Guards the one-shot default right-dock of the Design Agent panel
         bool m_defaultAgentPanelLayoutApplied{false};
+        /// @brief Surface profile the current dock layout was built for
+        ui::SurfaceProfile m_surfaceProfile{ui::SurfaceProfile::Desktop};
+        /// @brief ID of the main window dockspace, valid while the docking area is submitted
+        ImGuiID m_mainDockspaceID{0};
+
+        /**
+         * @brief Shows one window in the main space on a compact surface, hiding the others.
+         * @param windowName One of the main-space window names
+         *                   ("Design Agent", "Preview", "Model Editor", "Slice").
+         */
+        void showCompactMainSpaceWindow(char const * windowName);
+
+        /// @brief Reads the persisted layout mode into the view before the first frame
+        void applyStoredLayoutModeOverride();
+
+        /// @brief Layout mode selector inside the settings dialog
+        void renderLayoutModeSelector();
         bool m_showExportInProgressWarning{false};
         PendingFileOperation m_pendingFileOperation{PendingFileOperation::None};
         std::optional<std::filesystem::path> m_pendingOpenFilename;

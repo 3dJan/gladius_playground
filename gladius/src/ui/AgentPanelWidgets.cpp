@@ -209,9 +209,11 @@ namespace gladius::ui
         {
             float const fontSize = ImGui::GetFontSize();
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + fontSize * 0.10f);
+            // The whole row is the hit area, so it has to stay finger sized on a compact surface.
+            float const rowHeight
+              = std::max(ImGui::GetTextLineHeight(), minTouchTargetHeight());
             bool const clicked
-              = ImGui::InvisibleButton(id, ImVec2(ImGui::GetContentRegionAvail().x,
-                                                  ImGui::GetTextLineHeight()));
+              = ImGui::InvisibleButton(id, ImVec2(ImGui::GetContentRegionAvail().x, rowHeight));
             if (clicked)
             {
                 open = !open;

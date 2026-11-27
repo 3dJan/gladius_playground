@@ -21,6 +21,13 @@ namespace gladius::ui
 
         void zoom(float increment);
 
+        /**
+         * @brief Moves the look-at point in the camera plane, as a drag of the given pixel delta.
+         * @details Shared by the middle-mouse pan and the two-finger touch pan so both move the
+         *          model at the same rate.
+         */
+        void panBy(float deltaX, float deltaY);
+
         auto computeModelViewPerspectiveMatrix() const -> cl_float16;
         bool update(float deltaTime_ms);
 

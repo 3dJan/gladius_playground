@@ -1113,7 +1113,6 @@ namespace gladius::ui
         io.MouseDragThreshold = 1.0f;
         auto const mousePos = io.MousePos;
         bool const contentHovered = ImGui::IsMouseHoveringRect(contentMin, contentMax);
-
         bool const unmodifiedWheelInput = contentHovered && io.MouseWheel != 0.0f &&
                                           !io.KeyCtrl && !io.KeyAlt && !io.KeyShift;
         if (unmodifiedWheelInput)
@@ -1125,6 +1124,23 @@ namespace gladius::ui
         {
             m_shortcutManager->processInput(ShortcutContext::RenderWindow);
         }
+
+#ifdef __EMSCRIPTEN__
+        // Two fingers drive pan and dolly; while they are down the first-finger orbit that GLFW
+        // synthesises from a touch must stay out of the way.
+        bool const twoFingerGesture = m_view != nullptr &&
+                                      m_view->getSurfaceProfile() == ui::SurfaceProfile::Compact &&
+                                      m_view->touchGestures().isMultiTouchActive();
+        if (twoFingerGesture && m_cameraDragButton < 0)
+        {
+            return;
+        }
+        if (twoFingerGesture && m_cameraDragButton >= 0)
+        {
+            m_camera.mouseInputHandler(m_cameraDragButton, -1, mousePos.x, mousePos.y);
+            m_cameraDragButton = -1;
+        }
+#endif
 
         bool cameraMotionApplied = false;
         if (m_cameraDragButton >= 0)
@@ -1170,7 +1186,37 @@ namespace gladius::ui
             m_camera.mouseInputHandler(ImGuiMouseButton_Left, -1, mousePos.x, mousePos.y);
         }
 
+#ifdef __EMSCRIPTEN__
+        applyTouchCameraGesture();
+#endif
     }
+
+#ifdef __EMSCRIPTEN__
+    void RenderWindow::applyTouchCameraGesture()
+    {
+        if (m_view == nullptr || m_view->getSurfaceProfile() != ui::SurfaceProfile::Compact)
+        {
+            return;
+        }
+
+        auto gesture = m_view->touchGestures().consumeGesture();
+        if (gesture.kind == ui::async_rendering::TouchCameraGestureKind::None)
+        {
+            return;
+        }
+
+        if (gesture.kind == ui::async_rendering::TouchCameraGestureKind::Pan)
+        {
+            m_camera.panBy(gesture.deltaX, gesture.deltaY);
+        }
+        else
+        {
+            // A wider pinch pulls the camera in, same sign convention as the mouse wheel.
+            m_camera.zoom(-gesture.pinchDelta);
+        }
+        invalidateCameraView();
+    }
+#endif
 
     bool RenderWindow::isForceRealtimeMode() const noexcept
     {
@@ -1445,12 +1491,27 @@ namespace gladius::ui
         async_rendering::RealtimeRaymarchConfig config{};
         if (m_configManager != nullptr)
         {
+            // A phone GPU cannot keep up with the realtime marcher, so an unset mode stays off on
+            // a compact surface; auto remains the desktop default.
+            char const * const unsetDefault =
+              m_compactSurface ? "off" : "auto";
             config.mode = async_rendering::realtimeRaymarchModeFromString(
-              m_configManager->getValue<std::string>("renderWindow", "realtimeRaymarchMode", "auto"));
+              m_configManager->getValue<std::string>(
+                "renderWindow", "realtimeRaymarchMode", unsetDefault));
             config.targetFrameTimeMs =
               m_configManager->getValue<float>("renderWindow", "realtimeRaymarchTargetMs", 25.0f);
         }
         return config;
+    }
+
+    void RenderWindow::setCompactSurface(bool compact)
+    {
+        if (compact == m_compactSurface)
+        {
+            return;
+        }
+        m_compactSurface = compact;
+        m_renderUpdateCoordinator.configureRealtime(loadRealtimeRaymarchConfig());
     }
 
     void RenderWindow::saveRealtimeRaymarchMode(async_rendering::RealtimeRaymarchMode mode) const

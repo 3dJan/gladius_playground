@@ -20,23 +20,46 @@ namespace gladius::ui::tests
     namespace
     {
         constexpr ImVec2 kDockspaceSize{1600.f, 900.f};
+        constexpr ImVec2 kPhoneSize{390.f, 700.f};
+        constexpr char const * kPreviewWindowName = "Preview";
+
+        /// @brief Layout pass the frame should run after creating the dockspace
+        enum class LayoutPass
+        {
+            None,
+            Default,
+            Compact
+        };
+
+        /// @brief Extra frame options: a second docked window and a main-space handover
+        struct FrameOptions
+        {
+            bool preSplitRoot{false};
+            ImVec2 size{kDockspaceSize};
+            /// @brief Window submitted in addition to the panel; nullptr submits only the panel
+            char const * extraWindowName{nullptr};
+            /// @brief Hand the main space to extraWindowName during this frame
+            bool handOverMainSpace{false};
+            /// @brief Window that must give the main space up during the handover
+            char const * handoverSurrender{nullptr};
+        };
 
         /// @brief One frame of the main dockspace plus the Design Agent panel
         class DockedPanelFrame
         {
           public:
-            DockedPanelFrame(bool applyDefaultLayout, bool preSplitRoot = false)
+            DockedPanelFrame(LayoutPass layoutPass, FrameOptions options = {})
             {
                 ImGuiIO & io = ImGui::GetIO();
                 io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-                io.DisplaySize = kDockspaceSize;
+                io.DisplaySize = options.size;
 
                 ImGui::NewFrame();
 
                 // A zero padded, full size host window makes the dockspace area exactly kDockspaceSize.
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
                 ImGui::SetNextWindowPos(ImVec2(0.f, 0.f));
-                ImGui::SetNextWindowSize(kDockspaceSize);
+                ImGui::SetNextWindowSize(options.size);
                 ImGui::Begin("MainWindowDockingArea",
                              nullptr,
                              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking);
@@ -44,7 +67,7 @@ namespace gladius::ui::tests
                 ImGui::DockSpace(dockspaceID,
                                  ImVec2(0.f, 0.f),
                                  ImGuiDockNodeFlags_None | ImGuiDockNodeFlags_PassthruCentralNode);
-                if (preSplitRoot)
+                if (options.preSplitRoot)
                 {
                     // The shipped imgui.ini already hands us a split dockspace tree.
                     ImGuiID leftID = 0;
@@ -52,9 +75,29 @@ namespace gladius::ui::tests
                     ImGui::DockBuilderSplitNode(dockspaceID, ImGuiDir_Left, 0.25f, &leftID, &restID);
                     ImGui::DockBuilderFinish(dockspaceID);
                 }
-                if (applyDefaultLayout)
+                switch (layoutPass)
                 {
+                  case LayoutPass::Default:
                     applyAgentPanelDefaultLayout(dockspaceID);
+                    break;
+                  case LayoutPass::Compact:
+                    applyCompactLayout(dockspaceID);
+                    break;
+                  case LayoutPass::None:
+                    break;
+                }
+                if (options.handOverMainSpace)
+                {
+                    if (options.handoverSurrender != nullptr)
+                    {
+                        showWindowInMainSpace(dockspaceID,
+                                              options.extraWindowName,
+                                              {options.handoverSurrender});
+                    }
+                    else
+                    {
+                        showWindowInMainSpace(dockspaceID, options.extraWindowName);
+                    }
                 }
                 ImGui::End();
                 ImGui::PopStyleVar();
@@ -62,6 +105,13 @@ namespace gladius::ui::tests
                 ImGui::Begin(kAgentPanelWindowName, nullptr, ImGuiWindowFlags_NoTitleBar);
                 ImGui::TextUnformatted("panel");
                 ImGui::End();
+
+                if (options.extraWindowName != nullptr)
+                {
+                    ImGui::Begin(options.extraWindowName, nullptr, ImGuiWindowFlags_NoTitleBar);
+                    ImGui::TextUnformatted("extra");
+                    ImGui::End();
+                }
 
                 ImGui::Render();
                 m_dockspaceID = dockspaceID;
@@ -118,7 +168,7 @@ namespace gladius::ui::tests
 
     TEST_F(AgentPanelDockingFixture, ApplyDefaultLayout_FirstFrame_PanelDockedToRightOfDockspace)
     {
-        DockedPanelFrame frame(true);
+        DockedPanelFrame frame(LayoutPass::Default);
 
         ImGuiWindow * panel = panelWindow();
         ASSERT_NE(panel, nullptr);
@@ -136,8 +186,8 @@ namespace gladius::ui::tests
 
     TEST_F(AgentPanelDockingFixture, ApplyDefaultLayout_PanelWidthFollowsPixelClamp)
     {
-        DockedPanelFrame first(true);
-        DockedPanelFrame second(false);
+        DockedPanelFrame first(LayoutPass::Default);
+        DockedPanelFrame second(LayoutPass::None);
 
         ImGuiWindow * panel = panelWindow();
         ASSERT_NE(panel, nullptr);
@@ -146,8 +196,8 @@ namespace gladius::ui::tests
 
     TEST_F(AgentPanelDockingFixture, ApplyDefaultLayout_DockedNode_HasNoTabBar)
     {
-        DockedPanelFrame first(true);
-        DockedPanelFrame second(false);
+        DockedPanelFrame first(LayoutPass::Default);
+        DockedPanelFrame second(LayoutPass::None);
 
         ImGuiWindow * panel = panelWindow();
         ASSERT_NE(panel, nullptr);
@@ -158,9 +208,9 @@ namespace gladius::ui::tests
 
     TEST_F(AgentPanelDockingFixture, DockedPanel_FramesWithoutDockBuilder_KeepDockIdAndWidth)
     {
-        DockedPanelFrame first(true);
+        DockedPanelFrame first(LayoutPass::Default);
         // ImGui needs one more frame before the dock node hosts the window, so settle before measuring.
-        DockedPanelFrame settled(false);
+        DockedPanelFrame settled(LayoutPass::None);
         ImGuiWindow * afterSettled = panelWindow();
         ASSERT_NE(afterSettled, nullptr);
         ImGuiID const dockID = afterSettled->DockId;
@@ -168,7 +218,7 @@ namespace gladius::ui::tests
         ASSERT_NE(dockID, 0u);
 
         // Following frames without the DockBuilder pass must not merge or collapse the node again.
-        DockedPanelFrame next(false);
+        DockedPanelFrame next(LayoutPass::None);
         ImGuiWindow * afterNext = panelWindow();
         ASSERT_NE(afterNext, nullptr);
         EXPECT_EQ(afterNext->DockId, dockID);
@@ -177,8 +227,8 @@ namespace gladius::ui::tests
 
     TEST_F(AgentPanelDockingFixture, ApplyDefaultLayout_AlreadySplitDockspace_PanelStillDockedRight)
     {
-        DockedPanelFrame first(true, true);
-        DockedPanelFrame second(false, true);
+        DockedPanelFrame first(LayoutPass::Default, FrameOptions{.preSplitRoot = true});
+        DockedPanelFrame second(LayoutPass::None, FrameOptions{.preSplitRoot = true});
 
         ImGuiWindow * panel = panelWindow();
         ASSERT_NE(panel, nullptr);
@@ -195,11 +245,101 @@ namespace gladius::ui::tests
 
     TEST_F(AgentPanelDockingFixture, NoDefaultLayout_PanelStaysFloating)
     {
-        DockedPanelFrame frame(false);
+        DockedPanelFrame frame(LayoutPass::None);
 
         ImGuiWindow * panel = panelWindow();
         ASSERT_NE(panel, nullptr);
         // Without the one-shot default the panel keeps ImGui's implicit floating behaviour.
+        EXPECT_EQ(panel->DockId, 0u);
+    }
+
+    TEST_F(AgentPanelDockingFixture, ApplyCompactLayout_PanelFillsTheWholeMainSpace)
+    {
+        FrameOptions const options{.size = kPhoneSize};
+        DockedPanelFrame first(LayoutPass::Compact, options);
+        DockedPanelFrame settled(LayoutPass::None, options);
+
+        ImGuiWindow * panel = panelWindow();
+        ASSERT_NE(panel, nullptr);
+        ASSERT_NE(panel->DockNode, nullptr);
+        EXPECT_NEAR(panel->Size.x, kPhoneSize.x, 8.f);
+        EXPECT_NEAR(panel->Size.y, kPhoneSize.y, 8.f);
+
+        // Nothing may be split off: the panel's node is the root of the dockspace.
+        EXPECT_EQ(ImGui::DockNodeGetRootNode(panel->DockNode)->ID, settled.dockspaceID());
+        EXPECT_EQ(panel->DockNode->ParentNode, nullptr);
+        EXPECT_TRUE(panel->DockNode->IsNoTabBar());
+    }
+
+    TEST_F(AgentPanelDockingFixture, ApplyCompactLayout_AlreadySplitDockspace_SplitIsRemoved)
+    {
+        DockedPanelFrame first(LayoutPass::Compact, FrameOptions{.preSplitRoot = true,
+                                                                 .size = kPhoneSize});
+        // Later frames no longer hand us the saved split: clearStoredLayout dropped it.
+        DockedPanelFrame settled(LayoutPass::None, FrameOptions{.size = kPhoneSize});
+
+        ImGuiWindow * panel = panelWindow();
+        ASSERT_NE(panel, nullptr);
+        ASSERT_NE(panel->DockNode, nullptr);
+        EXPECT_EQ(panel->DockNode->ParentNode, nullptr);
+        EXPECT_NEAR(panel->Size.x, kPhoneSize.x, 8.f);
+    }
+
+    TEST_F(AgentPanelDockingFixture, ApplyCompactLayout_DockspaceNarrowerThanDesktopMinWidth_StillFillsIt)
+    {
+        // The desktop path clamps the panel to a minimum width that is wider than a phone; the
+        // compact path must not inherit that clamp or the panel would overflow the screen.
+        ImVec2 const narrowSize{320.f, 600.f};
+        DockedPanelFrame first(LayoutPass::Compact, FrameOptions{.size = narrowSize});
+        DockedPanelFrame settled(LayoutPass::None, FrameOptions{.size = narrowSize});
+
+        ImGuiWindow * panel = panelWindow();
+        ASSERT_NE(panel, nullptr);
+        EXPECT_NEAR(panel->Size.x, narrowSize.x, 8.f);
+        EXPECT_LT(panel->Size.x, agentMetrics::panelMinWidthPx);
+    }
+
+    TEST_F(AgentPanelDockingFixture, ClearStoredLayout_AppliedSplit_PanelIsUndockedAgain)
+    {
+        DockedPanelFrame first(LayoutPass::Default);
+        ImGuiWindow * docked = panelWindow();
+        ASSERT_NE(docked, nullptr);
+        ASSERT_NE(docked->DockId, 0u);
+
+        DockedPanelFrame cleared(LayoutPass::None);
+        // A profile switch has to win over the layout that was just stored, otherwise a phone
+        // keeps the desktop side column it saved moments earlier.
+        clearStoredLayout(cleared.dockspaceID(), {kAgentPanelWindowName});
+        DockedPanelFrame afterClear(LayoutPass::Compact);
+
+        ImGuiWindow * panel = panelWindow();
+        ASSERT_NE(panel, nullptr);
+        EXPECT_NE(panel->DockId, 0u);
+        ASSERT_NE(panel->DockNode, nullptr);
+        // The old right-hand split is gone, so the panel now owns the root node.
+        EXPECT_EQ(panel->DockNode->ParentNode, nullptr);
+        EXPECT_NEAR(panel->Size.x, kDockspaceSize.x, 8.f);
+    }
+
+    TEST_F(AgentPanelDockingFixture, ShowWindowInMainSpace_SecondWindowTakesTheMainSpace)
+    {
+        FrameOptions const options{.size = kPhoneSize,
+                                    .extraWindowName = kPreviewWindowName,
+                                    .handOverMainSpace = true,
+                                    .handoverSurrender = kAgentPanelWindowName};
+        DockedPanelFrame first(LayoutPass::Compact, options);
+        DockedPanelFrame settled(LayoutPass::None, options);
+
+        ImGuiWindow * preview = ImGui::FindWindowByName(kPreviewWindowName);
+        ASSERT_NE(preview, nullptr);
+        ASSERT_NE(preview->DockNode, nullptr);
+        EXPECT_EQ(ImGui::DockNodeGetRootNode(preview->DockNode)->ID, settled.dockspaceID());
+        EXPECT_NEAR(preview->Size.x, kPhoneSize.x, 8.f);
+
+        // The compact layout gave the main space to the panel, so taking it away must leave the
+        // panel without a dock reference; otherwise it would float back on its next frame.
+        ImGuiWindow * panel = panelWindow();
+        ASSERT_NE(panel, nullptr);
         EXPECT_EQ(panel->DockId, 0u);
     }
 } // namespace gladius::ui::tests

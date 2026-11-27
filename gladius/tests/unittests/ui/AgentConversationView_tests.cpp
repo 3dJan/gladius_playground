@@ -173,6 +173,20 @@ namespace gladius::ui::tests
             return any ? minX : 0.f;
         }
 
+        /// @brief True when `color` was drawn anywhere of the last frame, as text or as a shape
+        bool drawsColor(ImDrawData const * drawData, ImU32 color)
+        {
+            return std::any_of(drawData->CmdLists.begin(),
+                               drawData->CmdLists.end(),
+                               [color](ImDrawList const * list) {
+                                   return std::any_of(list->VtxBuffer.begin(),
+                                                      list->VtxBuffer.end(),
+                                                      [color](ImDrawVert const & vert) {
+                                                          return vert.col == color;
+                                                      });
+                               });
+        }
+
         RailColumns expectedColumns()
         {
             float const fs = ImGui::GetFontSize();
@@ -319,6 +333,23 @@ namespace gladius::ui::tests
         EXPECT_NEAR(withRole - withoutRole,
                     lineHeight + fs * agentMetrics::turnRoleLineGap,
                     0.01f);
+    }
+
+    TEST_F(TranscriptFrameFixture, RenderTurns_SpeakersAndDisclosureRow_NeverUseTheAccentColour)
+    {
+        // Who spoke and what the disclosure row is are not statuses, so neither may be painted with
+        // the theme accent: in the shipped theme the accent is red and reads as a failure.
+        std::vector<AgentConversationView::Turn> const turns
+          = AgentConversationView::buildTurns(makeConversation(6u), false);
+        TranscriptFrame frame(420.f, 600.f);
+        bool collapsed = false;
+        TranscriptFrame::Facts const & facts = frame.render(turns, collapsed);
+        ASSERT_FALSE(facts.turns.empty());
+
+        ImDrawData const * drawData = ImGui::GetDrawData();
+        ImU32 const accent = ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_SliderGrab));
+        EXPECT_TRUE(drawsColor(drawData, ImGui::GetColorU32(ImGuiCol_Text)));
+        EXPECT_FALSE(drawsColor(drawData, accent));
     }
 
     TEST_F(TranscriptFrameFixture, RenderTurns_NarrowPanelRowsStayInsideChildWindow)

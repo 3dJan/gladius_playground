@@ -129,7 +129,7 @@ namespace gladius::ui
 
     bool AgentPanels::iconButton(char const * icon, char const * tooltip)
     {
-        float const size = measureControlRowHeight();
+        float const size = std::max(measureControlRowHeight(), minTouchTargetHeight());
         bool const clicked = ImGui::Button(icon, ImVec2(size, size));
         if (ImGui::IsItemHovered())
         {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SurfaceProfile.h"
+
 namespace gladius::ui
 {
     /**
@@ -89,5 +91,22 @@ namespace gladius::ui
         constexpr float panelDefaultWidthRatio = 0.30f;
         constexpr float panelMinWidthPx = 360.f;
         constexpr float panelMaxWidthPx = 520.f;
+
+        // --- Compact (phone) layout ---
+        /// @brief Share of a full screen width the panel keeps for its content rows
+        /// @details The rest stays free so rows do not sit under the physical screen edge.
+        constexpr float panelCompactContentMaxWidthRatio = 0.92f;
+        /// @brief Smallest height of a control that has to be tappable with a finger
+        constexpr float minTouchTargetPx = 44.f;
     } // namespace agentMetrics
+
+    /**
+     * @brief Height a control has to reach to stay comfortably tappable on the current surface.
+     * @return The touch target floor in compact layouts, 0 on desktop where font-derived sizing
+     *         already fits a pointer.
+     */
+    [[nodiscard]] inline float minTouchTargetHeight()
+    {
+        return SurfaceProfileStore::instance().isCompact() ? agentMetrics::minTouchTargetPx : 0.f;
+    }
 } // namespace gladius::ui

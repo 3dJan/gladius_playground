@@ -132,8 +132,23 @@ namespace gladius::ui
         // The panel draws its own header, so ImGui's title bar is replaced rather than styled.
         // No position or size is requested: while docked (the default) the dockspace owns both, and a
         // SetNextWindowPos would undock the panel every frame.
+        // Full screen on a phone means rows would otherwise run into the physical screen edge.
+        bool const compact = SurfaceProfileStore::instance().isCompact();
+        if (compact)
+        {
+            float const edgeMargin =
+              ImGui::GetIO().DisplaySize.x * (1.f - agentMetrics::panelCompactContentMaxWidthRatio) *
+              0.5f;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                                ImVec2(edgeMargin, ImGui::GetStyle().WindowPadding.y));
+        }
+
         if (!ImGui::Begin(kAgentPanelWindowName, &m_visible, ImGuiWindowFlags_NoTitleBar))
         {
+            if (compact)
+            {
+                ImGui::PopStyleVar();
+            }
             ImGui::End();
             return;
         }
@@ -199,6 +214,10 @@ namespace gladius::ui
 
         renderFooter();
         ImGui::End();
+        if (compact)
+        {
+            ImGui::PopStyleVar();
+        }
     }
 
     void AgentPanels::renderConversationSection()

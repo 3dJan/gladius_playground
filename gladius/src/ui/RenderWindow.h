@@ -135,6 +135,19 @@ namespace gladius::ui
         {
           m_uiFpsBenchmarkStageTimingEnabled = enabled;
         }
+
+        /**
+         * @brief Tell the preview it is drawn on a compact (phone) surface
+         * @param compact True when the surface profile is compact
+         * @details Only affects the realtime default: a phone GPU cannot keep up with the realtime
+         *          marcher, so an unset mode means off here instead of auto. A stored mode always wins.
+         */
+        void setCompactSurface(bool compact);
+
+#ifdef __EMSCRIPTEN__
+        /// @brief Applies the pan or dolly accumulated from two-finger canvas gestures
+        void applyTouchCameraGesture();
+#endif
         [[nodiscard]] UiFpsBenchmarkStageTimings const & uiFpsBenchmarkStageTimings() const noexcept
         {
           return m_uiFpsBenchmarkStageTimings;
@@ -467,6 +480,8 @@ namespace gladius::ui
 
         // Permanent centering state
         bool m_permanentCenteringEnabled = false;
+        /// @brief True while the UI runs on a compact (phone) surface
+        bool m_compactSurface{false};
         bool m_lastCameraStateValid = false;
 
         // First-time centering for new models
