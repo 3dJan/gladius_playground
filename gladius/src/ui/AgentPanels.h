@@ -104,6 +104,14 @@ namespace gladius::ui
         void render();
 
       private:
+        /// @brief Completion budget per turn; the ProviderConfig default is too small for a whole
+        ///        program snippet and makes the model stop mid-tool-call
+        static constexpr int kDefaultMaxOutputTokens = 8192;
+        /// @brief Hidden-reasoning cap; unbounded reasoning dominated every turn of the benchmark
+        static constexpr int kDefaultThinkingTokens = 1024;
+        /// @brief Local endpoints need minutes per turn, not the cloud-oriented 120 seconds
+        static constexpr int kDefaultRequestTimeoutSeconds = 600;
+
         struct ActivityEntry
         {
             std::string label;
@@ -216,7 +224,11 @@ namespace gladius::ui
                                      std::vector<agent::ProviderProfile> profilesCopy,
                                      agent::ProviderConfig legacyCfg,
                                      int legacyProviderIdx,
-                                     std::string promptForKnowledge);
+                                     std::string promptForKnowledge,
+                                     int maxOutputTokens,
+                                     int thinkingTokens,
+                                     int requestTimeoutSeconds,
+                                     std::string cacheBreakpointMode);
 #endif
 
         bool m_visible = false;
@@ -271,6 +283,14 @@ namespace gladius::ui
         char m_endpointBuf[512] = "";
         char m_modelBuf[256] = "";
         char m_apiKeyBuf[512] = "";
+
+        /// @brief Per-request provider knobs shared by every profile of a run
+        /// @details `m_cacheBreakpointMode == "auto"` caches the tool block only on Anthropic's own
+        ///          API, where the breakpoint is honoured; local servers ignore it and charge for it.
+        int m_maxOutputTokens = kDefaultMaxOutputTokens;
+        int m_thinkingTokens = kDefaultThinkingTokens;
+        int m_requestTimeoutSeconds = kDefaultRequestTimeoutSeconds;
+        std::string m_cacheBreakpointMode = "auto";
 
         std::atomic<bool> m_modelFetchRunning{false};
         std::thread m_modelFetchThread;

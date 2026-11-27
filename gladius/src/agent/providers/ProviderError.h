@@ -90,4 +90,13 @@ namespace gladius::agent
                                                   bool apiKeyEmpty,
                                                   bool cancelled = false,
                                                   std::string const & providerLabel = {});
+
+    /**
+     * @brief Describes a completion that carried no text and no tool call.
+     * @details This is not a transport error, so the generic classifier has nothing to match on,
+     *          yet it is the failure users experience as "the agent stopped working". A truncated
+     *          stop points at the output limit, which is fixable in Settings.
+     */
+    [[nodiscard]] ProviderError describeEmptyCompletion(std::string const & stopReason,
+                                                        std::string const & providerLabel = {});
 } // namespace gladius::agent

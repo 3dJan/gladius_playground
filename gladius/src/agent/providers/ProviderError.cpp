@@ -354,4 +354,18 @@ namespace gladius::agent
                     "See Developer diagnostics for the provider response.",
                     errorText);
     }
+
+    ProviderError describeEmptyCompletion(std::string const & stopReason,
+                                          std::string const & providerLabel)
+    {
+        bool const truncated = stopReason == "max_tokens" || stopReason == "length";
+        return make(ProviderErrorKind::MalformedResponse,
+                    labelOr(providerLabel, "The model")
+                      + (truncated ? " stopped at its output limit without an answer."
+                                   : " answered with nothing."),
+                    truncated
+                      ? "Raise the agent's max output tokens in Settings, or ask for a smaller step."
+                      : "Try again; if it keeps happening, pick another model in Settings.",
+                    stopReason);
+    }
 } // namespace gladius::agent

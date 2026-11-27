@@ -57,6 +57,34 @@ namespace gladius::agent
             return text.substr(0, kMaxTraceErrorChars) + "...";
         }
 
+        /// @brief True when the model ran out of output tokens on this turn
+        [[nodiscard]] bool isTruncatedStop(std::string const & stopReason)
+        {
+            return stopReason == "max_tokens" || stopReason == "length";
+        }
+
+        /**
+         * @brief True when the provider answered successfully but produced nothing usable.
+         * @details Hidden reasoning is not something the loop can act on, and it is never echoed
+         *          back to the model, so a reply that carries only thinking is as unusable as an
+         *          empty one. Local servers produce exactly this when the output budget is spent on
+         *          reasoning before the first tool call is written; treating such a turn as "the
+         *          agent is done" silently ends the run without any geometry.
+         */
+        [[nodiscard]] bool isEmptyCompletion(CompletionResponse const & response)
+        {
+            return response.toolCalls.empty() && response.text.empty();
+        }
+
+        /// @brief Guidance appended after a turn the model cut off at its output limit
+        /// @details A cut-off answer drops the tail of the last tool call's arguments, which surfaces
+        ///          as a confusing "argument is required" failure. Tell the model to split its work.
+        constexpr char const * kTruncationGuidance =
+          "Your previous answer hit the model output limit, so the last tool call may have arrived "
+          "incomplete. Keep single tool calls short: emit a program snippet one helper function at a "
+          "time (root function last) instead of the whole program, and avoid repeating large "
+          "snippets you already sent.";
+
         /**
          * @brief Assembles the `turn` trace record for one model completion.
          * @param turnStartMs mark of the moment the context build began, taken from the recorder
@@ -166,6 +194,10 @@ namespace gladius::agent
         auto const startTime = std::chrono::steady_clock::now();
         std::size_t autonomousNudges = 0;
         constexpr std::size_t kMaxAutonomousNudges = 3;
+        // An empty completion is a provider fault, not an agent decision, so it gets a couple of
+        // retries before the run is reported as failed instead of three nudges and a fake success.
+        std::size_t emptyCompletionRetries = 0;
+        constexpr std::size_t kMaxEmptyCompletionRetries = 2;
 
         // Completion is scoped to this run: a design that was already complete when the run started
         // (e.g. finished by an earlier prompt) must not terminate a run for a follow-up request.
@@ -265,6 +297,42 @@ namespace gladius::agent
                 co_return result;
             }
 
+            // Nothing to act on: retry a bounded number of times, then report a failure. Ending the
+            // run as "completed" here would leave the user with an empty document and no message.
+            if (isEmptyCompletion(response))
+            {
+                ++result.emptyTurns;
+                bool const canRetry = emptyCompletionRetries < kMaxEmptyCompletionRetries
+                                      && !becameDesignComplete()
+                                      && (limits.maxModelTurns <= 0
+                                          || result.modelTurns
+                                               < static_cast<std::size_t>(limits.maxModelTurns));
+                if (canRetry)
+                {
+                    ++emptyCompletionRetries;
+                    if (traceRecorder != nullptr)
+                    {
+                        traceRecorder->recordNote("empty_completion_retry",
+                                                  {{"turnIndex", result.modelTurns},
+                                                   {"retry", emptyCompletionRetries},
+                                                   {"stopReason", response.stopReason}});
+                    }
+                    conversation.appendUserText(
+                      "Your last reply was empty and contained no tool call. Continue now: issue the "
+                      "next tool calls as a single tool_use response, or call finish_design once the "
+                      "design is validated.");
+                    continue;
+                }
+                result.error = isTruncatedStop(response.stopReason)
+                                 ? "Model returned an empty answer at its output limit"
+                                 : "Model returned an empty answer";
+                eventQueue.push(AgentFailedEvent{
+                  result.error,
+                  describeEmptyCompletion(response.stopReason, response.providerName)});
+                co_return result;
+            }
+            emptyCompletionRetries = 0;
+
             conversation.appendAssistant(response.text, response.toolCalls);
             result.finalMessage = response.text;
 
@@ -285,10 +353,13 @@ namespace gladius::agent
                                                   {{"turnIndex", result.modelTurns},
                                                    {"nudge", autonomousNudges}});
                     }
-                    conversation.appendUserText(
-                      "The user is away in autonomous mode. Do not wait for user input or ask "
-                      "permission. Decide autonomously, execute the next tools, and call "
-                      "finish_design when validated.");
+                    conversation.appendUserText(std::string("The user is away in autonomous mode. "
+                                                            "Do not wait for user input or ask "
+                                                            "permission. Decide autonomously, execute "
+                                                            "the next tools, and call finish_design "
+                                                            "when validated.")
+                                                + (truncated ? std::string(kTruncationGuidance)
+                                                             : std::string()));
                     continue;
                 }
                 result.completed = true;
@@ -436,13 +507,7 @@ namespace gladius::agent
                 {
                     traceRecorder->recordNote("truncation_nudge", {{"turnIndex", result.modelTurns}});
                 }
-                // A cut-off answer drops the tail of the last tool call's arguments, which surfaces
-                // as a confusing "argument is required" failure. Tell the model to split its work up.
-                conversation.appendUserText(
-                  "Your previous answer hit the model output limit, so the last tool call may have "
-                  "arrived incomplete. Keep single tool calls short: emit a program snippet one "
-                  "helper function at a time (root function last) instead of the whole program, and "
-                  "avoid repeating large snippets you already sent.");
+                conversation.appendUserText(kTruncationGuidance);
             }
             previousTurnHadFailure = turnHadFailure;
         }

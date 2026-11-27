@@ -601,6 +601,15 @@ namespace gladius::ui
         m_limits.maxModelTurns =
           std::max(0, m_configManager->getValue<int>("Agent", "maxModelTurns", kDefaultMaxModelTurns));
 
+        m_maxOutputTokens = std::max(1,
+          m_configManager->getValue<int>("Agent", "maxOutputTokens", kDefaultMaxOutputTokens));
+        m_thinkingTokens =
+          m_configManager->getValue<int>("Agent", "thinkingTokens", kDefaultThinkingTokens);
+        m_requestTimeoutSeconds = std::max(1,
+          m_configManager->getValue<int>(
+            "Agent", "requestTimeoutSeconds", kDefaultRequestTimeoutSeconds));
+        m_cacheBreakpointMode = m_configManager->getValue<std::string>("Agent", "cacheBreakpoints", "auto");
+
         std::string const account = (m_providerIndex == 1) ? "anthropic" : "openai";
         if (auto key = m_credentialStore.loadSecret(kCredentialService, account))
         {
@@ -756,6 +765,42 @@ namespace gladius::ui
         }
     }
 
+    namespace
+    {
+        /// @brief Copies the panel's per-request tunables onto a provider config
+        void applyRequestTuning(agent::ProviderConfig & config,
+                                agent::ApiType apiType,
+                                int maxOutputTokens,
+                                int thinkingTokens,
+                                int timeoutSeconds,
+                                std::string const & cacheBreakpointMode)
+        {
+            config.maxTokens = maxOutputTokens;
+            // Anthropic only emits `thinking` while the budget is below the completion limit, so a
+            // higher cap would silently switch reasoning off instead of widening it.
+            config.thinkingBudgetTokens = std::min(thinkingTokens, maxOutputTokens - 1);
+            config.timeoutSeconds = timeoutSeconds;
+            if (cacheBreakpointMode == "all")
+            {
+                config.cacheBreakpoints = agent::CacheBreakpointPlacement::CacheAll;
+            }
+            else if (cacheBreakpointMode == "tools")
+            {
+                config.cacheBreakpoints = agent::CacheBreakpointPlacement::Tools;
+            }
+            else if (cacheBreakpointMode == "none")
+            {
+                config.cacheBreakpoints = agent::CacheBreakpointPlacement::None;
+            }
+            else // "auto": only pay for a breakpoint where the API honours it
+            {
+                config.cacheBreakpoints = apiType == agent::ApiType::Anthropic
+                                            ? agent::CacheBreakpointPlacement::Tools
+                                            : agent::CacheBreakpointPlacement::None;
+            }
+        }
+    } // namespace
+
     void AgentPanels::saveSettings()
     {
         if (m_configManager != nullptr)
@@ -768,6 +813,12 @@ namespace gladius::ui
             m_configManager->setValue<int>(
               "Agent", "maxWallTimeMinutes", minutesFromWallTime(m_limits.maxWallTime));
             m_configManager->setValue<int>("Agent", "maxModelTurns", m_limits.maxModelTurns);
+            m_configManager->setValue<int>("Agent", "maxOutputTokens", m_maxOutputTokens);
+            m_configManager->setValue<int>("Agent", "thinkingTokens", m_thinkingTokens);
+            m_configManager->setValue<int>(
+              "Agent", "requestTimeoutSeconds", m_requestTimeoutSeconds);
+            m_configManager->setValue<std::string>(
+              "Agent", "cacheBreakpoints", m_cacheBreakpointMode);
 
             nlohmann::json profilesArr = nlohmann::json::array();
             m_credentialWarning.clear();
@@ -1203,12 +1254,30 @@ namespace gladius::ui
         }
 
         auto const profilesCopy = m_providerProfiles;
+        int const legacyProviderIdx = m_providerIndex;
+        // Snapshot the tunables: the worker thread must not read panel fields the UI can still change.
+        int const maxOutputTokens = m_maxOutputTokens;
+        int const thinkingTokens = m_thinkingTokens;
+        int const requestTimeoutSeconds = m_requestTimeoutSeconds;
+        std::string const cacheBreakpointMode = m_cacheBreakpointMode;
+        auto tune = [maxOutputTokens,
+                     thinkingTokens,
+                     requestTimeoutSeconds,
+                     cacheBreakpointMode](agent::ProviderConfig & config, agent::ApiType apiType) {
+            applyRequestTuning(config,
+                               apiType,
+                               maxOutputTokens,
+                               thinkingTokens,
+                               requestTimeoutSeconds,
+                               cacheBreakpointMode);
+        };
         agent::ProviderConfig legacyCfg;
         legacyCfg.endpoint = m_endpointBuf;
         legacyCfg.model = m_modelBuf;
         legacyCfg.apiKey = m_apiKeyBuf;
         legacyCfg.stream = true;
-        int const legacyProviderIdx = m_providerIndex;
+        tune(legacyCfg, legacyProviderIdx == 1 ? agent::ApiType::Anthropic
+                                               : agent::ApiType::OpenAiCompatible);
         std::string const promptForKnowledge = userPrompt;
 
 #ifdef __EMSCRIPTEN__
@@ -1216,11 +1285,15 @@ namespace gladius::ui
                                    std::move(profilesCopy),
                                    std::move(legacyCfg),
                                    legacyProviderIdx,
-                                   promptForKnowledge);
+                                   promptForKnowledge,
+                                   m_maxOutputTokens,
+                                   m_thinkingTokens,
+                                   m_requestTimeoutSeconds,
+                                   m_cacheBreakpointMode);
         m_webRunTask->resume();
 #else
         m_workerThread = std::thread(
-          [this, selections, profilesCopy, legacyCfg, legacyProviderIdx, promptForKnowledge]() {
+          [this, selections, profilesCopy, legacyCfg, legacyProviderIdx, promptForKnowledge, tune]() {
               auto makeProvider = [](agent::ApiType apiType, agent::ProviderConfig const & c)
                 -> std::unique_ptr<agent::IAiProvider> {
                   if (apiType == agent::ApiType::Anthropic)
@@ -1247,6 +1320,7 @@ namespace gladius::ui
                   cfg.apiKey = pit->apiKey;
                   cfg.model = sel.model;
                   cfg.stream = true;
+                  tune(cfg, pit->apiType);
                   candidates.push_back(agent::FallbackProvider::Candidate{
                     pit->name + "/" + sel.model, makeProvider(pit->apiType, cfg)});
               }
@@ -1300,7 +1374,11 @@ namespace gladius::ui
                                               std::vector<agent::ProviderProfile> profilesCopy,
                                               agent::ProviderConfig legacyCfg,
                                               int legacyProviderIdx,
-                                              std::string promptForKnowledge)
+                                              std::string promptForKnowledge,
+                                              int maxOutputTokens,
+                                              int thinkingTokens,
+                                              int requestTimeoutSeconds,
+                                              std::string cacheBreakpointMode)
     {
         auto makeProvider = [](agent::ApiType apiType, agent::ProviderConfig const & c)
           -> std::unique_ptr<agent::IAiProvider> {
@@ -1328,6 +1406,8 @@ namespace gladius::ui
             cfg.apiKey = pit->apiKey;
             cfg.model = sel.model;
             cfg.stream = true;
+            applyRequestTuning(cfg, pit->apiType, maxOutputTokens, thinkingTokens,
+                               requestTimeoutSeconds, cacheBreakpointMode);
             candidates.push_back(agent::FallbackProvider::Candidate{
               pit->name + "/" + sel.model, makeProvider(pit->apiType, cfg)});
         }
@@ -1667,6 +1747,70 @@ namespace gladius::ui
                     m_configManager->setValue<int>("Agent", "maxWallTimeMinutes", wallTimeMinutes);
                     m_configManager->save();
                 }
+            }
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Per-request Tunables");
+        int maxOutputTokens = m_maxOutputTokens;
+        if (ImGui::SliderInt("Max output tokens", &maxOutputTokens, 1024, 32768))
+        {
+            m_maxOutputTokens = maxOutputTokens;
+            if (m_configManager != nullptr)
+            {
+                m_configManager->setValue<int>("Agent", "maxOutputTokens", m_maxOutputTokens);
+                m_configManager->save();
+            }
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Completion budget per model turn. A whole program snippet has to fit "
+                              "in here; too small makes the model stop mid-tool-call.");
+        }
+        int thinkingTokens = m_thinkingTokens;
+        if (ImGui::SliderInt("Thinking tokens", &thinkingTokens, 0, 8192))
+        {
+            m_thinkingTokens = thinkingTokens;
+            if (m_configManager != nullptr)
+            {
+                m_configManager->setValue<int>("Agent", "thinkingTokens", m_thinkingTokens);
+                m_configManager->save();
+            }
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Cap on the model's hidden reasoning. 0 leaves it unbounded, which on "
+                              "reasoning models dominates the wall time of every turn.");
+        }
+        int timeoutSeconds = m_requestTimeoutSeconds;
+        if (ImGui::SliderInt("Request timeout", &timeoutSeconds, 30, 1800, "%d s"))
+        {
+            m_requestTimeoutSeconds = timeoutSeconds;
+            if (m_configManager != nullptr)
+            {
+                m_configManager->setValue<int>(
+                  "Agent", "requestTimeoutSeconds", m_requestTimeoutSeconds);
+                m_configManager->save();
+            }
+        }
+        int cacheModeIndex = 0;
+        char const * cacheModes[] = {"Auto (Anthropic only)", "None", "Tools", "All"};
+        char const * cacheModeKeys[] = {"auto", "none", "tools", "all"};
+        for (int i = 0; i < 4; ++i)
+        {
+            if (m_cacheBreakpointMode == cacheModeKeys[i])
+            {
+                cacheModeIndex = i;
+            }
+        }
+        if (ImGui::Combo("Prompt cache", &cacheModeIndex, cacheModes, 4))
+        {
+            m_cacheBreakpointMode = cacheModeKeys[cacheModeIndex];
+            if (m_configManager != nullptr)
+            {
+                m_configManager->setValue<std::string>(
+                  "Agent", "cacheBreakpoints", m_cacheBreakpointMode);
+                m_configManager->save();
             }
         }
 

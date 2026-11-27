@@ -42,6 +42,8 @@ namespace gladius::agent
         std::string providerName;
         /// @brief Model turns the provider cut off at its completion limit
         std::size_t truncatedTurns = 0;
+        /// @brief Model turns that returned neither text nor tool calls
+        std::size_t emptyTurns = 0;
         std::string finalMessage;
         std::string error;
     };
