@@ -134,7 +134,7 @@ namespace gladius::ui
                   return {};
               }
           },
-          design::ManufacturingValidator::makeValidationCallback(m_toolCtx->document, m_catalogue),
+          {},
           [this]() { m_documentModifiedPending.store(true); },
           &m_skills,
           &m_todos,
@@ -160,6 +160,8 @@ namespace gladius::ui
                 question, cancellation);
           },
           0});
+        m_toolCtx->validateModel =
+          design::ManufacturingValidator::makeValidationCallback(m_toolCtx->document, m_catalogue);
         design::registerDesignTools(m_registry, *m_toolCtx);
     }
 
