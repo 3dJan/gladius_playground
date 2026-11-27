@@ -47,6 +47,40 @@ desktop packaging remain excluded. The virtual filesystem is not persistent
 across page reloads, and browser Save As does not provide a custom filename
 picker yet.
 
+## Compact / mobile layout
+
+Gladius classifies the surface it is drawn on once per frame. A viewport area of
+700 x 420 CSS pixels or smaller, or a shell that reports a coarse pointer
+(`matchMedia('(pointer: coarse)')`), selects the **compact** profile; everything
+else keeps the desktop layout. In compact mode the Design Agent panel owns the
+whole main dock space, the preview, graph and slice views start hidden, and the
+top bar carries one icon toggle per window - tapping a toggle swaps the window
+that owns the main space instead of adding another docked pane. Frame padding,
+item spacing, the scrollbar and the Design Agent controls grow to a 44 CSS pixel
+touch floor, keyboard-only chrome such as the Shortcuts button is hidden, and the
+panel keeps a small margin to the physical screen edge.
+
+Input on a phone: one finger orbits the camera, two fingers pan, and pinching
+dollies in and out. The page itself does not scroll or pinch-zoom over the canvas,
+and rotating the device is debounced so the swapchain is recreated once instead of
+per resize event.
+
+Phone-class GPUs cannot keep the realtime raymarcher fed, so on a compact surface
+an *unset* realtime mode resolves to **off** rather than *auto*; the preview still
+renders progressively. Enabling realtime in the preview's *Realtime Raymarch*
+menu stores a mode explicitly, and a stored mode always wins over the surface
+default.
+
+The layout can be forced: **Settings ▸ Appearance ▸ Layout mode** (Auto / Desktop /
+Compact) is stored with the other settings, which on the web build means for the
+rest of the session because the virtual filesystem is not persistent across
+reloads. For a durable choice on the web use the `layout` query parameter -
+`gladius.html?layout=compact` or `?layout=desktop` - which is also how the compact
+layout is reviewed in a desktop browser at a small window size. A query parameter
+or `GLADIUS_LAYOUT` environment value outranks the stored setting.
+Switching profiles clears the stored dock layout, because a saved split belongs to
+a surface that no longer exists.
+
 ## Opening a shared 3MF URL
 
 The browser build can open a 3MF file during startup when the page URL contains

@@ -13,7 +13,7 @@
   status stay pinned at the bottom of the panel, and the former verbose logs moved into collapsible
   "Activity log" / "Developer diagnostics" sections. A run can now be paused and resumed between
   agent steps.
-- **Design Agent prompt card**: the prompt field, the "Start fresh" / "Clear session" actions, the
+- **Design Agent prompt card**: the prompt field, the "Clear session" action, the
   model and fallback pickers and the send action now sit inside a single rounded card with a
   focus-highlighted border, the way modern chat composers look. An empty field shows the
   placeholder "What do you want to build?", send is an icon button, "Attach image" and
@@ -27,9 +27,50 @@
   "Agent Prompt Editor" window bound to the same draft, and dropping a `.txt`/`.md` file onto the
   window appends its contents as prompt instructions (desktop only).
 - **Smooth window resize experience**: Eliminated flicker and clearing of rendered content during window resize operations. The viewport now preserves the displayed 3D scene during manual resize, maximize/restore, and multi-monitor transitions, providing a more professional and polished user experience.
+- **Compact layout for phones and small windows**: Gladius now detects a phone-sized or touch-driven surface (a small viewport area or a coarse pointer) and switches to a compact layout: the Design Agent panel takes the whole main space, the preview and graph start hidden, and the top bar carries one toggle per window that swaps the window owning the main space. Touch targets grow to a 44 px floor, shortcut hints disappear, keyboard-only chrome is hidden, and browser page scrolling / pinch-zoom is suppressed over the canvas. Two fingers drive camera pan and pinch dolly on the web build; one finger still orbits. The realtime raymarch preview defaults to off on a compact surface because phone-class GPUs cannot keep up - it can still be enabled per preview. Settings ▸ Appearance ▸ "Layout mode" forces Auto / Desktop / Compact, and `?layout=compact|desktop|auto` (web) or `GLADIUS_LAYOUT` (desktop) overrides it for a single run.
 
 ### Improvements
 
+- **Design Agent conversation section**: the transcript is no longer a flat list of `[Agent] ...`
+  lines at the window margin. Each turn gets a role chip on the rail column and its text on the same
+  content column the phase artifacts above use, so it reads as a continuation of the workflow;
+  consecutive turns of one speaker no longer repeat their role line, tool traces are muted and cut
+  short, a long answer is truncated with an explicit "Show N earlier turns" row instead of scrolling
+  away, clicking a cut-off turn expands the transcript, and the section stays visible with a hint
+  before the first turn exists. Set `GLADIUS_AGENT_DEMO` (desktop) or `?agentDemo=1` (web) to review
+  the panel with an example session and no AI provider configured.
+- **Design Agent provider failures are now readable**: a failed provider call no longer surfaces a raw
+  transport string or vendor JSON. Failures are classified into actionable cases - missing or invalid
+  API key, model not found, rate limited, out of quota, unreachable endpoint, timeout, malformed or
+  empty response, and provider not configured - each with a one line summary and what to do about it
+  (for example "Add the API key in Settings and try again"). The original provider text is still kept
+  in "Developer diagnostics" for debugging.
+- **No OpenRouter provider or models by default**: Gladius no longer seeds an `openrouter_default`
+  provider profile or fetches its model list on first run. Providers and their models are added
+  explicitly in Settings, and an empty provider now shows which step is missing instead of failing
+  silently. Sending a prompt without a usable provider or model is refused before the draft is
+  consumed, with a link straight to the provider settings.
+- **Unanswered agent questions stay visible**: when the agent answers with a question instead of
+  running a tool, the reply is pinned in a card above the prompt instead of being buried in the
+  collapsed activity log. The card offers Continue (answer for this step) and Autonomous (switch to
+  autonomous mode and keep going), the status line reports that the agent is waiting for a reply, and
+  the current workflow phase is marked as needing attention.
+- **Autonomy mode is visible in the panel**: the footer status line now carries a chip showing the
+  active mode - Ask frequently, Ask at major decisions, or Work autonomously. Clicking it opens the
+  three modes, and the choice is saved with the rest of the Design Agent settings. The chip is a
+  quiet bordered label in the regular text colour rather than accent-coloured text, so it reads as a
+  setting and not as a warning next to the status line.
+- **Signal colours are now used consistently**: red text means one thing only - something failed and
+  needs a fix. Blocked actions ("cannot delete, this is referenced"), missing or degraded states
+  ("no 3MF model loaded", "NanoVDB is currently degraded"), and input hints are amber instead, and
+  what the app is doing right now stays blue. The theme accent is a selection mark (borders, bands,
+  active nodes) and is no longer used to colour text, so the transcript role lines, the
+  "Required"/"Optional" labels, the "Show N earlier turns" row and the send icon read as ordinary
+  text. The palette and the rules live in one header (`src/ui/SignalColors.h`) that all views share
+  instead of each hard coding its own red.
+- Removed the "Start fresh" control from the Design Agent. Resetting the design is what New Document
+  does, and clearing the conversation is what "Clear session" does, so the extra toggle (and its
+  mid-run template reseed) only caused accidental loss of work.
 - Added minimum viewport dimension validation to prevent edge cases with very small window sizes
 - MCP server over HTTP is now documented and wired up for agents: `.mcp.json` exposes a `gladius`
   `type: "http"` entry alongside the `gladius-stdio` fallback, VS Code tasks start the HTTP server

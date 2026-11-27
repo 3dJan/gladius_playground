@@ -296,6 +296,31 @@ User releases slider:
 
 ---
 
+## WebGPU Callbacks: Native Pumping vs. Browser Async
+
+WebGPU completion callbacks (`MapAsync`, `PopErrorScope`) are delivered by the host event loop.
+The two builds reach that loop differently, so the waiting strategy must differ:
+
+| Build | Callback delivery | Correct wait |
+|-------|-------------------|--------------|
+| Native (Dawn) | `Instance::ProcessEvents()` on the calling thread | `co_await compute::WaitUntil(...)` driven by `compute::runBlocking(task, pump)`, or a `processEvents()` pump loop |
+| Browser (emdawnwebgpu) | JS promise continuation only | `co_await compute::WaitUntil(...)`, task stepped by `AsyncTask::step()` from the render/progress path |
+
+Rule for code compiled with `__EMSCRIPTEN__`: never call `processEvents()` (directly or through
+`compute::runBlocking`) to wait for a WebGPU callback. emdawnwebgpu registers only `WaitAnyOnly` and
+`AllowProcessEvents` events with its `EventManager` and `ProcessEvents()` ignores spontaneous events,
+so an `AllowSpontaneous` callback such as `PopErrorScope` can only land after wasm returns control to
+JS. A pump loop there spins at 100% CPU on the browser main thread and freezes the whole UI.
+
+Blocking WebGPU entry points (`WebGPUThumbnailRenderer::renderPng`, the mesh exporters, the colour
+sampler, `WebGPUProgramValidator::validateShaderSource`, the blocking `WebGPUSdfEvaluator` overloads,
+`Document::exportWebGpuMesh`) throw `webgpu::makeBrowserBlockingUnavailableError(...)` in the browser
+build; browser flows use the `*Async` coroutine variants instead. The regression guard
+`tests/unittests/WebGPUErrorScopeHygiene_tests.cpp` fails if a pump or `runBlocking` appears outside a
+native-only preprocessor branch.
+
+---
+
 ## Summary: Key Invariants
 
 1. **Low-res preview is always synchronous** on the UI thread for immediate feedback
@@ -304,3 +329,4 @@ User releases slider:
 4. **Outdated async results still update GL textures** but don't affect scheduling state
 5. **Epoch increment cancels/invalidates in-flight work** to prevent stale results from blocking new work
 6. **Camera movement (`isMoving`) always uses low-res preview**, not front buffer
+7. **Browser builds never pump WebGPU callbacks synchronously** - they await them as coroutine suspensions (see above)
