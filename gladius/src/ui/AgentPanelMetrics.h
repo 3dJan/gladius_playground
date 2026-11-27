@@ -61,6 +61,20 @@ namespace gladius::ui
         /// @brief Opacity of muted turn bodies (system notes, tool traces)
         constexpr float mutedBodyAlpha = 0.72f;
 
+        // --- Status chips ---
+        // A chip reports a setting, not a problem, so it is outlined quietly instead of being
+        // painted in the accent colour. Its height follows the footer's icon buttons.
+        /// @brief Space between a chip's text and its border
+        constexpr float chipPaddingX = 0.45f;
+        constexpr float chipPaddingY = 0.14f;
+        /// @brief Rounding of a chip; tighter than rowRounding so it reads as a label
+        constexpr float chipRounding = 0.24f;
+        /// @brief Opacity of a chip that reports a harmless state
+        constexpr float chipMutedAlpha = 0.78f;
+        /// @brief Opacity of the chip fill and border
+        constexpr float chipFillAlpha = 0.08f;
+        constexpr float chipBorderAlpha = 0.34f;
+
         // --- Header ---
         constexpr float headerPadding = 0.55f;
         constexpr float headerTitleLine = 1.35f;

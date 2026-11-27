@@ -260,16 +260,34 @@ namespace gladius::ui
             break;
         }
 
-        // The chip sits at the right edge of the status line, opposite the status text.
-        float const chipWidth = ImGui::CalcTextSize((std::string(icon) + " " + label).c_str()).x
-                              + ImGui::GetStyle().FramePadding.x;
+        using namespace agentMetrics;
+        // The chip sits at the right edge of the status line, opposite the status text. It reports a
+        // setting rather than a problem, so it reads as a bordered label in the normal text colour:
+        // an accent-coloured chip made the default mode look like a warning.
+        float const fontSize = ImGui::GetFontSize();
+        std::string const text = std::string(icon) + " " + label;
+        ImVec2 const textSize = ImGui::CalcTextSize(text.c_str());
+        ImVec2 const chipSize(textSize.x + fontSize * chipPaddingX * 2.f,
+                              ImGui::GetTextLineHeight() + fontSize * chipPaddingY * 2.f);
         float const chipX = ImGui::GetCursorPosX()
-                          + std::max(0.f, ImGui::GetContentRegionAvail().x - chipWidth);
+                          + std::max(0.f, ImGui::GetContentRegionAvail().x - chipSize.x);
+        // The pill straddles the status text instead of sitting on its baseline.
         ImGui::SameLine(chipX);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(agentWidgets::accent()));
-        ImGui::Text("%s %s", icon, label);
-        ImGui::PopStyleColor();
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() - fontSize * chipPaddingY);
+        ImGui::InvisibleButton("##agentModeChip", chipSize);
         bool const chipClicked = ImGui::IsItemClicked();
+        bool const chipHovered = ImGui::IsItemHovered();
+        ImDrawList & drawList = *ImGui::GetWindowDrawList();
+        ImVec2 const chipMin = ImGui::GetItemRectMin();
+        ImVec2 const chipMax = ImGui::GetItemRectMax();
+        ImVec4 const chipColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        agentWidgets::drawChip(drawList, chipMin, chipMax, chipColor, chipHovered);
+        ImVec4 labelText = chipColor;
+        labelText.w *= chipHovered ? 1.f : chipMutedAlpha;
+        drawList.AddText(ImVec2(chipMin.x + fontSize * chipPaddingX,
+                                chipMin.y + fontSize * chipPaddingY),
+                         ImGui::GetColorU32(labelText),
+                         text.c_str());
         if (ImGui::BeginPopup("agentModePopup"))
         {
             if (ImGui::Selectable("Ask often", m_policy.autonomy() == agent::AutonomyLevel::AskFrequently))

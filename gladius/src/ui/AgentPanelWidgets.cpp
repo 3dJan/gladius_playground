@@ -359,6 +359,25 @@ namespace gladius::ui
                              mark);
         }
 
+        void drawChip(ImDrawList & drawList, ImVec2 min, ImVec2 max, ImVec4 color, bool hovered)
+        {
+            using namespace agentMetrics;
+            float const fontSize = ImGui::GetFontSize();
+            // A chip is a label with a border, not a status flag: the colour only tints the frame,
+            // so a mode readout never competes with the warning lines around it.
+            float const boost = hovered ? 1.8f : 1.f;
+            drawList.AddRectFilled(min,
+                                   max,
+                                   tinted(color, std::min(1.f, chipFillAlpha * boost)),
+                                   fontSize * chipRounding);
+            drawList.AddRect(min,
+                             max,
+                             tinted(color, std::min(1.f, chipBorderAlpha * boost)),
+                             fontSize * chipRounding,
+                             0,
+                             1.f);
+        }
+
         void drawLetterChip(ImDrawList & drawList,
                             ImVec2 center,
                             float radius,
