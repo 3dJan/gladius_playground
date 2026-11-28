@@ -209,7 +209,7 @@ namespace gladius::ui
             statusText = "Agent is waiting for your reply";
             statusColor = colorWarn();
         }
-        else if (isDesignComplete(m_graph))
+        else if (isDesignComplete(uiGraph()))
         {
             statusText = "Design complete";
             statusColor = colorOk();
@@ -225,7 +225,8 @@ namespace gladius::ui
         }
         if (ImGui::IsItemHovered())
         {
-            ImGui::SetTooltip("%s", m_graph.goal().empty() ? "" : m_graph.goal().c_str());
+            auto const & goal = uiGraph().goal();
+            ImGui::SetTooltip("%s", goal.empty() ? "" : goal.c_str());
         }
 
         if (std::size_t const queued = m_steering.size(); queued > 0)

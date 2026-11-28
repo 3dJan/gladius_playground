@@ -29,26 +29,30 @@ namespace gladius::ui
 {
     WorkflowSignals AgentPanels::workflowSignals() const
     {
+        auto const & graph = uiGraph();
+        auto const & todos = uiTodos();
         WorkflowSignals signals;
         signals.running = m_running.load();
         signals.agentFailed = !m_lastError.empty();
-        signals.planningBlocked = hasBlockedPlanning(m_todos);
+        signals.planningBlocked = hasBlockedPlanning(todos);
         signals.awaitingUserReply = m_awaitingUserReply && !m_running.load();
         std::size_t passed = 0;
-        countDeterministicResults(m_graph, passed, signals.deterministicWarnings);
+        countDeterministicResults(graph, passed, signals.deterministicWarnings);
         return signals;
     }
 
     std::string AgentPanels::phaseSummary(std::size_t index) const
     {
+        auto const & graph = uiGraph();
+        auto const & todos = uiTodos();
         if (index == indexOf(WorkflowPhase::Understand))
         {
             std::size_t const hard = static_cast<std::size_t>(
-              std::count_if(m_graph.requirements().begin(),
-                            m_graph.requirements().end(),
+              std::count_if(graph.requirements().begin(),
+                            graph.requirements().end(),
                             [](design::Requirement const & r) { return r.mandatory; }));
-            std::size_t const soft = m_graph.requirements().size() - hard;
-            if (m_graph.requirements().empty())
+            std::size_t const soft = graph.requirements().size() - hard;
+            if (graph.requirements().empty())
             {
                 return "Nothing captured yet";
             }
@@ -57,22 +61,22 @@ namespace gladius::ui
         }
         if (index == indexOf(WorkflowPhase::Decompose))
         {
-            if (m_graph.nodes().empty())
+            if (graph.nodes().empty())
             {
                 return "Not decomposed yet";
             }
-            return std::to_string(m_graph.nodes().size()) + " elements";
+            return std::to_string(graph.nodes().size()) + " elements";
         }
         if (index == indexOf(WorkflowPhase::Explore))
         {
             std::size_t ready = 0;
             std::size_t rejected = 0;
-            for (auto const & [id, variant] : m_graph.variants())
+            for (auto const & [id, variant] : graph.variants())
             {
                 (void) id;
                 (variant.status == design::DesignStatus::Rejected ? rejected : ready)++;
             }
-            if (m_graph.variants().empty())
+            if (graph.variants().empty())
             {
                 return "No alternatives generated yet";
             }
@@ -86,23 +90,23 @@ namespace gladius::ui
         if (index == indexOf(WorkflowPhase::Develop))
         {
             std::size_t const done = static_cast<std::size_t>(
-              std::count_if(m_todos.items().begin(),
-                            m_todos.items().end(),
+              std::count_if(todos.items().begin(),
+                            todos.items().end(),
                             [](design::TodoItem const & t) {
                                 return t.status == design::TodoStatus::Done;
                             }));
-            if (m_todos.items().empty())
+            if (todos.items().empty())
             {
                 return "No planning tasks yet";
             }
-            return std::to_string(done) + " of " + std::to_string(m_todos.items().size())
+            return std::to_string(done) + " of " + std::to_string(todos.items().size())
                    + " tasks complete";
         }
 
         std::size_t passed = 0;
         std::size_t warnings = 0;
-        countDeterministicResults(m_graph, passed, warnings);
-        if (isDesignComplete(m_graph))
+        countDeterministicResults(graph, passed, warnings);
+        if (isDesignComplete(graph))
         {
             return "Design finished - " + std::to_string(passed) + " checks measured";
         }
@@ -153,10 +157,10 @@ namespace gladius::ui
             return;
         }
 
-        auto const headerCommands = m_header.render(m_graph.goal());
+        auto const headerCommands = m_header.render(uiGraph().goal());
         if (headerCommands.goalCommitRequested)
         {
-            m_graph.setGoal(headerCommands.goalDraft);
+            stageGoalEdit(headerCommands.goalDraft);
         }
         if (headerCommands.settingsRequested)
         {
@@ -171,9 +175,10 @@ namespace gladius::ui
             m_visible = false;
         }
 
+        auto const & graphForUi = uiGraph();
         WorkflowSignals const signals = workflowSignals();
-        auto const states = derivePhaseStates(m_graph, signals);
-        std::size_t const activeIndex = indexOf(activePhaseOf(m_graph));
+        auto const states = derivePhaseStates(graphForUi, signals);
+        std::size_t const activeIndex = indexOf(activePhaseOf(graphForUi));
 
         float const nowSeconds = static_cast<float>(ImGui::GetTime());
         if (m_lastActivePhaseIndex != activeIndex)
@@ -195,9 +200,12 @@ namespace gladius::ui
         }
 
         m_artifacts.activeToolName = m_activeToolName;
-        // While a run holds the graph, UI requirement edits go to the staging queue; the rows still
-        // draw the merged view, so nothing the user typed disappears.
-        m_artifacts.bindRequirementEdits(m_running.load() ? &m_requirementEdits : nullptr);
+        bool const running = m_running.load();
+        // While a run holds the authoritative graph and todo store, the UI reads its own published
+        // snapshot and routes requirement edits through the staging queue.
+        m_artifacts.setDesignState(
+          running ? m_uiGraph : m_graph, running ? m_uiTodos : m_todos, running);
+        m_artifacts.bindRequirementEdits(running ? &m_requirementEdits : nullptr);
         std::array<AgentWorkflowView::ArtifactRenderer, kWorkflowPhaseCount> const renderers = {
           [this]() { m_artifacts.renderUnderstand(m_workflowAnimation); },
           [this]() { m_artifacts.renderDecompose(m_workflowAnimation); },
@@ -306,7 +314,7 @@ namespace gladius::ui
                           : (m_primarySelection.profileId + " / " + m_primarySelection.model).c_str());
             ImGui::Text("Fallbacks: %zu | Phase: %s",
                         m_fallbackSelections.size(),
-                        design::toString(m_graph.phase()));
+                        design::toString(uiGraph().phase()));
             if (m_modelFetchRunning.load())
             {
                 ImGui::TextDisabled("Querying provider models...");

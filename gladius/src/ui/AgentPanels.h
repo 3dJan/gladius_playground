@@ -156,6 +156,18 @@ namespace gladius::ui
         void stopRun();
         [[nodiscard]] agent::DesignContextSnapshot buildContextSnapshot(
           std::string const & knowledgeQuery);
+        /// @brief Authoritative graph when idle, or the UI's published snapshot while a run is active
+        [[nodiscard]] design::DesignGraph const & uiGraph() const noexcept;
+        /// @brief Authoritative todo store when idle, or the UI's published snapshot while running
+        [[nodiscard]] design::TodoStore const & uiTodos() const noexcept;
+        /// @brief Copies `m_graph` and `m_todos` for the UI thread (run thread only)
+        void publishUiSnapshot();
+        /// @brief Moves the latest published snapshot into `m_uiGraph` and `m_uiTodos` (UI thread)
+        void consumePublishedUiSnapshot();
+        /// @brief Applies a goal edit directly when idle, or stages it while a run owns the graph
+        void stageGoalEdit(std::string goal);
+        /// @brief Folds any staged goal edit into `m_graph` (run thread or after run ends)
+        void applyPendingGoalEdit();
         void loadSettings();
         void saveSettings();
         void releaseTextures();
@@ -270,10 +282,23 @@ namespace gladius::ui
         std::atomic<bool> m_documentModifiedPending{false};
 
         design::DesignGraph m_graph;
+        /// @brief UI-thread snapshot of `m_graph`, updated from `m_publishedState` while running
+        design::DesignGraph m_uiGraph;
         /// @brief Requirement edits the UI made while the run thread owned the graph
         design::RequirementEditQueue m_requirementEdits;
         design::DesignCatalogue m_catalogue;
         design::TodoStore m_todos;
+        /// @brief UI-thread snapshot of `m_todos`, updated from `m_publishedState` while running
+        design::TodoStore m_uiTodos;
+        struct PublishedDesignState
+        {
+            design::DesignGraph graph;
+            design::TodoStore todos;
+        };
+        mutable std::mutex m_publishedStateMutex;
+        std::optional<PublishedDesignState> m_publishedState;
+        std::mutex m_pendingGoalMutex;
+        std::optional<std::string> m_pendingGoal;
         tools::TransactionManager m_transactions;
         tools::CheckpointManager m_checkpoints;
         tools::ToolRegistry m_registry;

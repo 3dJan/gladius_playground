@@ -55,6 +55,20 @@ namespace gladius::ui
         }
 
         /**
+         * @brief Switch which graph/todo instances the panel reads and whether direct mutations are allowed.
+         * @details While the agent run thread owns the authoritative graph and todo store, the UI
+         *          points here at its own snapshot copy with `readOnly = true`.
+         */
+        void setDesignState(design::DesignGraph & graph,
+                            design::TodoStore & todos,
+                            bool readOnly) noexcept
+        {
+            m_graph = &graph;
+            m_todos = &todos;
+            m_readOnly = readOnly;
+        }
+
+        /**
          * @brief Route requirement edits to a staging queue instead of straight into the graph.
          * @details While the agent runs, the run thread owns the graph; the UI writes to the queue
          *          and the rows draw through `setRequirementSource`, so the user still sees their
@@ -147,6 +161,7 @@ namespace gladius::ui
         RequirementSource m_requirementSource;
         design::TodoStore * m_todos = nullptr;
         tools::CheckpointManager * m_checkpoints = nullptr;
+        bool m_readOnly = false;
         Document * m_document = nullptr;
         std::function<void()> m_onDocumentModified;
         PreviewTextureResolver m_previewTexture;

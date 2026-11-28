@@ -363,7 +363,7 @@ namespace gladius::ui
                                 int & outH)
                          { return getOrCreatePreviewTexture(key, pngBytes, outW, outH); });
         m_artifacts.setRequirementSource(
-          [this]() { return m_requirementEdits.mergedView(m_graph); });
+          [this]() { return m_requirementEdits.mergedView(uiGraph()); });
         loadSettings();
         loadSessionState();
         applyDemoSession();
@@ -410,9 +410,9 @@ namespace gladius::ui
             }
             nlohmann::json state;
             state["version"] = 1;
-            state["designGraph"] = m_graph.toJson();
+            state["designGraph"] = uiGraph().toJson();
             state["conversation"] = m_conversation.toJson();
-            state["todos"] = m_todos.toJson();
+            state["todos"] = uiTodos().toJson();
             if (m_document && m_document->getAssembly())
             {
                 state["programSnippet"] =
@@ -524,9 +524,9 @@ namespace gladius::ui
         {
             nlohmann::json state = {
               {"version", 1},
-              {"designGraph", m_graph.toJson()},
+              {"designGraph", uiGraph().toJson()},
               {"conversation", m_conversation.toJson()},
-              {"todos", m_todos.toJson()}};
+              {"todos", uiTodos().toJson()}};
             std::ofstream out(sidecarStatePath(docPath), std::ios::trunc);
             if (out)
             {
@@ -1085,9 +1085,74 @@ namespace gladius::ui
         }
     }
 
+    design::DesignGraph const & AgentPanels::uiGraph() const noexcept
+    {
+        return m_running.load() ? m_uiGraph : m_graph;
+    }
+
+    design::TodoStore const & AgentPanels::uiTodos() const noexcept
+    {
+        return m_running.load() ? m_uiTodos : m_todos;
+    }
+
+    void AgentPanels::publishUiSnapshot()
+    {
+        PublishedDesignState snapshot{m_graph, m_todos};
+        std::lock_guard<std::mutex> lock(m_publishedStateMutex);
+        m_publishedState = std::move(snapshot);
+    }
+
+    void AgentPanels::consumePublishedUiSnapshot()
+    {
+        std::optional<PublishedDesignState> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(m_publishedStateMutex);
+            if (m_publishedState.has_value())
+            {
+                snapshot = std::move(m_publishedState);
+                m_publishedState.reset();
+            }
+        }
+        if (snapshot.has_value())
+        {
+            m_uiGraph = std::move(snapshot->graph);
+            m_uiTodos = std::move(snapshot->todos);
+        }
+    }
+
+    void AgentPanels::stageGoalEdit(std::string goal)
+    {
+        if (m_running.load())
+        {
+            m_uiGraph.setGoal(goal);
+            std::lock_guard<std::mutex> lock(m_pendingGoalMutex);
+            m_pendingGoal = std::move(goal);
+            return;
+        }
+        m_graph.setGoal(std::move(goal));
+    }
+
+    void AgentPanels::applyPendingGoalEdit()
+    {
+        std::optional<std::string> goal;
+        {
+            std::lock_guard<std::mutex> lock(m_pendingGoalMutex);
+            if (m_pendingGoal.has_value())
+            {
+                goal = std::move(m_pendingGoal);
+                m_pendingGoal.reset();
+            }
+        }
+        if (goal.has_value())
+        {
+            m_graph.setGoal(std::move(*goal));
+        }
+    }
+
     void AgentPanels::drainEvents()
     {
         pollModelFetch();
+        consumePublishedUiSnapshot();
         if (!m_running.load() && m_steeringClosed)
         {
             m_steeringClosed = false;
@@ -1195,9 +1260,10 @@ namespace gladius::ui
 
     agent::DesignContextSnapshot AgentPanels::buildContextSnapshot(std::string const & knowledgeQuery)
     {
-        // Requirement edits from the UI wait here: this lambda runs on the run thread, at the point
-        // where the loop is about to build its request, so the graph stays single-writer and the
-        // edits land in this turn's live context as user requirement changes.
+        // Requirement and goal edits from the UI wait here: this lambda runs on the run thread, at
+        // the point where the loop is about to build its request, so the graph stays single-writer
+        // and the edits land in this turn's live context as user requirement changes.
+        applyPendingGoalEdit();
         m_requirementEdits.applyTo(m_graph);
         agent::DesignContextSnapshot snap;
         snap.autonomy = m_policy.autonomy();
@@ -1243,6 +1309,7 @@ namespace gladius::ui
         snap.availableSkillsSummary = m_skills.summarizeForPrompt();
         snap.todoSummary = m_todos.summarize();
         snap.knowledgeSummary = m_knowledge.summarizeForPrompt(knowledgeQuery, 5);
+        publishUiSnapshot();
         return snap;
     }
 
@@ -1317,6 +1384,7 @@ namespace gladius::ui
             std::lock_guard<std::mutex> lock(m_leftoverSteersMutex);
             m_leftoverSteers.clear();
         }
+        applyPendingGoalEdit();
         m_requirementEdits.applyTo(m_graph);
         if (m_toolCtx)
         {
@@ -1347,6 +1415,12 @@ namespace gladius::ui
         m_pendingImages.clear();
         m_inspectedImageIndex = -1;
         m_conversation.append(std::move(msg));
+        m_uiGraph = m_graph;
+        m_uiTodos = m_todos;
+        {
+            std::lock_guard<std::mutex> lock(m_publishedStateMutex);
+            m_publishedState.reset();
+        }
         m_steeringClosed = true;
         m_running.store(true);
 
@@ -1491,6 +1565,7 @@ namespace gladius::ui
               {
                   finishSessionTrace(*trace);
               }
+              publishUiSnapshot();
               m_running.store(false);
           });
 #endif
@@ -1603,6 +1678,7 @@ namespace gladius::ui
             std::lock_guard<std::mutex> lock(m_leftoverSteersMutex);
             m_leftoverSteers = std::move(runResult.leftoverSteers);
         }
+        publishUiSnapshot();
         m_running.store(false);
         co_return;
     }
@@ -1714,6 +1790,7 @@ namespace gladius::ui
         }
         // Anything still waiting was queued for a run that is over.
         restoreSteers(m_steering.drain());
+        applyPendingGoalEdit();
         m_requirementEdits.applyTo(m_graph);
     }
 

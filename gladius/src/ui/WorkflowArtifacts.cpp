@@ -418,7 +418,8 @@ namespace gladius::ui
             ImGui::SetCursorScreenPos(ImVec2(std::max(frame.origin.x,
                                                       frame.max.x - actionsWidth),
                                              frame.origin.y));
-            if (ImGui::SmallButton(freezeLabel))
+            ImGui::BeginDisabled(m_readOnly);
+            if (ImGui::SmallButton(freezeLabel) && !m_readOnly)
             {
                 if (frozen)
                 {
@@ -429,6 +430,7 @@ namespace gladius::ui
                     m_graph->freezeNode(row.id);
                 }
             }
+            ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::SmallButton(ICON_FA_COLUMNS " Alternatives"))
             {
@@ -534,19 +536,21 @@ namespace gladius::ui
         ImGui::SetCursorScreenPos(ImVec2(textX, row.max.y - ImGui::GetFrameHeight() - fontSize * 0.10f));
         float const commentWidth = row.max.x - textX - lineHeight * 1.9f;
         ImGui::SetNextItemWidth(std::max(40.f, commentWidth));
+        ImGui::BeginDisabled(m_readOnly);
         bool const feedbackEdited
           = ImGui::InputTextWithHint("##varFb", "Comment...", fbBuf, sizeof(fbBuf)) != false;
         ImGui::SameLine();
         bool const rejected = ImGui::SmallButton(ICON_FA_TIMES) != false;
+        ImGui::EndDisabled();
         if (ImGui::IsItemHovered())
         {
             ImGui::SetTooltip("Reject this alternative");
         }
-        if (feedbackEdited)
+        if (!m_readOnly && feedbackEdited)
         {
             m_graph->setVariantFeedback(variant.id, fbBuf);
         }
-        if (rejected && variant.status != design::DesignStatus::Rejected)
+        if (!m_readOnly && rejected && variant.status != design::DesignStatus::Rejected)
         {
             m_graph->rejectVariant(variant.id, "Rejected in the Design Agent panel");
         }
@@ -624,10 +628,11 @@ namespace gladius::ui
                                  + ImGui::GetStyle().FramePadding.x * 4.f
                                  + ImGui::GetStyle().ItemSpacing.x * 2.f;
         ImGui::SetNextItemWidth(std::max(40.f, row.max.x - textX - actionsWidth));
+        ImGui::BeginDisabled(m_readOnly);
         bool const edited
           = ImGui::InputTextWithHint("##cfgFb", "Comment...", fbBuf, sizeof(fbBuf)) != false;
         ImGui::SameLine();
-        if (ImGui::SmallButton(ICON_FA_EXCHANGE_ALT))
+        if (ImGui::SmallButton(ICON_FA_EXCHANGE_ALT) && !m_readOnly)
         {
             if (ImGui::IsItemHovered())
             {
@@ -652,7 +657,7 @@ namespace gladius::ui
                                ImGui::GetColorU32(accentColor()));
         }
         ImGui::SameLine();
-        if (!configuration.active && ImGui::SmallButton(ICON_FA_BOLT))
+        if (!configuration.active && ImGui::SmallButton(ICON_FA_BOLT) && !m_readOnly)
         {
             m_graph->activateConfiguration(configuration.id);
             if (ImGui::IsItemHovered())
@@ -660,6 +665,7 @@ namespace gladius::ui
                 ImGui::SetTooltip("Make this the active configuration");
             }
         }
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::SmallButton(ICON_FA_EYE))
         {
@@ -675,7 +681,7 @@ namespace gladius::ui
                 ImGui::SetTooltip("Compare the alternatives of this configuration");
             }
         }
-        if (edited)
+        if (!m_readOnly && edited)
         {
             m_graph->setConfigurationFeedback(configuration.id, fbBuf);
         }
@@ -736,10 +742,12 @@ namespace gladius::ui
                                                      sizeof(cpFb))
                             != false;
         ImGui::SameLine();
+        ImGui::BeginDisabled(m_readOnly);
         bool const doRestore = ImGui::SmallButton(ICON_FA_HISTORY " Restore");
         ImGui::SameLine();
         bool const doFork = ImGui::SmallButton(ICON_FA_CODE_BRANCH " Fork");
-        if (doRestore || doFork)
+        ImGui::EndDisabled();
+        if (!m_readOnly && (doRestore || doFork))
         {
             bool restored = false;
             if (m_document != nullptr && m_document->getAssembly())
@@ -929,7 +937,8 @@ namespace gladius::ui
             sectionLabel(ICON_FA_CUBES, "System configurations");
             if (selectedRecombineConfigs.size() >= 2)
             {
-                if (ImGui::Button("Recombine the two selected"))
+                ImGui::BeginDisabled(m_readOnly);
+                if (ImGui::Button("Recombine the two selected") && !m_readOnly)
                 {
                     std::string const & baseId = selectedRecombineConfigs[0];
                     std::string const & overrideId = selectedRecombineConfigs[1];
@@ -950,6 +959,7 @@ namespace gladius::ui
                     }
                     selectedRecombineConfigs.clear();
                 }
+                ImGui::EndDisabled();
                 ImGui::Separator();
             }
             auto const configsCopy = m_graph->configurations();
@@ -1006,7 +1016,10 @@ namespace gladius::ui
                 m_comparedReferenceId = isComparing ? "" : ref.id;
             }
             ImGui::SameLine();
-            if (ImGui::SmallButton(ICON_FA_TIMES " Remove"))
+            ImGui::BeginDisabled(m_readOnly);
+            bool const removeRef = ImGui::SmallButton(ICON_FA_TIMES " Remove");
+            ImGui::EndDisabled();
+            if (!m_readOnly && removeRef)
             {
                 if (m_comparedReferenceId == ref.id)
                 {
@@ -1111,15 +1124,18 @@ namespace gladius::ui
                 break;
             }
             ImGui::TextColored(todoColor, "%s %s", marker, todo.title.c_str());
+            ImGui::BeginDisabled(m_readOnly);
             for (std::size_t ci = 0; ci < todo.checklist.size(); ++ci)
             {
                 bool checked = todo.checklist[ci].checked;
                 if (ImGui::Checkbox(
-                      (todo.checklist[ci].label + "##chk" + std::to_string(ci)).c_str(), &checked))
+                      (todo.checklist[ci].label + "##chk" + std::to_string(ci)).c_str(), &checked)
+                    && !m_readOnly)
                 {
                     m_todos->toggleChecklistEntry(todo.id, ci, checked);
                 }
             }
+            ImGui::EndDisabled();
             ImGui::PopID();
             popRowAlpha(alpha);
         }
