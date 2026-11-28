@@ -119,7 +119,7 @@ graph TD
     CA1 --> RG[Review gate]
     CA2 --> RG
     CA3 --> RG
-    DG --> RG
+    DG --> RGN
     CL --> RG
     RG -->|fail| O
     RG -->|pass, freeze| DG
