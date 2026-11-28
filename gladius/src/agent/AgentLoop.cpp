@@ -46,6 +46,11 @@ namespace gladius::agent
             return false;
         }
 
+        /// @brief Marks conversation text the user injected while the run was already going
+        constexpr char const * kSteeringMarker =
+          "[USER STEERING MESSAGE - the user changed course mid-run. Re-plan against this before "
+          "the next tool call.] ";
+
         /// @brief Keeps trace error strings short so one failure cannot bloat every later line
         [[nodiscard]] std::string trimForTrace(std::string const & text)
         {
@@ -183,7 +188,8 @@ namespace gladius::agent
                                               SnapshotProvider snapshotProvider,
                                               trace::AgentTraceRecorder * traceRecorder,
                                               AgentRunControl * runControl,
-                                              SecondaryLimitProbe secondaryLimitProbe)
+                                              SecondaryLimitProbe secondaryLimitProbe,
+                                              SteeringQueue * steering)
     {
         AgentRunResult result;
         // Failures reach the UI in both forms: the raw text for diagnostics and a classified
@@ -192,7 +198,15 @@ namespace gladius::agent
             eventQueue.push(
               AgentFailedEvent{error, classifyErrorText(error, false, cancelled)});
         };
-        // Segment budgets: a limit that fires parks the run instead of failing it, and "Continue"
+        // Steering messages that never reached the model must come back to the host, otherwise a
+        // message typed during the last turn of a run would be silently dropped.
+        auto drainLeftoverSteers = [&]() {
+            if (steering != nullptr)
+            {
+                result.leftoverSteers = steering->drain();
+            }
+        };
+        // Segment budgets: a limit that fires parks the run instead of failing it, and "Continue
         // starts a fresh segment while keeping the cumulative statistics in `result`.
         int turnCap = limits.maxModelTurns;
         std::size_t toolCap = limits.maxToolCalls;
@@ -249,6 +263,14 @@ namespace gladius::agent
         std::size_t emptyCompletionRetries = 0;
         constexpr std::size_t kMaxEmptyCompletionRetries = 2;
 
+        // Prompt-cache latch: `isIncremental` and `autonomy` are the only snapshot fields that reach
+        // the system prompt, and both are derived from state that changes during a run (conversation
+        // size, the autonomy selector). Re-evaluating them mid-run rewrites the system block and
+        // re-prefills the whole conversation, so the first turn's values hold for the rest of the run.
+        bool havePromptLatch = false;
+        bool latchIncremental = false;
+        AutonomyLevel latchAutonomy = AutonomyLevel::AskAtMajorDecisions;
+
         // Completion is scoped to this run: a design that was already complete when the run started
         // (e.g. finished by an earlier prompt) must not terminate a run for a follow-up request.
         bool const initiallyComplete = isDesignComplete ? isDesignComplete() : false;
@@ -267,6 +289,7 @@ namespace gladius::agent
                                       "Maximum model turn limit reached",
                                       result.modelTurns - turnSegmentBase))
                 {
+                    drainLeftoverSteers();
                     co_return result;
                 }
             }
@@ -283,6 +306,7 @@ namespace gladius::agent
                 result.cancelled = true;
                 result.error = "Agent run cancelled";
                 pushFailure(result.error, true);
+                drainLeftoverSteers();
                 co_return result;
             }
 
@@ -294,6 +318,7 @@ namespace gladius::agent
                 if (co_await hitLimit(AgentLimitKind::WallTime, "Agent wall-time limit reached",
                                       static_cast<std::size_t>(elapsed.count())))
                 {
+                    drainLeftoverSteers();
                     co_return result;
                 }
             }
@@ -307,13 +332,59 @@ namespace gladius::agent
                                             + " limit reached",
                                           hit->second))
                     {
+                        drainLeftoverSteers();
                         co_return result;
                     }
                 }
             }
 
-            DesignContextSnapshot const snapshot =
+            // Steering enters the conversation here: at a turn boundary, after the previous turn's
+            // tool_use/tool_result pairs are complete and before the request is built. Injecting a
+            // message anywhere else would either split a tool exchange, which the endpoints reject,
+            // or rewrite bytes the provider has already cached.
+            if (steering != nullptr)
+            {
+                auto steers = steering->drain();
+                if (!steers.empty())
+                {
+                    std::size_t textBytes = 0;
+                    std::size_t images = 0;
+                    for (auto & steer : steers)
+                    {
+                        textBytes += steer.text.size();
+                        images += steer.images.size();
+                        conversation.appendUserText(kSteeringMarker + std::move(steer.text));
+                        for (auto & image : steer.images)
+                        {
+                            conversation.appendUserImage(std::move(image.data),
+                                                         std::move(image.mimeType));
+                        }
+                    }
+                    result.steersApplied += steers.size();
+                    if (traceRecorder != nullptr)
+                    {
+                        traceRecorder->recordNote("steering_applied",
+                                                  {{"turnIndex", result.modelTurns + 1},
+                                                   {"count", steers.size()},
+                                                   {"textBytes", textBytes},
+                                                   {"images", images}});
+                    }
+                }
+            }
+
+            DesignContextSnapshot snapshot =
               snapshotProvider ? snapshotProvider() : DesignContextSnapshot{};
+            if (havePromptLatch)
+            {
+                snapshot.isIncremental = latchIncremental;
+                snapshot.autonomy = latchAutonomy;
+            }
+            else
+            {
+                latchIncremental = snapshot.isIncremental;
+                latchAutonomy = snapshot.autonomy;
+                havePromptLatch = true;
+            }
             std::int64_t const buildStartMs = traceRecorder ? traceRecorder->mark() : 0;
             ContextBuildStats contextStats;
             CompletionRequest const req =
@@ -360,6 +431,7 @@ namespace gladius::agent
                 result.cancelled = true;
                 result.error = "Agent run cancelled";
                 pushFailure(result.error, true);
+                drainLeftoverSteers();
                 co_return result;
             }
 
@@ -371,6 +443,7 @@ namespace gladius::agent
                   response.errorInfo.isSet()
                     ? response.errorInfo
                     : classifyErrorText(result.error, false, false, response.providerName)});
+                drainLeftoverSteers();
                 co_return result;
             }
 
@@ -404,6 +477,7 @@ namespace gladius::agent
                 eventQueue.push(AgentFailedEvent{
                   result.error,
                   describeEmptyCompletion(response.stopReason, response.providerName)});
+                drainLeftoverSteers();
                 co_return result;
             }
             emptyCompletionRetries = 0;
@@ -449,6 +523,7 @@ namespace gladius::agent
                                               {{"turnIndex", result.modelTurns}});
                 }
                 eventQueue.push(AgentCompletedEvent{result.finalMessage, awaitingUserReply});
+                drainLeftoverSteers();
                 co_return result;
             }
             autonomousNudges = 0;
@@ -465,6 +540,7 @@ namespace gladius::agent
                     result.cancelled = true;
                     result.error = "Agent run cancelled";
                     pushFailure(result.error, true);
+                    drainLeftoverSteers();
                     co_return result;
                 }
 
@@ -474,6 +550,7 @@ namespace gladius::agent
                                           "Maximum tool-call limit reached",
                                           result.toolCalls - toolSegmentBase))
                     {
+                        drainLeftoverSteers();
                         co_return result;
                     }
                 }
@@ -575,6 +652,7 @@ namespace gladius::agent
                 {
                     result.completed = true;
                     eventQueue.push(AgentCompletedEvent{result.finalMessage});
+                    drainLeftoverSteers();
                     co_return result;
                 }
             }

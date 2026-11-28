@@ -171,6 +171,96 @@ namespace gladius::agent::tests
         EXPECT_EQ(payload["tools"][1]["cache_control"]["type"], "ephemeral");
     }
 
+    TEST(AnthropicProvider, BuildPayload_ConversationEndBreakpoint_MarksHistoryNotLiveBlock)
+    {
+        // Arrange: the request tail is regenerated live state, so a breakpoint there is a cache
+        // write every turn that is never read back.
+        ProviderConfig cfg;
+        cfg.model = "claude-test";
+        cfg.cacheBreakpoints = CacheBreakpointPlacement::ConversationEnd;
+        AnthropicProvider provider(cfg, std::make_shared<MockHttpTransport>());
+        CompletionRequest request;
+        request.tools = {
+          tools::ToolDefinition{"create_function", "Create", nlohmann::json{{"type", "object"}}},
+        };
+        request.messages.push_back(Message{MessageRole::User, {TextContent{"Design a lamp"}}});
+        request.messages.push_back(Message{MessageRole::Assistant, {TextContent{"Built it"}}});
+        request.conversationMessages = 2;
+        request.messages.push_back(Message{MessageRole::User, {TextContent{"CURRENT STATE..."}}});
+
+        // Act
+        auto const payload = provider.buildPayload(request);
+
+        // Assert
+        ASSERT_EQ(payload["messages"].size(), 3u);
+        EXPECT_TRUE(payload["messages"][1]["content"].back().contains("cache_control"));
+        EXPECT_FALSE(payload["messages"][0]["content"].back().contains("cache_control"));
+        EXPECT_FALSE(payload["messages"][2]["content"].back().contains("cache_control"));
+        // The tool breakpoint stays, so system prompt plus schemas remain cached as well.
+        EXPECT_TRUE(payload["tools"][0].contains("cache_control"));
+    }
+
+    TEST(AnthropicProvider, BuildPayload_ConversationEndWithoutHistory_SkipsMessageBreakpoint)
+    {
+        // Arrange
+        ProviderConfig cfg;
+        cfg.model = "claude-test";
+        cfg.cacheBreakpoints = CacheBreakpointPlacement::ConversationEnd;
+        AnthropicProvider provider(cfg, std::make_shared<MockHttpTransport>());
+        CompletionRequest request;
+        request.messages.push_back(Message{MessageRole::User, {TextContent{"CURRENT STATE..."}}});
+        request.conversationMessages = 0;
+
+        // Act
+        auto const payload = provider.buildPayload(request);
+
+        // Assert: marking the volatile block would cost a cache write for nothing
+        ASSERT_EQ(payload["messages"].size(), 1u);
+        EXPECT_FALSE(payload["messages"][0]["content"].back().contains("cache_control"));
+    }
+
+    TEST(AnthropicProvider, BuildPayload_CacheAllStillMarksNewestBlock)
+    {
+        // Arrange: the explicit "all" mode keeps its old behaviour for comparison runs
+        ProviderConfig cfg;
+        cfg.model = "claude-test";
+        cfg.cacheBreakpoints = CacheBreakpointPlacement::CacheAll;
+        AnthropicProvider provider(cfg, std::make_shared<MockHttpTransport>());
+        CompletionRequest request;
+        request.messages.push_back(Message{MessageRole::User, {TextContent{"Design a lamp"}}});
+        request.conversationMessages = 1;
+        request.messages.push_back(Message{MessageRole::User, {TextContent{"CURRENT STATE..."}}});
+
+        // Act
+        auto const payload = provider.buildPayload(request);
+
+        // Assert
+        EXPECT_TRUE(payload["messages"][1]["content"].back().contains("cache_control"));
+        EXPECT_FALSE(payload["messages"][0]["content"].back().contains("cache_control"));
+    }
+
+    TEST(AnthropicProvider, BuildPayload_ConversationEndSkipsSystemRoleMessages)
+    {
+        // Arrange: request indices and payload indices differ once a system message is filtered out
+        ProviderConfig cfg;
+        cfg.model = "claude-test";
+        cfg.cacheBreakpoints = CacheBreakpointPlacement::ConversationEnd;
+        AnthropicProvider provider(cfg, std::make_shared<MockHttpTransport>());
+        CompletionRequest request;
+        request.messages.push_back(Message{MessageRole::System, {TextContent{"stale system msg"}}});
+        request.messages.push_back(Message{MessageRole::User, {TextContent{"Design a lamp"}}});
+        request.conversationMessages = 2;
+        request.messages.push_back(Message{MessageRole::User, {TextContent{"CURRENT STATE..."}}});
+
+        // Act
+        auto const payload = provider.buildPayload(request);
+
+        // Assert
+        ASSERT_EQ(payload["messages"].size(), 2u);
+        EXPECT_TRUE(payload["messages"][0]["content"].back().contains("cache_control"));
+        EXPECT_FALSE(payload["messages"][1]["content"].back().contains("cache_control"));
+    }
+
     TEST(AnthropicProvider, BuildPayload_WithThinkingBudget_AnthropicThinkingBlock)
     {
         // Arrange

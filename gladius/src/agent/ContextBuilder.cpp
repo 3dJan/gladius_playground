@@ -206,6 +206,9 @@ namespace gladius::agent
         req.systemPrompt = buildStaticSystemPrompt(snapshot, privacy);
         req.tools = registry.definitions();
         req.messages = filterHistory(conversation, privacy, stats);
+        // Providers need to know where the conversation ends: the live block below is regenerated
+        // every turn, so a cache breakpoint must never be placed on it.
+        req.conversationMessages = req.messages.size();
 
         // The live state goes last: appending to the end of the conversation extends the provider's
         // cached prefix, while changing the system block invalidates it and re-prefills everything.

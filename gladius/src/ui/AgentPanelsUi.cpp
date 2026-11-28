@@ -195,6 +195,9 @@ namespace gladius::ui
         }
 
         m_artifacts.activeToolName = m_activeToolName;
+        // While a run holds the graph, UI requirement edits go to the staging queue; the rows still
+        // draw the merged view, so nothing the user typed disappears.
+        m_artifacts.bindRequirementEdits(m_running.load() ? &m_requirementEdits : nullptr);
         std::array<AgentWorkflowView::ArtifactRenderer, kWorkflowPhaseCount> const renderers = {
           [this]() { m_artifacts.renderUnderstand(m_workflowAnimation); },
           [this]() { m_artifacts.renderDecompose(m_workflowAnimation); },

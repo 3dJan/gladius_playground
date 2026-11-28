@@ -206,11 +206,25 @@ namespace gladius::ui
 
         if (edited || mandatory != requirement.mandatory)
         {
-            m_graph->updateRequirement(requirement.id, descBuf, catBuf, mandatory, true);
+            if (m_requirementEdits != nullptr)
+            {
+                m_requirementEdits->stageUpdate(requirement.id, descBuf, catBuf, mandatory);
+            }
+            else
+            {
+                m_graph->updateRequirement(requirement.id, descBuf, catBuf, mandatory, true);
+            }
         }
         if (removed)
         {
-            m_graph->removeRequirement(requirement.id, true);
+            if (m_requirementEdits != nullptr)
+            {
+                m_requirementEdits->stageRemove(requirement.id);
+            }
+            else
+            {
+                m_graph->removeRequirement(requirement.id, true);
+            }
         }
 
         ImGui::PopID();
@@ -220,7 +234,8 @@ namespace gladius::ui
     void WorkflowArtifacts::renderUnderstand(AgentWorkflowAnimationState & animation)
     {
         sectionLabel(ICON_FA_CLIPBOARD_LIST, "Requirements");
-        auto const requirementsCopy = m_graph->requirements();
+        auto const requirementsCopy
+          = m_requirementSource ? m_requirementSource() : m_graph->requirements();
         if (requirementsCopy.empty())
         {
             ImGui::TextDisabled("Nothing captured yet.");
@@ -264,9 +279,18 @@ namespace gladius::ui
         sameLineAt(columns.trailingX);
         if ((ImGui::SmallButton(ICON_FA_PLUS) || descSubmitted) && m_newRequirementBuf[0] != '\0')
         {
-            std::string const newId = m_graph->addRequirement(
-              m_newRequirementBuf, m_newRequirementCategoryBuf, m_newRequirementMandatory);
-            m_graph->recordUserAddedRequirement(newId);
+            if (m_requirementEdits != nullptr)
+            {
+                m_requirementEdits->stageAdd(m_newRequirementBuf,
+                                             m_newRequirementCategoryBuf,
+                                             m_newRequirementMandatory);
+            }
+            else
+            {
+                std::string const newId = m_graph->addRequirement(
+                  m_newRequirementBuf, m_newRequirementCategoryBuf, m_newRequirementMandatory);
+                m_graph->recordUserAddedRequirement(newId);
+            }
             m_newRequirementBuf[0] = '\0';
         }
         drawRowRule(columns.rowLeft, columns.rowRight);

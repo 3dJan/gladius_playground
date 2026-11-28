@@ -362,6 +362,8 @@ namespace gladius::ui
                                 int & outW,
                                 int & outH)
                          { return getOrCreatePreviewTexture(key, pngBytes, outW, outH); });
+        m_artifacts.setRequirementSource(
+          [this]() { return m_requirementEdits.mergedView(m_graph); });
         loadSettings();
         loadSessionState();
         applyDemoSession();
@@ -831,6 +833,10 @@ namespace gladius::ui
             {
                 config.cacheBreakpoints = agent::CacheBreakpointPlacement::CacheAll;
             }
+            else if (cacheBreakpointMode == "conversation")
+            {
+                config.cacheBreakpoints = agent::CacheBreakpointPlacement::ConversationEnd;
+            }
             else if (cacheBreakpointMode == "tools")
             {
                 config.cacheBreakpoints = agent::CacheBreakpointPlacement::Tools;
@@ -842,7 +848,7 @@ namespace gladius::ui
             else // "auto": only pay for a breakpoint where the API honours it
             {
                 config.cacheBreakpoints = apiType == agent::ApiType::Anthropic
-                                            ? agent::CacheBreakpointPlacement::Tools
+                                            ? agent::CacheBreakpointPlacement::ConversationEnd
                                             : agent::CacheBreakpointPlacement::None;
             }
         }
@@ -1082,6 +1088,11 @@ namespace gladius::ui
     void AgentPanels::drainEvents()
     {
         pollModelFetch();
+        if (!m_running.load() && m_steeringClosed)
+        {
+            m_steeringClosed = false;
+            applyLeftoverSteers();
+        }
 #ifdef __EMSCRIPTEN__
         if (m_webRunTask && m_webRunTask->is_ready())
         {
@@ -1184,6 +1195,10 @@ namespace gladius::ui
 
     agent::DesignContextSnapshot AgentPanels::buildContextSnapshot(std::string const & knowledgeQuery)
     {
+        // Requirement edits from the UI wait here: this lambda runs on the run thread, at the point
+        // where the loop is about to build its request, so the graph stays single-writer and the
+        // edits land in this turn's live context as user requirement changes.
+        m_requirementEdits.applyTo(m_graph);
         agent::DesignContextSnapshot snap;
         snap.autonomy = m_policy.autonomy();
         snap.isIncremental = (m_conversation.size() > 1)
@@ -1294,6 +1309,15 @@ namespace gladius::ui
         m_workflowAnimation.reset();
         m_userDecisions.abandon("Previous run ended");
         m_userDecisionText.clear();
+        // A new run owns a fresh steering budget, and pending UI requirement edits belong to the
+        // session that is starting, not to one that ended.
+        m_steering.reset();
+        m_runWasStopped = false;
+        {
+            std::lock_guard<std::mutex> lock(m_leftoverSteersMutex);
+            m_leftoverSteers.clear();
+        }
+        m_requirementEdits.applyTo(m_graph);
         if (m_toolCtx)
         {
             m_toolCtx->userQuestionsAsked = 0;
@@ -1323,6 +1347,7 @@ namespace gladius::ui
         m_pendingImages.clear();
         m_inspectedImageIndex = -1;
         m_conversation.append(std::move(msg));
+        m_steeringClosed = true;
         m_running.store(true);
 
         // Build ordered list of provider candidates: primary first, then fallbacks
@@ -1421,7 +1446,7 @@ namespace gladius::ui
               agent::FallbackProvider provider(std::move(candidates));
               agent::AgentLoop loop;
               auto trace = makeSessionTraceRecorder();
-              (void) coro::sync_wait(loop.run(
+              agent::AgentRunResult const runResult = coro::sync_wait(loop.run(
                 m_conversation,
                 provider,
                 m_registry,
@@ -1454,7 +1479,14 @@ namespace gladius::ui
                                               m_toolCtx->viewportReviewsUsed);
                     }
                     return std::nullopt;
-                }));
+                },
+                &m_steering));
+              // Steers the run never reached: hand them to the render thread instead of losing them.
+              if (!runResult.leftoverSteers.empty())
+              {
+                  std::lock_guard<std::mutex> lock(m_leftoverSteersMutex);
+                  m_leftoverSteers = std::move(runResult.leftoverSteers);
+              }
               if (trace != nullptr)
               {
                   finishSessionTrace(*trace);
@@ -1539,7 +1571,7 @@ namespace gladius::ui
 
         agent::FallbackProvider provider(std::move(candidates));
         agent::AgentLoop loop;
-        (void) co_await loop.run(
+        agent::AgentRunResult const runResult = co_await loop.run(
           m_conversation,
           provider,
           m_registry,
@@ -1564,11 +1596,126 @@ namespace gladius::ui
                                         m_toolCtx->viewportReviewsUsed);
               }
               return std::nullopt;
-          });
+          },
+          &m_steering);
+        if (!runResult.leftoverSteers.empty())
+        {
+            std::lock_guard<std::mutex> lock(m_leftoverSteersMutex);
+            m_leftoverSteers = std::move(runResult.leftoverSteers);
+        }
         m_running.store(false);
         co_return;
     }
 #endif
+
+    void AgentPanels::submitComposer()
+    {
+        if (m_running.load())
+        {
+            queueSteer();
+            return;
+        }
+        startRun(m_prompt.consumeDraft());
+    }
+
+    void AgentPanels::queueSteer()
+    {
+        std::string const text = m_prompt.consumeDraft();
+        agent::SteeringMessage steer;
+        steer.text = text;
+        steer.submittedAt = std::chrono::steady_clock::now();
+        for (auto & img : m_pendingImages)
+        {
+            if (!img.comment.empty())
+            {
+                steer.text += "\n[Attached image '" + img.filename + "' comment: " + img.comment
+                            + "]";
+            }
+            steer.images.emplace_back(
+              agent::ImageContent{std::move(img.bytes), std::move(img.mimeType)});
+        }
+        m_pendingImages.clear();
+        m_inspectedImageIndex = -1;
+
+        if (steer.text.empty())
+        {
+            return;
+        }
+        if (!m_steering.push(std::move(steer)))
+        {
+            m_lastError = std::to_string(m_steering.capacity())
+                        + " steering messages are already queued - send after this run";
+            return;
+        }
+        m_lastError.clear();
+        m_lastProviderError = {};
+    }
+
+    void AgentPanels::restoreSteers(std::vector<agent::SteeringMessage> steers)
+    {
+        if (steers.empty())
+        {
+            return;
+        }
+        // Re-enter the composer rather than answering itself: the user decides whether the message
+        // still applies now that the run is over.
+        std::string draft = m_prompt.draft();
+        for (auto & steer : steers)
+        {
+            if (!draft.empty())
+            {
+                draft += "\n\n";
+            }
+            draft += steer.text;
+            for (auto & image : steer.images)
+            {
+                m_pendingImages.emplace_back(
+                  PendingImageAttachment{"steered image",
+                                         std::move(image.data),
+                                         std::move(image.mimeType),
+                                         "",
+                                         "steer_" + std::to_string(m_nextAttachmentId++)});
+            }
+        }
+        m_prompt.setDraft(std::move(draft));
+    }
+
+    void AgentPanels::applyLeftoverSteers()
+    {
+        std::vector<agent::SteeringMessage> leftovers;
+        {
+            std::lock_guard<std::mutex> lock(m_leftoverSteersMutex);
+            leftovers.swap(m_leftoverSteers);
+        }
+        // Messages the user queued for a run they stopped come back to the composer; after a run
+        // that simply finished they start the follow-up run the user had already typed.
+        bool const stopped = m_runWasStopped;
+        m_runWasStopped = false;
+        if (stopped || leftovers.empty())
+        {
+            restoreSteers(std::move(leftovers));
+        }
+        else
+        {
+            std::vector<agent::SteeringMessage> rest(
+              std::make_move_iterator(leftovers.begin() + 1),
+              std::make_move_iterator(leftovers.end()));
+            restoreSteers(std::move(rest));
+            startRun(leftovers.front().text);
+            for (auto & image : leftovers.front().images)
+            {
+                m_pendingImages.emplace_back(
+                  PendingImageAttachment{"steered image",
+                                         std::move(image.data),
+                                         std::move(image.mimeType),
+                                         "",
+                                         "steer_" + std::to_string(m_nextAttachmentId++)});
+            }
+        }
+        // Anything still waiting was queued for a run that is over.
+        restoreSteers(m_steering.drain());
+        m_requirementEdits.applyTo(m_graph);
+    }
 
     void AgentPanels::stopRun()
     {
@@ -1586,6 +1733,10 @@ namespace gladius::ui
         m_confirmCv.notify_all();
         // A question on screen would otherwise park the run thread forever.
         m_userDecisions.abandon("Run stopped");
+        // Whatever the user queued for a run they just stopped goes back to them, not into a run
+        // that never happens. The loop already handed back anything it had not consumed.
+        m_steering.abandon();
+        m_runWasStopped = true;
 #ifdef __EMSCRIPTEN__
         m_webConfirmHandle = {};
         m_webRunTask.reset();
@@ -1855,16 +2006,17 @@ namespace gladius::ui
             }
         }
         int cacheModeIndex = 0;
-        char const * cacheModes[] = {"Auto (Anthropic only)", "None", "Tools", "All"};
-        char const * cacheModeKeys[] = {"auto", "none", "tools", "all"};
-        for (int i = 0; i < 4; ++i)
+        char const * cacheModes[] = {"Auto (Anthropic only)", "None", "Tools", "All",
+                                     "End of conversation"};
+        char const * cacheModeKeys[] = {"auto", "none", "tools", "all", "conversation"};
+        for (int i = 0; i < 5; ++i)
         {
             if (m_cacheBreakpointMode == cacheModeKeys[i])
             {
                 cacheModeIndex = i;
             }
         }
-        if (ImGui::Combo("Prompt cache", &cacheModeIndex, cacheModes, 4))
+        if (ImGui::Combo("Prompt cache", &cacheModeIndex, cacheModes, 5))
         {
             m_cacheBreakpointMode = cacheModeKeys[cacheModeIndex];
             if (m_configManager != nullptr)

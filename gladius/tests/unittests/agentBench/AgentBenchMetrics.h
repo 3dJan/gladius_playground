@@ -38,6 +38,10 @@ namespace gladius::agent::bench
         std::size_t truncatedTurns = 0;
         /// @brief Model turns that came back with neither text nor tool calls
         std::size_t emptyTurns = 0;
+        /// @brief Steering messages that reached the model mid-run
+        std::size_t steersApplied = 0;
+        /// @brief Steering messages the run ended without applying
+        std::size_t leftoverSteers = 0;
         std::size_t viewportCaptures = 0;
         /// @brief `ask_user` calls the model made (the tool itself caps how many get through)
         std::size_t userQuestionsAsked = 0;

@@ -3,6 +3,8 @@
 #include "CompletionStopwatch.h"
 #include "ProviderError.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <map>
 
 namespace gladius::agent
@@ -79,12 +81,23 @@ namespace gladius::agent
     nlohmann::json AnthropicProvider::buildPayload(CompletionRequest const & request) const
     {
         nlohmann::json messages = nlohmann::json::array();
+        // Payload index of the last message that came from the conversation, i.e. the last block
+        // whose bytes are identical on the next turn. System messages are folded elsewhere, so the
+        // request index and the payload index cannot simply be used interchangeably.
+        std::size_t lastConversationIdx = 0;
+        bool haveConversationMsg = false;
 
-        for (auto const & msg : request.messages)
+        for (std::size_t i = 0; i < request.messages.size(); ++i)
         {
+            auto const & msg = request.messages[i];
             if (msg.role == MessageRole::System)
             {
                 continue;
+            }
+            if (i < request.conversationMessages)
+            {
+                lastConversationIdx = messages.size();
+                haveConversationMsg = true;
             }
 
             std::string const roleStr =
@@ -130,6 +143,28 @@ namespace gladius::agent
             messages.push_back({{"role", roleStr}, {"content", std::move(contentArr)}});
         }
 
+        // A provider only reads back the prompt up to a breakpoint. With just the tool block marked,
+        // everything the conversation grew by is re-prefilled every turn, so marking the last content
+        // block lets the next turn pay for its own delta only.
+        //
+        // CacheAll marks the newest block, which for our requests is the regenerated CURRENT STATE
+        // message: it is a cache write on every turn and is never read back. ConversationEnd marks
+        // the end of the append-only history instead, so each turn re-prefills only its own delta.
+        // The target is resolved as an index because the message array is moved into the payload.
+        std::size_t breakIndex = 0;
+        bool markBreak = false;
+        if (m_config.cacheBreakpoints == CacheBreakpointPlacement::CacheAll && !messages.empty())
+        {
+            breakIndex = messages.size() - 1;
+            markBreak = true;
+        }
+        else if (m_config.cacheBreakpoints == CacheBreakpointPlacement::ConversationEnd
+                 && haveConversationMsg)
+        {
+            breakIndex = lastConversationIdx;
+            markBreak = true;
+        }
+
         nlohmann::json payload = {
             {"model", m_config.model},
             {"max_tokens", m_config.maxTokens},
@@ -171,13 +206,9 @@ namespace gladius::agent
             payload["tools"] = std::move(toolsArr);
         }
 
-        // A provider only reads back the prompt up to a breakpoint. With just the tool block marked,
-        // everything the conversation grew by is re-prefilled every turn, so marking the last content
-        // block lets the next turn pay for its new tail only.
-        if (m_config.cacheBreakpoints == CacheBreakpointPlacement::CacheAll
-            && payload["messages"].is_array() && !payload["messages"].empty())
+        if (markBreak)
         {
-            nlohmann::json & lastContent = payload["messages"].back()["content"];
+            nlohmann::json & lastContent = payload["messages"][breakIndex]["content"];
             if (lastContent.is_array() && !lastContent.empty())
             {
                 lastContent.back()["cache_control"] = {{"type", "ephemeral"}};

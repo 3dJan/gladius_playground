@@ -6,6 +6,7 @@
 #include "ContextBuilder.h"
 #include "Conversation.h"
 #include "PermissionPolicy.h"
+#include "SteeringQueue.h"
 #include "providers/IAiProvider.h"
 #include "trace/AgentTrace.h"
 #include "../io/CancellationToken.h"
@@ -52,6 +53,10 @@ namespace gladius::agent
         std::size_t truncatedTurns = 0;
         /// @brief Model turns that returned neither text nor tool calls
         std::size_t emptyTurns = 0;
+        /// @brief Steering messages the user submitted mid-run that reached the model
+        std::size_t steersApplied = 0;
+        /// @brief Steering messages still queued when the run ended; the host must not lose them
+        std::vector<SteeringMessage> leftoverSteers;
         std::string finalMessage;
         std::string error;
     };
@@ -83,6 +88,7 @@ namespace gladius::agent
           SnapshotProvider snapshotProvider = nullptr,
           trace::AgentTraceRecorder * traceRecorder = nullptr,
           AgentRunControl * runControl = nullptr,
-          SecondaryLimitProbe secondaryLimitProbe = nullptr);
+          SecondaryLimitProbe secondaryLimitProbe = nullptr,
+          SteeringQueue * steering = nullptr);
     };
 } // namespace gladius::agent

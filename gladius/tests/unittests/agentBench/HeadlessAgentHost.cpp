@@ -201,6 +201,21 @@ namespace gladius::agent::bench
           envOr("GLADIUS_AGENT_BENCH_AUTO_FINISH_GRAPH", "1") != "0";
         config.maxViewportReviews = std::max(0, envInt("GLADIUS_AGENT_BENCH_MAX_VIEWPORT_REVIEWS", 2));
         config.decisionScript = envList("GLADIUS_AGENT_BENCH_DECISIONS");
+        // "<afterTurn>:<message>" entries, ';' separated, e.g. "2:make the wall 2mm thick"
+        for (auto const & entry : envList("GLADIUS_AGENT_BENCH_STEER"))
+        {
+            auto const split = entry.find(':');
+            if (split == std::string::npos || split == 0)
+            {
+                continue;
+            }
+            int const afterTurn = std::atoi(entry.substr(0, split).c_str());
+            if (afterTurn <= 0)
+            {
+                continue;
+            }
+            config.steeringScript.emplace_back(afterTurn, entry.substr(split + 1));
+        }
         config.topology = envOr("GLADIUS_AGENT_BENCH_TOPOLOGY", std::string{"single"});
         return config;
     }
@@ -318,6 +333,10 @@ namespace gladius::agent::bench
             {
                 return CacheBreakpointPlacement::CacheAll;
             }
+            if (raw == "conversation")
+            {
+                return CacheBreakpointPlacement::ConversationEnd;
+            }
             return CacheBreakpointPlacement::Tools;
         }
     }
@@ -431,6 +450,8 @@ namespace gladius::agent::bench
                 m_toolCtx->userQuestionsAsked = 0;
             }
             m_decisions.clear();
+            m_steering.reset();
+            m_snapshotTurns = 0;
         }
 
         AgentLimits limits;
@@ -453,6 +474,16 @@ namespace gladius::agent::bench
           [this]() { return m_graph.phase() == design::DesignPhase::Complete; },
           nullptr,
           [this, prompt]() {
+              // Scripted steering: queued while this turn's context is built, so the loop drains it
+              // at the start of the next turn, exactly where a live user submit would arrive.
+              ++m_snapshotTurns;
+              for (auto const & [afterTurn, text] : m_config.steeringScript)
+              {
+                  if (static_cast<std::size_t>(afterTurn) == m_snapshotTurns)
+                  {
+                      (void) m_steering.push(SteeringMessage{text, {}, {}});
+                  }
+              }
               agent::DesignContextSnapshot snap;
               snap.autonomy = m_policy.autonomy();
               snap.designPhase = design::toString(m_graph.phase());
@@ -482,7 +513,18 @@ namespace gladius::agent::bench
               }
               return snap;
           },
-          m_trace.get()));
+          m_trace.get(),
+          nullptr,
+          nullptr,
+          &m_steering));
+
+        if (m_trace != nullptr)
+        {
+            m_trace->recordNote("steering_script",
+                                {{"configured", m_config.steeringScript.size()},
+                                 {"applied", result.steersApplied},
+                                 {"leftover", result.leftoverSteers.size()}});
+        }
 
         // Decisions are part of the measured behaviour: recording them makes a run replayable and
         // lets the comparison script see whether a change made the agent ask more or fewer questions.

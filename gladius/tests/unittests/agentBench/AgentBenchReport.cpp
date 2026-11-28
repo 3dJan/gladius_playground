@@ -268,7 +268,18 @@ namespace gladius::agent::bench
                   {"documentSeed", m_config.documentSeed},
                   {"autoCompleteDesignGraph", m_config.autoCompleteDesignGraph},
                   {"maxViewportReviews", m_config.maxViewportReviews},
-                  {"cacheBreakpoints", m_config.cacheBreakpoints}}},
+                  {"cacheBreakpoints", m_config.cacheBreakpoints},
+                  // A steer grows the conversation, so a run with steering is only comparable to
+                  // another one with the same script.
+                  {"steerScript",
+                   [&] {
+                       nlohmann::json out = nlohmann::json::array();
+                       for (auto const & [afterTurn, text] : m_config.steeringScript)
+                       {
+                           out.push_back({{"afterTurn", afterTurn}, {"text", text}});
+                       }
+                       return out;
+                   }()}}},
                 {"userLibraryDir", getUserLibraryDir().string()},
                 {"elapsedMs",
                  std::chrono::duration_cast<std::chrono::milliseconds>(

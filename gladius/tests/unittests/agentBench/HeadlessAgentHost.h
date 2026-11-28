@@ -8,6 +8,7 @@
 #include "agent/KnowledgeStore.h"
 #include "agent/PermissionPolicy.h"
 #include "agent/SkillLoader.h"
+#include "agent/SteeringQueue.h"
 #include "agent/UserDecision.h"
 #include "agent/providers/IAiProvider.h"
 #include "agent/trace/AgentTrace.h"
@@ -27,6 +28,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gladius
@@ -64,8 +66,15 @@ namespace gladius::agent::bench
         /// @details Reasoning tokens cost the same as visible output and are thrown away, and on this
         ///          local endpoint they dominated every turn, so the benchmark caps them by default.
         int providerThinkingTokens = 1024;
-        /// @brief Explicit prompt-cache breakpoints: "none", "tools" or "all"
+        /// @brief Explicit prompt-cache breakpoints: "none", "tools", "all" or "conversation"
         std::string cacheBreakpoints = "tools";
+        /**
+         * @brief Mid-run steering script: `<afterTurn>:<text>` entries.
+         * @details Each entry is queued while the context of model turn `afterTurn` is built, so it
+         *          reaches the model at the following turn. That makes cache behaviour with steering
+         *          on measurable and reproducible.
+         */
+        std::vector<std::pair<int, std::string>> steeringScript;
         /// @brief Tool surface the model sees: "full", "geometry", or a role name
         /// @details Every definition is re-sent on every turn, so the ~38-tool list is a fixed per-turn
         ///          cost. A role name selects both the tool surface and the role prompt for it.
@@ -146,6 +155,12 @@ namespace gladius::agent::bench
 
         /// @brief Creates the WebGPU document and registers the design tools
         [[nodiscard]] BenchAvailability initialize();
+
+        /// @brief Steering queue of the task currently being measured
+        [[nodiscard]] agent::SteeringQueue & steering() noexcept
+        {
+            return m_steering;
+        }
 
         /// @brief Runs the agent loop for one task prompt on a fresh document
         [[nodiscard]] AgentRunResult runTask(AgentBenchTask const & task,
@@ -248,6 +263,10 @@ namespace gladius::agent::bench
         agent::ContextBuilder m_contextBuilder;
         agent::PermissionPolicy m_policy;
         agent::AgentEventQueue m_events;
+        /// @brief Steering messages the scripted run injects mid-run
+        agent::SteeringQueue m_steering;
+        /// @brief Model turns whose context has already been built in the current task
+        std::size_t m_snapshotTurns = 0;
         agent::Conversation m_conversation;
         io::CancellationToken m_cancellation;
         std::string m_initializeError;

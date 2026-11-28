@@ -180,6 +180,63 @@ TEST(ContextBuilder, Build_VolatileSnapshotChanges_SystemPromptIsByteIdentical)
         }
     }
 
+    TEST(ContextBuilder, Build_WithLiveContext_ExcludesItFromConversationMessageCount)
+    {
+        // Arrange
+        ContextBuilder builder;
+        Conversation conversation;
+        conversation.appendUserText("Make a sphere.");
+        conversation.appendAssistant("done", {});
+        ToolRegistry registry;
+
+        // Act
+        DesignContextSnapshot snap;
+        snap.designPhase = "BuildModel";
+        auto const request = builder.build(conversation, registry, PrivacySettings{}, snap);
+
+        // Assert: the provider may only put a cache breakpoint on bytes that repeat next turn, so
+        // the regenerated CURRENT STATE block must sit past the counted conversation prefix.
+        EXPECT_EQ(request.conversationMessages, conversation.size());
+        EXPECT_EQ(request.messages.size(), conversation.size() + 1u);
+        EXPECT_NE(partsSignature(request.messages.back()).find("CURRENT STATE"), std::string::npos);
+    }
+
+    TEST(ContextBuilder, Steering_PrefixThroughLastConversationMessageIsByteIdentical)
+    {
+        // Arrange: a run that gets steered between turns, the case the cache has to survive
+        ContextBuilder builder;
+        Conversation conversation;
+        ToolRegistry registry;
+        PrivacySettings privacy;
+        conversation.appendUserText("Design a lamp");
+
+        DesignContextSnapshot snap;
+        snap.designPhase = "ClarifyRequirements";
+        auto const before = builder.build(conversation, registry, privacy, snap);
+        std::vector<std::string> beforePrefix;
+        for (std::size_t i = 0; i < before.conversationMessages; ++i)
+        {
+            beforePrefix.push_back(partsSignature(before.messages[i]));
+        }
+
+        // Act: the loop appends the steer as an ordinary user message, then rebuilds
+        conversation.appendUserText("[USER STEERING MESSAGE] make the base wider");
+        snap.designPhase = "BuildModel";
+        snap.todoSummary = "- [done] sketch\n";
+        auto const after = builder.build(conversation, registry, privacy, snap);
+
+        // Assert: the whole cached prefix is unchanged, only the tail is new
+        ASSERT_GT(after.conversationMessages, before.conversationMessages);
+        for (std::size_t i = 0; i < beforePrefix.size(); ++i)
+        {
+            EXPECT_EQ(partsSignature(after.messages[i]), beforePrefix[i]) << "message " << i;
+        }
+        EXPECT_EQ(after.systemPrompt, before.systemPrompt);
+        EXPECT_NE(partsSignature(after.messages[before.conversationMessages])
+                    .find("make the base wider"),
+                  std::string::npos);
+    }
+
     TEST(ContextBuilder, HistoryPolicy_SentMessagesAreNeverRewritten)
     {
         // Arrange: a growing conversation with tool results and captures, the situation in which a

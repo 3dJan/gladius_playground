@@ -10,6 +10,7 @@
 #include "../agent/KnowledgeStore.h"
 #include "../agent/PermissionPolicy.h"
 #include "../agent/SkillLoader.h"
+#include "../agent/SteeringQueue.h"
 #include "../agent/UserDecision.h"
 #include "../agent/providers/IAiProvider.h"
 #include "../agent/providers/ImageProvider.h"
@@ -18,6 +19,7 @@
 #include "../design/DesignCatalogue.h"
 #include "../design/DesignGraph.h"
 #include "../design/DesignTools.h"
+#include "../design/RequirementEditQueue.h"
 #include "../design/TodoStore.h"
 #include "../io/CancellationToken.h"
 #include "../tools/CheckpointManager.h"
@@ -137,6 +139,18 @@ namespace gladius::ui
 
         void drainEvents();
         void startRun(std::string const & userPrompt);
+        /// @brief Submits the composer draft: starts a run, or steers the one already running
+        void submitComposer();
+        /// @brief Queues the composer draft as a steering message for the running session
+        void queueSteer();
+        /**
+         * @brief Puts steering messages that never reached the model back into the composer.
+         * @details A message the user typed during the last turn of a run is still their request;
+         *          dropping it would make the cap on the queue invisible and lose real input.
+         */
+        void restoreSteers(std::vector<agent::SteeringMessage> steers);
+        /// @brief Handles steering messages the run ended without applying (render thread)
+        void applyLeftoverSteers();
         /// @brief True when at least one configured provider/model can be called right now
         [[nodiscard]] bool hasUsableModel() const;
         void stopRun();
@@ -256,6 +270,8 @@ namespace gladius::ui
         std::atomic<bool> m_documentModifiedPending{false};
 
         design::DesignGraph m_graph;
+        /// @brief Requirement edits the UI made while the run thread owned the graph
+        design::RequirementEditQueue m_requirementEdits;
         design::DesignCatalogue m_catalogue;
         design::TodoStore m_todos;
         tools::TransactionManager m_transactions;
@@ -274,6 +290,8 @@ namespace gladius::ui
         agent::SkillLoader m_skills;
         io::CancellationToken m_cancellation;
         agent::AgentRunControl m_runControl;
+        /// @brief Composer messages submitted while a run is in progress
+        agent::SteeringQueue m_steering;
 
         // Workflow rail presentation (never holds authoritative state)
         AgentWorkflowView m_workflowView;
@@ -332,6 +350,13 @@ namespace gladius::ui
         std::vector<ActivityEntry> m_activityLog;
         std::vector<PendingImageAttachment> m_pendingImages;
         std::unordered_map<std::string, CachedTexture> m_previewTextures;
+        /// @brief Steers the run ended without applying; set by the run thread, read by the UI
+        std::vector<agent::SteeringMessage> m_leftoverSteers;
+        /// @brief Set when a run that had steering possible has ended, once per run
+        bool m_steeringClosed = false;
+        /// @brief True when the run that just ended was stopped by the user
+        bool m_runWasStopped = false;
+        mutable std::mutex m_leftoverSteersMutex;
         std::string m_lastError;
         /// @brief Classified m_lastError, shown in the footer with a settings shortcut
         agent::ProviderError m_lastProviderError;

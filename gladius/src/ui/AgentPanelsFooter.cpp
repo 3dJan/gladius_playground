@@ -228,6 +228,19 @@ namespace gladius::ui
             ImGui::SetTooltip("%s", m_graph.goal().empty() ? "" : m_graph.goal().c_str());
         }
 
+        if (std::size_t const queued = m_steering.size(); queued > 0)
+        {
+            ImGui::SameLine();
+            ImGui::TextColored(colorWarn(), "%s Queued: %zu", ICON_FA_COMMENT_DOTS, queued);
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip(
+                  "%zu message%s will reach the agent at the next model turn.\n"
+                  "Attached images stay in the conversation from then on.",
+                  queued, queued == 1 ? "" : "s");
+            }
+        }
+
         if (running)
         {
             // The tool row is empty while a run is active: the controls belong here instead.
@@ -565,7 +578,6 @@ namespace gladius::ui
 
     void AgentPanels::renderComposer(PromptInput::CardMetrics const & metrics)
     {
-        bool const running = m_running.load();
         PromptInput::SlotRenderer const attachments
           = [this](float) { renderPendingAttachments(); };
         PromptInput::ToolbarRenderer const toolbar
@@ -573,8 +585,10 @@ namespace gladius::ui
                 renderComposerToolbar(layout, row);
             };
 
+        // The composer never goes dead: while a run is active a submit steers it instead of
+        // starting a second one.
         PromptInput::RenderResult const promptResult
-          = m_prompt.renderCard(metrics, attachments, toolbar, !running);
+          = m_prompt.renderCard(metrics, attachments, toolbar, true);
         if (m_prompt.isFocused())
         {
             ImGuiIO const & io = ImGui::GetIO();
@@ -585,13 +599,13 @@ namespace gladius::ui
         }
         if (promptResult.sendRequested)
         {
-            startRun(m_prompt.consumeDraft());
+            submitComposer();
         }
-        if (auto const expanded = m_prompt.renderExpandedWindow(!running); expanded)
+        if (auto const expanded = m_prompt.renderExpandedWindow(true); expanded)
         {
             if (expanded->sendRequested)
             {
-                startRun(m_prompt.consumeDraft());
+                submitComposer();
             }
         }
     }

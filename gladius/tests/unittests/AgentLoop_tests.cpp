@@ -1064,6 +1064,199 @@ namespace gladius::agent::tests
         EXPECT_EQ(failedEvent->errorInfo.kind, ProviderErrorKind::InvalidApiKey);
     }
 
+    TEST(AgentLoop, Run_SteerQueuedMidRun_AppendsAsUserMessageAtNextTurn)
+    {
+        // Arrange: the user submits while turn 1's tool calls are executing
+        tools::ToolRegistry registry;
+        SteeringQueue steering;
+        registry.registerSyncTool(
+          {"noop", "Noop", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+          [&](nlohmann::json const &) {
+              // The submit happens exactly where the UI thread would do it: mid-run.
+              (void) steering.push(SteeringMessage{"make the base wider", {}, {}});
+              return nlohmann::json{{"success", true}};
+          });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(CompletionResponse{
+          "Building it.",
+          {ToolCall{"c1", "noop", nlohmann::json::object()}},
+          "tool_calls",
+          true,
+          ""});
+        provider.responses.push(CompletionResponse{"Widened the base.", {}, "stop", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Design a stool");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(loop.run(conv,
+                                                 provider,
+                                                 registry,
+                                                 executor,
+                                                 ctxBuilder,
+                                                 policy,
+                                                 queue,
+                                                 limits,
+                                                 cancel,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 &steering));
+
+        // Assert
+        EXPECT_EQ(res.steersApplied, 1u);
+        EXPECT_TRUE(res.leftoverSteers.empty());
+        // The steer is a plain user message, placed after the complete tool exchange.
+        ASSERT_GE(conv.size(), 5u);
+        auto const & toolResultMsg = conv.messages()[2];
+        EXPECT_TRUE(std::holds_alternative<ToolResult>(toolResultMsg.parts.front()));
+        auto const * steered = std::get_if<TextContent>(&conv.messages()[3].parts.front());
+        ASSERT_NE(steered, nullptr);
+        EXPECT_EQ(conv.messages()[3].role, MessageRole::User);
+        EXPECT_NE(steered->text.find("make the base wider"), std::string::npos);
+        EXPECT_NE(steered->text.find("USER STEERING MESSAGE"), std::string::npos);
+        // It reached the model on the turn after it was submitted, not before.
+        ASSERT_EQ(provider.capturedRequests.size(), 2u);
+        EXPECT_EQ(messageText(provider.capturedRequests[0].messages.back())
+                    .find("make the base wider"),
+                  std::string::npos);
+        bool seen = false;
+        for (auto const & msg : provider.capturedRequests[1].messages)
+        {
+            seen = seen || messageText(msg).find("make the base wider") != std::string::npos;
+        }
+        EXPECT_TRUE(seen);
+    }
+
+    TEST(AgentLoop, Run_SteerArrivesOnFinalTurn_ReturnedAsLeftoverForTheHost)
+    {
+        // Arrange: the design completes inside the tool block, so no further turn consumes the queue
+        tools::ToolRegistry registry;
+        SteeringQueue steering;
+        bool finished = false;
+        registry.registerSyncTool(
+          {"finish_design", "Finish", {{"type", "object"}}, tools::ToolPolicy::DesignGraphModification},
+          [&](nlohmann::json const &) {
+              (void) steering.push(SteeringMessage{"now add a handle", {}, {}});
+              finished = true;
+              return nlohmann::json{{"success", true}};
+          });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(CompletionResponse{
+          "Done.", {ToolCall{"c1", "finish_design", nlohmann::json::object()}}, "tool_calls", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Design a mug");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(loop.run(conv,
+                                                 provider,
+                                                 registry,
+                                                 executor,
+                                                 ctxBuilder,
+                                                 policy,
+                                                 queue,
+                                                 limits,
+                                                 cancel,
+                                                 [&]() { return finished; },
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 &steering));
+
+        // Assert: never silently dropped - the host starts the follow-up run from it
+        EXPECT_TRUE(res.completed);
+        EXPECT_EQ(res.steersApplied, 0u);
+        ASSERT_EQ(res.leftoverSteers.size(), 1u);
+        EXPECT_EQ(res.leftoverSteers[0].text, "now add a handle");
+        EXPECT_TRUE(steering.empty());
+    }
+
+    TEST(AgentLoop, Run_SteerGrowsConversation_SystemPromptStaysIdentical)
+    {
+        // Arrange: the host recomputes `isIncremental` from conversation size, which a steer grows.
+        // Without the per-run latch that flips a block inside the system prompt mid-run.
+        tools::ToolRegistry registry;
+        SteeringQueue steering;
+        (void) steering.push(SteeringMessage{"make it taller", {}, {}});
+        registry.registerSyncTool(
+          {"noop", "Noop", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+          [](nlohmann::json const &) { return nlohmann::json{{"success", true}}; });
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(CompletionResponse{
+          "One change at a time.",
+          {ToolCall{"c1", "noop", nlohmann::json::object()}},
+          "tool_calls",
+          true,
+          ""});
+        provider.responses.push(CompletionResponse{"Done.", {}, "stop", true, ""});
+        auto snapshotCalls = std::make_shared<std::size_t>(0);
+
+        Conversation conv;
+        conv.appendUserText("Design a tower");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        io::CancellationToken cancel;
+        AgentLoop loop;
+
+        // Act
+        auto const res = coro::sync_wait(loop.run(conv,
+                                                 provider,
+                                                 registry,
+                                                 executor,
+                                                 ctxBuilder,
+                                                 policy,
+                                                 queue,
+                                                 limits,
+                                                 cancel,
+                                                 nullptr,
+                                                 nullptr,
+                                                 [snapshotCalls]() {
+                                                     DesignContextSnapshot snap;
+                                                     // The host derives this from conversation size,
+                                                     // so from the second turn on it reports on.
+                                                     snap.isIncremental = ++(*snapshotCalls) > 1;
+                                                     return snap;
+                                                 },
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 &steering));
+
+        // Assert
+        EXPECT_EQ(res.steersApplied, 1u);
+        ASSERT_EQ(provider.capturedRequests.size(), 2u);
+        EXPECT_EQ(provider.capturedRequests[1].systemPrompt,
+                  provider.capturedRequests[0].systemPrompt);
+        EXPECT_EQ(provider.capturedRequests[1].systemPrompt.find("INCREMENTAL MODE"),
+                  std::string::npos);
+    }
+
     TEST(SkillLoader, BuiltInSkills_ContainsModelingAndLibraryReuse)
     {
         SkillLoader loader;

@@ -3,6 +3,7 @@
 #include "AgentWorkflow.h"
 
 #include "../design/DesignGraph.h"
+#include "../design/RequirementEditQueue.h"
 #include "../design/TodoStore.h"
 #include "../tools/CheckpointManager.h"
 
@@ -51,6 +52,24 @@ namespace gladius::ui
             m_document = document;
             m_onDocumentModified = std::move(onDocumentModified);
             m_previewTexture = std::move(previewTexture);
+        }
+
+        /**
+         * @brief Route requirement edits to a staging queue instead of straight into the graph.
+         * @details While the agent runs, the run thread owns the graph; the UI writes to the queue
+         *          and the rows draw through `setRequirementSource`, so the user still sees their
+         *          edit immediately.
+         */
+        void bindRequirementEdits(design::RequirementEditQueue * edits) noexcept
+        {
+            m_requirementEdits = edits;
+        }
+
+        /// @brief Rows the requirements section draws: graph plus staged edits
+        using RequirementSource = std::function<std::vector<design::Requirement>()>;
+        void setRequirementSource(RequirementSource source) noexcept
+        {
+            m_requirementSource = std::move(source);
         }
 
         /// @brief Requirements under Understand, separated by hard/soft and marked as unverified
@@ -124,6 +143,8 @@ namespace gladius::ui
         float noteArrival(std::string const & key, AgentWorkflowAnimationState & animation) const;
 
         design::DesignGraph * m_graph = nullptr;
+        design::RequirementEditQueue * m_requirementEdits = nullptr;
+        RequirementSource m_requirementSource;
         design::TodoStore * m_todos = nullptr;
         tools::CheckpointManager * m_checkpoints = nullptr;
         Document * m_document = nullptr;

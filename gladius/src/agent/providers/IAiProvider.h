@@ -6,6 +6,7 @@
 #include "../../tools/ToolDefinition.h"
 
 #include <coro/coro.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -24,6 +25,13 @@ namespace gladius::agent
         Tools,
         /// @brief Breakpoint after the tool schemas and after the newest message: caches everything
         CacheAll,
+        /**
+         * @brief Breakpoint after the tool schemas and after the last conversation message.
+         * @details The request tail is a regenerated live-context block, so a breakpoint on the
+         *          very last block is a cache write on every turn and is never read back. Marking
+         *          the last conversation message instead caches the growing, append-only history.
+         */
+        ConversationEnd,
     };
 
     /// @brief Configuration for an AI reasoning or image provider
@@ -53,6 +61,12 @@ namespace gladius::agent
         std::string systemPrompt;
         std::vector<Message> messages;
         std::vector<tools::ToolDefinition> tools;
+        /**
+         * @brief How many leading entries of `messages` came from the conversation.
+         * @details Anything after that is per-turn generated state, which the provider must not
+         *          place a cache breakpoint on. Providers must not infer it from the message count.
+         */
+        std::size_t conversationMessages = 0;
     };
 
     /// @brief Token accounting of a single completion, as reported by the provider

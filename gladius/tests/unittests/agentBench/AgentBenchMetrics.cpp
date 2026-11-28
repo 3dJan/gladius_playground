@@ -90,6 +90,8 @@ namespace gladius::agent::bench
                 {"unknownToolCalls", unknownToolCalls},
                 {"truncatedTurns", truncatedTurns},
                 {"emptyTurns", emptyTurns},
+                {"steersApplied", steersApplied},
+                {"leftoverSteers", leftoverSteers},
                 {"providerFailures", providerFailures},
                 {"viewportCaptures", viewportCaptures},
                 {"userQuestionsAsked", userQuestionsAsked},
@@ -226,6 +228,8 @@ namespace gladius::agent::bench
         m_metrics.providerFailures = providerFailures;
         m_metrics.truncatedTurns = result.truncatedTurns;
         m_metrics.emptyTurns = result.emptyTurns;
+        m_metrics.steersApplied = result.steersApplied;
+        m_metrics.leftoverSteers = result.leftoverSteers.size();
         m_metrics.userQuestionsAsked = host.userQuestionsAsked();
         m_metrics.decisions = host.decisions();
         m_metrics.userQuestionsAnswered = std::count_if(m_metrics.decisions.begin(),
