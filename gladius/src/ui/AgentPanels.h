@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../agent/AgentEvent.h"
+#include "../agent/AgentLimitKind.h"
 #include "../agent/AgentLoop.h"
 #include "../agent/AgentRunControl.h"
 #include "../agent/ContextBuilder.h"
@@ -170,6 +171,8 @@ namespace gladius::ui
             float userDecisionHeight = 0.f;
             /// @brief Space for the provider error line, 0 while nothing failed
             float errorLineHeight = 0.f;
+            /// @brief Space for the limit banner, 0 while no execution limit stopped a run
+            float limitBannerHeight = 0.f;
             float totalHeight = 0.f;
             std::size_t controlRows = 1u;
         };
@@ -200,6 +203,14 @@ namespace gladius::ui
         [[nodiscard]] float measureReplyCard() const;
         /// @brief One-line provider failure with a settings shortcut, 0 height when nothing failed
         void renderErrorLine();
+        /// @brief Banner naming the execution limit that parked a run, with continue buttons
+        void renderLimitBanner();
+        /// @brief Height the limit banner needs in the footer, 0 while no limit stopped a run
+        [[nodiscard]] float measureLimitBanner() const;
+        /// @brief Continues a run parked on a limit: fresh segment budget or unlimited from now on
+        void continueAfterLimit(bool unlimitedFromNow);
+        /// @brief "Execution Limits" rows of the settings panel, all unlimited-capable
+        void renderExecutionLimits();
         /// @brief The provider failure in user terms, empty when nothing failed
         [[nodiscard]] std::string errorSummary() const;
         /// @brief Right-aligned autonomy chip: shows the mode and switches it
@@ -324,6 +335,12 @@ namespace gladius::ui
         std::string m_lastError;
         /// @brief Classified m_lastError, shown in the footer with a settings shortcut
         agent::ProviderError m_lastProviderError;
+        /// @brief Limit that parked the current run, empty while no limit was hit
+        std::optional<agent::AgentLimitKind> m_pendingLimitKind;
+        /// @brief Raw limit text of the parked limit, kept for tooltips and diagnostics
+        std::string m_pendingLimitError;
+        /// @brief How much of the budget was used when the parked limit fired
+        std::size_t m_pendingLimitUsed = 0;
         /// @brief Last assistant text of a run that stopped without finishing the design
         std::string m_lastAgentMessage;
         /// @brief True while the agent's last reply expects an answer from the user

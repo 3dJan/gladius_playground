@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AgentLimitKind.h"
 #include "Conversation.h"
 #include "providers/ProviderError.h"
 #include "../tools/ToolDefinition.h"
@@ -76,6 +77,16 @@ namespace gladius::agent
         ProviderError errorInfo;
     };
 
+    struct AgentLimitReachedEvent
+    {
+        /// @brief Which execution limit stopped the run
+        AgentLimitKind kind;
+        /// @brief Raw limit text, kept for diagnostics and old error-string checks
+        std::string error;
+        /// @brief How much of the budget was used when it fired
+        std::size_t used = 0;
+    };
+
     using AgentEvent = std::variant<TextDeltaEvent,
                                     ToolCallStartedEvent,
                                     ToolCallCompletedEvent,
@@ -84,7 +95,8 @@ namespace gladius::agent
                                     ValidationCompletedEvent,
                                     UserDecisionRequiredEvent,
                                     AgentCompletedEvent,
-                                    AgentFailedEvent>;
+                                    AgentFailedEvent,
+                                    AgentLimitReachedEvent>;
 
     /// @brief Thread-safe queue passing agent worker events to the UI/render thread
     class AgentEventQueue

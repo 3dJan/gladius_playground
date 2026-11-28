@@ -69,9 +69,14 @@ namespace gladius::agent
             m_paused.store(true, std::memory_order_release);
         }
 
-        /// @brief Let a paused run continue
-        void resume() noexcept
+        /**
+         * @brief Let a paused run continue.
+         * @param unlimitedFromNow When true, the loop lifts its remaining limits instead of only
+         *        getting a fresh budget for the next segment.
+         */
+        void resume(bool unlimitedFromNow = false) noexcept
         {
+            m_continueUnlimited.store(unlimitedFromNow, std::memory_order_release);
             m_paused.store(false, std::memory_order_release);
             m_cv.notify_all();
             resumeSuspended();
@@ -82,10 +87,17 @@ namespace gladius::agent
             return m_paused.load(std::memory_order_acquire);
         }
 
+        /// @brief Reads and clears the "continue unlimited" intent set by resume()
+        bool consumeContinueUnlimited() noexcept
+        {
+            return m_continueUnlimited.exchange(false, std::memory_order_acq_rel);
+        }
+
         /// @brief Clears pause state and any parked coroutine, e.g. before a new run
         void reset() noexcept
         {
             m_paused.store(false, std::memory_order_release);
+            m_continueUnlimited.store(false, std::memory_order_release);
             m_suspended = {};
         }
 
@@ -107,6 +119,7 @@ namespace gladius::agent
         }
 
         std::atomic<bool> m_paused{false};
+        std::atomic<bool> m_continueUnlimited{false};
         std::mutex m_mutex;
         std::condition_variable m_cv;
         std::coroutine_handle<> m_suspended;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AgentEvent.h"
+#include "AgentLimitKind.h"
 #include "AgentRunControl.h"
 #include "ContextBuilder.h"
 #include "Conversation.h"
@@ -14,19 +15,26 @@
 #include <coro/coro.hpp>
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace gladius::agent
 {
     /// @brief Hard execution limits preventing runaway cost or infinite refinement
+    /// @details A run is unlimited on a dimension by default: long design sessions with local
+    ///          models are the normal case, and a limit that fires parks the run so the user can
+    ///          continue it instead of failing it.
     struct AgentLimits
     {
-        /// @brief Model-turn budget for a single run; a non-positive value means unlimited
-        int maxModelTurns = 64;
-        std::size_t maxToolCalls = 256;
-        std::size_t maxViewportReviews = 16;
-        /// @brief Wall-clock budget for a single run; a non-positive duration means unlimited
-        std::chrono::milliseconds maxWallTime{std::chrono::minutes(15)};
+        /// @brief Model-turn budget per segment; 0 or less means unlimited
+        int maxModelTurns = 0;
+        /// @brief Tool-call budget per segment; 0 means unlimited
+        std::size_t maxToolCalls = 0;
+        /// @brief Viewport images a segment may request; 0 means unlimited
+        std::size_t maxViewportReviews = 0;
+        /// @brief Wall-clock budget per segment; 0 or less means unlimited
+        std::chrono::milliseconds maxWallTime{0};
     };
 
     /// @brief Outcome of an AgentLoop execution
@@ -56,6 +64,9 @@ namespace gladius::agent
         using ConfirmationCallback =
           std::function<coro::task<bool>(tools::ToolDefinition const &, nlohmann::json const &)>;
         using SnapshotProvider = std::function<DesignContextSnapshot()>;
+        /// @brief Reports a host-side limit the loop does not count itself, with the amount used
+        using SecondaryLimitProbe =
+          std::function<std::optional<std::pair<AgentLimitKind, std::size_t>>()>;
 
         [[nodiscard]] coro::task<AgentRunResult> run(
           Conversation & conversation,
@@ -71,6 +82,7 @@ namespace gladius::agent
           ConfirmationCallback confirmCallback = nullptr,
           SnapshotProvider snapshotProvider = nullptr,
           trace::AgentTraceRecorder * traceRecorder = nullptr,
-          AgentRunControl * runControl = nullptr);
+          AgentRunControl * runControl = nullptr,
+          SecondaryLimitProbe secondaryLimitProbe = nullptr);
     };
 } // namespace gladius::agent

@@ -240,7 +240,7 @@ namespace gladius::agent
           &m_todos,
           &knowledge,
           /*autoCompleteDesignGraphOnFinish=*/false,
-          /*maxViewportReviews=*/1};
+          /*maxViewportReviews=*/config.componentLimits.maxViewportReviews};
 
         tools::ToolRegistry registry;
         design::registerDesignTools(registry, ctx, design::DesignToolSurface::Component);
@@ -363,12 +363,13 @@ namespace gladius::agent
                 result.error = "Orchestrator cancelled";
                 return result;
             }
-            if (result.totalModelTurns >= config.maxTotalModelTurns)
+            if (config.maxTotalModelTurns != 0 && result.totalModelTurns >= config.maxTotalModelTurns)
             {
                 result.error = "Global model turn budget exceeded";
                 return result;
             }
-            if (std::chrono::steady_clock::now() - startTime >= config.maxTotalWallTime)
+            if (config.maxTotalWallTime.count() > 0
+                && std::chrono::steady_clock::now() - startTime >= config.maxTotalWallTime)
             {
                 result.error = "Global wall time budget exceeded";
                 return result;

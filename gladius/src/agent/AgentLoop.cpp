@@ -182,7 +182,8 @@ namespace gladius::agent
                                               ConfirmationCallback confirmCallback,
                                               SnapshotProvider snapshotProvider,
                                               trace::AgentTraceRecorder * traceRecorder,
-                                              AgentRunControl * runControl)
+                                              AgentRunControl * runControl,
+                                              SecondaryLimitProbe secondaryLimitProbe)
     {
         AgentRunResult result;
         // Failures reach the UI in both forms: the raw text for diagnostics and a classified
@@ -191,7 +192,56 @@ namespace gladius::agent
             eventQueue.push(
               AgentFailedEvent{error, classifyErrorText(error, false, cancelled)});
         };
-        auto const startTime = std::chrono::steady_clock::now();
+        // Segment budgets: a limit that fires parks the run instead of failing it, and "Continue"
+        // starts a fresh segment while keeping the cumulative statistics in `result`.
+        int turnCap = limits.maxModelTurns;
+        std::size_t toolCap = limits.maxToolCalls;
+        std::size_t turnSegmentBase = 0;
+        std::size_t toolSegmentBase = 0;
+        auto segmentStartTime = std::chrono::steady_clock::now();
+        std::chrono::milliseconds wallCap = limits.maxWallTime;
+        auto turnBudgetAvailable = [&]() {
+            return turnCap <= 0
+                   || result.modelTurns - turnSegmentBase < static_cast<std::size_t>(turnCap);
+        };
+        // Applies the user's choice after a parked limit: unlimited from now on, or a new segment.
+        auto applyContinue = [&]() {
+            if (runControl != nullptr && runControl->consumeContinueUnlimited())
+            {
+                turnCap = 0;
+                toolCap = 0;
+                wallCap = std::chrono::milliseconds::zero();
+            }
+            turnSegmentBase = result.modelTurns;
+            toolSegmentBase = result.toolCalls;
+            segmentStartTime = std::chrono::steady_clock::now();
+        };
+        // A limit with an interactive run parks for a continue decision; without one, e.g. in the
+        // orchestrator or bench, it fails the run exactly as before. Returns true to end the run.
+        auto hitLimit = [&](AgentLimitKind kind,
+                            std::string error,
+                            std::size_t used) -> coro::task<bool> {
+            result.error = std::move(error);
+            if (runControl == nullptr)
+            {
+                pushFailure(result.error);
+                co_return true;
+            }
+            eventQueue.push(AgentLimitReachedEvent{kind, result.error, used});
+            runControl->requestPause();
+            co_await runControl->waitForResume(cancellation);
+            applyContinue();
+            if (cancellation.isCancelled())
+            {
+                result.cancelled = true;
+                result.error = "Agent run cancelled";
+                pushFailure(result.error, true);
+                co_return true;
+            }
+            // Continuing is not a failure: the limit text only stays in the event.
+            result.error.clear();
+            co_return false;
+        };
         std::size_t autonomousNudges = 0;
         constexpr std::size_t kMaxAutonomousNudges = 3;
         // An empty completion is a provider fault, not an agent decision, so it gets a couple of
@@ -209,9 +259,18 @@ namespace gladius::agent
         // avoidable cost is attributed to a harness problem instead of to the model.
         bool previousTurnHadFailure = false;
 
-        while (limits.maxModelTurns <= 0
-               || result.modelTurns < static_cast<std::size_t>(limits.maxModelTurns))
+        while (true)
         {
+            if (!turnBudgetAvailable())
+            {
+                if (co_await hitLimit(AgentLimitKind::ModelTurns,
+                                      "Maximum model turn limit reached",
+                                      result.modelTurns - turnSegmentBase))
+                {
+                    co_return result;
+                }
+            }
+
             // Pause is cooperative: it takes effect between turns and between tool calls, never
             // in the middle of a tool that is already mutating the document.
             if (runControl != nullptr)
@@ -227,12 +286,30 @@ namespace gladius::agent
                 co_return result;
             }
 
-            if (limits.maxWallTime.count() > 0
-                && std::chrono::steady_clock::now() - startTime > limits.maxWallTime)
+            if (wallCap.count() > 0
+                && std::chrono::steady_clock::now() - segmentStartTime > wallCap)
             {
-                result.error = "Agent wall-time limit reached";
-                pushFailure(result.error);
-                co_return result;
+                auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - segmentStartTime);
+                if (co_await hitLimit(AgentLimitKind::WallTime, "Agent wall-time limit reached",
+                                      static_cast<std::size_t>(elapsed.count())))
+                {
+                    co_return result;
+                }
+            }
+
+            if (secondaryLimitProbe)
+            {
+                if (auto const hit = secondaryLimitProbe(); hit.has_value())
+                {
+                    if (co_await hitLimit(hit->first,
+                                          std::string("Maximum ") + agentLimitLabel(hit->first)
+                                            + " limit reached",
+                                          hit->second))
+                    {
+                        co_return result;
+                    }
+                }
             }
 
             DesignContextSnapshot const snapshot =
@@ -304,9 +381,7 @@ namespace gladius::agent
                 ++result.emptyTurns;
                 bool const canRetry = emptyCompletionRetries < kMaxEmptyCompletionRetries
                                       && !becameDesignComplete()
-                                      && (limits.maxModelTurns <= 0
-                                          || result.modelTurns
-                                               < static_cast<std::size_t>(limits.maxModelTurns));
+                                      && turnBudgetAvailable();
                 if (canRetry)
                 {
                     ++emptyCompletionRetries;
@@ -393,11 +468,14 @@ namespace gladius::agent
                     co_return result;
                 }
 
-                if (result.toolCalls >= limits.maxToolCalls)
+                if (toolCap != 0 && result.toolCalls - toolSegmentBase >= toolCap)
                 {
-                    result.error = "Maximum tool-call limit reached";
-                    pushFailure(result.error);
-                    co_return result;
+                    if (co_await hitLimit(AgentLimitKind::ToolCalls,
+                                          "Maximum tool-call limit reached",
+                                          result.toolCalls - toolSegmentBase))
+                    {
+                        co_return result;
+                    }
                 }
 
                 ++result.toolCalls;
@@ -511,9 +589,5 @@ namespace gladius::agent
             }
             previousTurnHadFailure = turnHadFailure;
         }
-
-        result.error = "Maximum model turn limit reached";
-        pushFailure(result.error);
-        co_return result;
     }
 } // namespace gladius::agent

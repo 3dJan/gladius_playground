@@ -6,8 +6,10 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <chrono>
+#include <optional>
 #include <queue>
 #include <thread>
+#include <utility>
 #include <variant>
 
 namespace gladius::agent::tests
@@ -387,6 +389,179 @@ namespace gladius::agent::tests
         EXPECT_TRUE(res.completed);
         EXPECT_TRUE(finished);
         EXPECT_TRUE(res.error.empty());
+    }
+
+    TEST(AgentLimits, Defaults_AreUnlimited)
+    {
+        // Arrange & Act
+        AgentLimits const limits;
+
+        // Assert (long design runs must not be cut short out of the box)
+        EXPECT_EQ(limits.maxModelTurns, 0);
+        EXPECT_EQ(limits.maxToolCalls, 0u);
+        EXPECT_EQ(limits.maxViewportReviews, 0u);
+        EXPECT_EQ(limits.maxWallTime, std::chrono::milliseconds::zero());
+    }
+
+    namespace
+    {
+        /// @brief Waits for the loop to park on a limit and answers it from another thread
+        void resumeWhenParked(AgentRunControl & runControl, bool unlimitedFromNow)
+        {
+            while (!runControl.isPaused())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            runControl.resume(unlimitedFromNow);
+        }
+
+        /// @brief First limit event in the queue, if any
+        std::optional<AgentLimitReachedEvent> limitEvent(AgentEventQueue & queue)
+        {
+            for (auto const & event : queue.drain())
+            {
+                if (auto const * hit = std::get_if<AgentLimitReachedEvent>(&event))
+                {
+                    return *hit;
+                }
+            }
+            return std::nullopt;
+        }
+
+        void registerPingAndFinish(tools::ToolRegistry & registry, bool & finished)
+        {
+            registry.registerSyncTool(
+              {"ping", "Ping", {{"type", "object"}}, tools::ToolPolicy::ReadOnly},
+              [](nlohmann::json const &) { return nlohmann::json{{"success", true}}; });
+            registry.registerSyncTool(
+              {"finish_design", "Finish", {{"type", "object"}}, tools::ToolPolicy::DesignGraphModification},
+              [&](nlohmann::json const &) {
+                  finished = true;
+                  return nlohmann::json{{"success", true}};
+              });
+        }
+    } // namespace
+
+    TEST(AgentLoop, Run_ModelTurnLimitWithRunControl_ParksAndContinues)
+    {
+        // Arrange (a parked limit is a user decision, not a failed provider call)
+        tools::ToolRegistry registry;
+        bool finished = false;
+        registerPingAndFinish(registry, finished);
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(
+          CompletionResponse{"Turn 1", {ToolCall{"c1", "ping", {}}}, "tool_calls", true, ""});
+        provider.responses.push(
+          CompletionResponse{"Turn 2", {ToolCall{"c2", "ping", {}}}, "tool_calls", true, ""});
+        provider.responses.push(CompletionResponse{"Done", {}, "stop", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Loop");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        limits.maxModelTurns = 2;
+        io::CancellationToken cancel;
+        AgentRunControl runControl;
+        AgentLoop loop;
+
+        // Act (helper thread continues the parked run with a fresh segment budget)
+        std::thread resumper([&runControl]() { resumeWhenParked(runControl, false); });
+        auto const res = coro::sync_wait(loop.run(
+          conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel,
+          [&]() { return finished; }, nullptr, nullptr, nullptr, &runControl));
+        resumper.join();
+
+        // Assert
+        auto const hit = limitEvent(queue);
+        ASSERT_TRUE(hit.has_value());
+        EXPECT_EQ(hit->kind, AgentLimitKind::ModelTurns);
+        EXPECT_EQ(hit->used, 2u);
+        EXPECT_TRUE(res.completed);
+        EXPECT_TRUE(res.error.empty());
+        EXPECT_GT(res.modelTurns, static_cast<std::size_t>(limits.maxModelTurns));
+    }
+
+    TEST(AgentLoop, Run_ContinueUnlimited_LiftsRemainingLimits)
+    {
+        // Arrange (needs far more turns than the segment budget to prove the caps are gone)
+        tools::ToolRegistry registry;
+        bool finished = false;
+        registerPingAndFinish(registry, finished);
+        tools::ToolExecutor executor(registry);
+        SlowProvider provider;
+        provider.turnsBeforeFinish = 70;
+        Conversation conv;
+        conv.appendUserText("Keep going");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        limits.maxModelTurns = 3;
+        io::CancellationToken cancel;
+        AgentRunControl runControl;
+        AgentLoop loop;
+
+        // Act
+        std::thread resumper([&runControl]() { resumeWhenParked(runControl, true); });
+        auto const res = coro::sync_wait(loop.run(
+          conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel,
+          [&]() { return finished; }, nullptr, nullptr, nullptr, &runControl));
+        resumper.join();
+
+        // Assert
+        EXPECT_TRUE(res.completed);
+        EXPECT_TRUE(finished);
+        EXPECT_TRUE(res.error.empty());
+        EXPECT_GE(res.modelTurns, 70u);
+    }
+
+    TEST(AgentLoop, Run_CancelledWhileParkedOnLimit_ReportsCancellation)
+    {
+        // Arrange
+        tools::ToolRegistry registry;
+        bool finished = false;
+        registerPingAndFinish(registry, finished);
+        tools::ToolExecutor executor(registry);
+
+        ScriptedProvider provider;
+        provider.responses.push(
+          CompletionResponse{"Turn 1", {ToolCall{"c1", "ping", {}}}, "tool_calls", true, ""});
+        provider.responses.push(
+          CompletionResponse{"Turn 2", {ToolCall{"c2", "ping", {}}}, "tool_calls", true, ""});
+
+        Conversation conv;
+        conv.appendUserText("Loop");
+        ContextBuilder ctxBuilder;
+        PermissionPolicy policy;
+        AgentEventQueue queue;
+        AgentLimits limits;
+        limits.maxModelTurns = 2;
+        io::CancellationToken cancel;
+        AgentRunControl runControl;
+        AgentLoop loop;
+
+        // Act (the user stops the run while it waits for a continue decision)
+        std::thread canceller([&runControl, &cancel]() {
+            while (!runControl.isPaused())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            cancel.requestCancellation();
+            runControl.resume(false);
+        });
+        auto const res = coro::sync_wait(loop.run(
+          conv, provider, registry, executor, ctxBuilder, policy, queue, limits, cancel,
+          [&]() { return finished; }, nullptr, nullptr, nullptr, &runControl));
+        canceller.join();
+
+        // Assert
+        EXPECT_TRUE(res.cancelled);
+        EXPECT_FALSE(res.completed);
+        EXPECT_EQ(res.error, "Agent run cancelled");
     }
 
     TEST(AgentLoop, Run_CaptureViewportTool_AttachesImageContentAndStripsBase64)

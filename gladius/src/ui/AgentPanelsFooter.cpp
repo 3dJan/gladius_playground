@@ -14,6 +14,7 @@
 #include <imgui_stdlib.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -21,6 +22,23 @@
 
 namespace gladius::ui
 {
+    namespace
+    {
+        /// @brief Banner continue button with its explanation tooltip
+        bool limitContinueButton(char const * label, char const * tooltip)
+        {
+            if (!ImGui::Button(label))
+            {
+                return false;
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("%s", tooltip);
+            }
+            return true;
+        }
+    } // namespace
+
     float AgentPanels::measureControlRowHeight() const
     {
         // Compact tool buttons are square and font-derived, so the row keeps its proportions at
@@ -116,12 +134,14 @@ namespace gladius::ui
                                       * ImGui::GetTextLineHeightWithSpacing();
         metrics.replyCardHeight = measureReplyCard();
         metrics.userDecisionHeight = m_userDecisions.peek() ? userDecisionHeight() : 0.f;
+        metrics.limitBannerHeight = measureLimitBanner();
 
         // The workflow keeps a minimum height; whatever is left belongs to the composer.
         constexpr float workflowMinHeight = 120.f;
         float const overhead = metrics.statusLineHeight + metrics.controlRowsHeight
                              + metrics.confirmationHeight + metrics.userDecisionHeight
-                             + metrics.errorLineHeight + metrics.replyCardHeight;
+                             + metrics.errorLineHeight + metrics.replyCardHeight
+                             + metrics.limitBannerHeight;
         float const available = std::max(0.f, ImGui::GetContentRegionAvail().y - workflowMinHeight);
         metrics.composer = m_prompt.measureCard(std::max(0.f, available - overhead),
                                                 m_pendingImages.size());
@@ -154,7 +174,12 @@ namespace gladius::ui
         // controls sit inline on the right so the line is the single place to steer a running job.
         char const * statusText = nullptr;
         ImVec4 statusColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-        if (running && paused)
+        if (running && m_pendingLimitKind.has_value())
+        {
+            statusText = "Limit reached";
+            statusColor = colorWarn();
+        }
+        else if (running && paused)
         {
             statusText = "Paused";
             statusColor = colorWarn();
@@ -216,7 +241,16 @@ namespace gladius::ui
                 ImGui::NewLine();
             }
             ImGui::SameLine(textMaxX);
-            if (paused)
+            if (m_pendingLimitKind.has_value())
+            {
+                // Parked on a limit: the banner carries the two continue choices, so this
+                // button is the plain one ("same limits for the next segment").
+                if (iconButton(ICON_FA_PLAY, "Continue with a fresh budget for this segment"))
+                {
+                    continueAfterLimit(false);
+                }
+            }
+            else if (paused)
             {
                 if (iconButton(ICON_FA_PLAY, "Resume the current run"))
                 {
@@ -369,6 +403,9 @@ namespace gladius::ui
         m_activityLog.clear();
         m_lastError.clear();
         m_lastProviderError = {};
+        m_pendingLimitKind.reset();
+        m_pendingLimitError.clear();
+        m_pendingLimitUsed = 0;
         m_lastAgentMessage.clear();
         m_awaitingUserReply = false;
         m_replyExpanded = false;
@@ -569,7 +606,77 @@ namespace gladius::ui
         renderConfirmation();
         renderUserDecision();
         renderReplyCard();
+        renderLimitBanner();
         renderComposer(metrics.composer);
+    }
+
+    float AgentPanels::measureLimitBanner() const
+    {
+        if (!m_pendingLimitKind.has_value())
+        {
+            return 0.f;
+        }
+        // One wrapped text line plus the button row.
+        float const lines = std::max(
+          1.f,
+          std::ceil(ImGui::CalcTextSize(agent::agentLimitLabel(*m_pendingLimitKind), nullptr, true)
+                      .x / std::max(1.f, ImGui::GetContentRegionAvail().x)));
+        return lines * ImGui::GetTextLineHeightWithSpacing() + ImGui::GetFrameHeight()
+             + ImGui::GetStyle().ItemSpacing.y;
+    }
+
+    void AgentPanels::renderLimitBanner()
+    {
+        if (!m_pendingLimitKind.has_value())
+        {
+            return;
+        }
+        // A limit is not a provider failure: say exactly which budget ran out and offer the two
+        // ways to go on. The run is parked in the loop, waiting on the run control.
+        ImGui::PushTextWrapPos(ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x);
+        ImGui::TextColored(colorWarn(), "%s limit reached (%zu used)",
+                           agent::agentLimitLabel(*m_pendingLimitKind), m_pendingLimitUsed);
+        ImGui::PopTextWrapPos();
+        if (!m_pendingLimitError.empty() && ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("%s", m_pendingLimitError.c_str());
+        }
+
+        if (limitContinueButton("Continue", "Finish this segment with a fresh budget"))
+        {
+            continueAfterLimit(false);
+        }
+        ImGui::SameLine();
+        if (limitContinueButton("Continue unlimited",
+                                "Drop every limit for the rest of this run"))
+        {
+            continueAfterLimit(true);
+        }
+    }
+
+    void AgentPanels::continueAfterLimit(bool unlimitedFromNow)
+    {
+        // Viewport reviews are counted in the tool context, which the loop cannot reset: give the
+        // new segment a fresh budget, or lift the cap entirely when continuing unlimited.
+        if (m_toolCtx != nullptr)
+        {
+            m_toolCtx->viewportReviewsUsed = 0;
+            if (unlimitedFromNow)
+            {
+                m_toolCtx->maxViewportReviews = 0;
+            }
+        }
+        if (unlimitedFromNow)
+        {
+            m_limits.maxModelTurns = 0;
+            m_limits.maxToolCalls = 0;
+            m_limits.maxViewportReviews = 0;
+            m_limits.maxWallTime = std::chrono::milliseconds(0);
+        }
+        m_pendingLimitKind.reset();
+        m_pendingLimitError.clear();
+        m_pendingLimitUsed = 0;
+        m_runControl.resume(unlimitedFromNow);
     }
 
 } // namespace gladius::ui

@@ -44,8 +44,8 @@ namespace gladius::ui
     namespace
     {
         constexpr char const * kCredentialService = "gladius.design_agent";
-        constexpr int kDefaultWallTimeMinutes = 15;
-        constexpr int kDefaultMaxModelTurns = 64;
+        constexpr int kDefaultWallTimeMinutes = 0;
+        constexpr int kDefaultMaxModelTurns = 0;
 
         std::chrono::milliseconds wallTimeFromMinutes(int minutes)
         {
@@ -440,6 +440,9 @@ namespace gladius::ui
         m_activityLog.clear();
         m_lastError.clear();
         m_lastProviderError = {};
+        m_pendingLimitKind.reset();
+        m_pendingLimitError.clear();
+        m_pendingLimitUsed = 0;
         m_lastAgentMessage.clear();
         m_awaitingUserReply = false;
         m_replyExpanded = false;
@@ -639,6 +642,11 @@ namespace gladius::ui
             "Agent", "maxWallTimeMinutes", kDefaultWallTimeMinutes));
         m_limits.maxModelTurns =
           std::max(0, m_configManager->getValue<int>("Agent", "maxModelTurns", kDefaultMaxModelTurns));
+        m_limits.maxToolCalls =
+          std::max(0, m_configManager->getValue<int>("Agent", "maxToolCalls", 0));
+        m_limits.maxViewportReviews =
+          static_cast<std::size_t>(std::max(0,
+            m_configManager->getValue<int>("Agent", "maxViewportReviews", 0)));
 
         m_maxOutputTokens = std::max(1,
           m_configManager->getValue<int>("Agent", "maxOutputTokens", kDefaultMaxOutputTokens));
@@ -852,6 +860,10 @@ namespace gladius::ui
             m_configManager->setValue<int>(
               "Agent", "maxWallTimeMinutes", minutesFromWallTime(m_limits.maxWallTime));
             m_configManager->setValue<int>("Agent", "maxModelTurns", m_limits.maxModelTurns);
+            m_configManager->setValue<int>(
+              "Agent", "maxToolCalls", static_cast<int>(m_limits.maxToolCalls));
+            m_configManager->setValue<int>(
+              "Agent", "maxViewportReviews", static_cast<int>(m_limits.maxViewportReviews));
             m_configManager->setValue<int>("Agent", "maxOutputTokens", m_maxOutputTokens);
             m_configManager->setValue<int>("Agent", "thinkingTokens", m_thinkingTokens);
             m_configManager->setValue<int>(
@@ -1140,6 +1152,16 @@ namespace gladius::ui
                 m_awaitingUserReply = ac->awaitingUserReply;
                 saveSessionState();
             }
+            else if (auto const * lim = std::get_if<agent::AgentLimitReachedEvent>(&ev))
+            {
+                // The run parks on the worker; the banner offers the continue choices. This is not
+                // an error, so m_lastError stays untouched and keeps showing real failures only.
+                m_activeToolName.clear();
+                m_streamingBuffer.clear();
+                m_pendingLimitKind = lim->kind;
+                m_pendingLimitError = lim->error;
+                m_pendingLimitUsed = lim->used;
+            }
             else if (auto const * af = std::get_if<agent::AgentFailedEvent>(&ev))
             {
                 m_activeToolName.clear();
@@ -1258,6 +1280,9 @@ namespace gladius::ui
 
         m_lastError.clear();
         m_lastProviderError = {};
+        m_pendingLimitKind.reset();
+        m_pendingLimitError.clear();
+        m_pendingLimitUsed = 0;
         m_lastAgentMessage.clear();
         m_awaitingUserReply = false;
         m_replyExpanded = false;
@@ -1272,6 +1297,8 @@ namespace gladius::ui
         if (m_toolCtx)
         {
             m_toolCtx->userQuestionsAsked = 0;
+            m_toolCtx->viewportReviewsUsed = 0;
+            m_toolCtx->maxViewportReviews = m_limits.maxViewportReviews;
         }
 
         // A prompt that arrives after the design was finished extends the requirements: re-open the
@@ -1418,7 +1445,16 @@ namespace gladius::ui
                 },
                 [this, promptForKnowledge]() { return buildContextSnapshot(promptForKnowledge); },
                 trace.get(),
-                &m_runControl));
+                &m_runControl,
+                [this]() -> std::optional<std::pair<agent::AgentLimitKind, std::size_t>> {
+                    if (m_toolCtx != nullptr && m_toolCtx->maxViewportReviews != 0
+                        && m_toolCtx->viewportReviewsUsed >= m_toolCtx->maxViewportReviews)
+                    {
+                        return std::make_pair(agent::AgentLimitKind::ViewportReviews,
+                                              m_toolCtx->viewportReviewsUsed);
+                    }
+                    return std::nullopt;
+                }));
               if (trace != nullptr)
               {
                   finishSessionTrace(*trace);
@@ -1519,7 +1555,16 @@ namespace gladius::ui
           },
           [this, promptForKnowledge]() { return buildContextSnapshot(promptForKnowledge); },
           nullptr,
-          &m_runControl);
+          &m_runControl,
+          [this]() -> std::optional<std::pair<agent::AgentLimitKind, std::size_t>> {
+              if (m_toolCtx != nullptr && m_toolCtx->maxViewportReviews != 0
+                  && m_toolCtx->viewportReviewsUsed >= m_toolCtx->maxViewportReviews)
+              {
+                  return std::make_pair(agent::AgentLimitKind::ViewportReviews,
+                                        m_toolCtx->viewportReviewsUsed);
+              }
+              return std::nullopt;
+          });
         m_running.store(false);
         co_return;
     }
@@ -1530,6 +1575,9 @@ namespace gladius::ui
         m_cancellation.requestCancellation();
         // A paused loop parks on the run thread; release it before joining or cancelling.
         m_runControl.resume();
+        m_pendingLimitKind.reset();
+        m_pendingLimitError.clear();
+        m_pendingLimitUsed = 0;
         {
             std::lock_guard<std::mutex> lock(m_confirmMutex);
             m_confirmationResolved = true;
@@ -1761,55 +1809,7 @@ namespace gladius::ui
 
         ImGui::Separator();
         ImGui::Text("Execution Limits");
-        bool unlimitedTurns = m_limits.maxModelTurns <= 0;
-        if (ImGui::Checkbox("Unlimited model turns", &unlimitedTurns))
-        {
-            m_limits.maxModelTurns = unlimitedTurns ? 0 : kDefaultMaxModelTurns;
-            if (m_configManager != nullptr)
-            {
-                m_configManager->setValue<int>("Agent", "maxModelTurns", m_limits.maxModelTurns);
-                m_configManager->save();
-            }
-        }
-        if (!unlimitedTurns)
-        {
-            int maxTurns = m_limits.maxModelTurns;
-            if (ImGui::SliderInt("Max model turns", &maxTurns, 1, 1024))
-            {
-                m_limits.maxModelTurns = maxTurns;
-                if (m_configManager != nullptr)
-                {
-                    m_configManager->setValue<int>("Agent", "maxModelTurns", maxTurns);
-                    m_configManager->save();
-                }
-            }
-        }
-        bool unlimitedWallTime = m_limits.maxWallTime.count() <= 0;
-        if (ImGui::Checkbox("Unlimited wall time", &unlimitedWallTime))
-        {
-            m_limits.maxWallTime =
-              unlimitedWallTime ? std::chrono::milliseconds(0)
-                                : wallTimeFromMinutes(kDefaultWallTimeMinutes);
-            if (m_configManager != nullptr)
-            {
-                m_configManager->setValue<int>(
-                  "Agent", "maxWallTimeMinutes", minutesFromWallTime(m_limits.maxWallTime));
-                m_configManager->save();
-            }
-        }
-        if (!unlimitedWallTime)
-        {
-            int wallTimeMinutes = minutesFromWallTime(m_limits.maxWallTime);
-            if (ImGui::SliderInt("Wall time limit", &wallTimeMinutes, 1, 720, "%d min"))
-            {
-                m_limits.maxWallTime = wallTimeFromMinutes(wallTimeMinutes);
-                if (m_configManager != nullptr)
-                {
-                    m_configManager->setValue<int>("Agent", "maxWallTimeMinutes", wallTimeMinutes);
-                    m_configManager->save();
-                }
-            }
-        }
+        renderExecutionLimits();
 
         ImGui::Separator();
         ImGui::Text("Per-request Tunables");
